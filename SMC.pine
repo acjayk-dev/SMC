@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.9 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.10 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -24,8 +24,12 @@
 //       el tier genérico BUY/ELITE BUY (pin bar/outside bar + score, sin POI institucional específico) y se
 //       promovieron a señal completa (SL/TP) Wyckoff Spring/UTAD, Silver Bullet Pattern, y una nueva señal
 //       de Sweep de liquidez + Divergencia de Delta Acumulado.
+// v6.10: Settings actualizados acorde a v6.9 — "Show PA BUY/SELL Signals" renombrado a "Use PA Pattern as
+//        Confluence" (ya no dispara alerta propia); nuevos toggles independientes "Señal Wyckoff
+//        Spring/UTAD", "Señal Silver Bullet Pattern" y "Señal Sweep + Delta Divergence" en 🎯 UNIFIED
+//        SIGNALS, separados de sus toggles visuales en 🔑 ICT KEY LEVELS.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.9 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.9", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.10 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.10", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -226,8 +230,8 @@ showVelezCC    = input.bool(true,  "  Show Color Change", group=grpPat)
 showVelezRBI   = input.bool(true,  "  Show RBI/GBI",      group=grpPat)
 showVelez358   = input.bool(true,  "  Show Rule 3-5-8",   group=grpPat)
 
-// ── 5. UNIFIED SIGNAL ENGINE ──
-grpSignal      = "═══ 🎯 UNIFIED SIGNALS ═══"
+// ── 5. UNIFIED SIGNAL ENGINE (v6.9: solo patrones con nombre en metodología institucional) ──
+grpSignal      = "═══ 🎯 UNIFIED SIGNALS (Institutional Patterns Only) ═══"
 showMitigation = input.bool(true,  "Show Entry on OB Mitigation",   group=grpSignal)
 requireDiscount= input.bool(true,  "Require Discount for Buys",  group=grpSignal)
 requirePremium = input.bool(true,  "Require Premium for Sells",  group=grpSignal)
@@ -244,15 +248,21 @@ rsiLen         = input.int(14, "RSI Length",    group=grpSignal)
 rsiOS          = input.int(30, "RSI Oversold",  group=grpSignal)
 rsiOB_         = input.int(70, "RSI Overbought", group=grpSignal)
 showTP2        = input.bool(true, "Show TP1 + TP2 lines", group=grpSignal)
-showPASignals  = input.bool(true,  "Show PA BUY/SELL Signals",      group=grpSignal)
+showPASignals  = input.bool(true,  "Use PA Pattern as Confluence (Diamond/OB Entry)", group=grpSignal,
+                  tooltip="v6.9: ya no dispara una alerta de trade propia — el tier genérico BUY/ELITE BUY fue eliminado por no corresponder a un patrón institucional con nombre (era pin bar/outside bar + score, sin POI específico). Sigue siendo un filtro interno para validar entradas ⬡ DIAMOND y de mitigación de Order Block (🏦 INST).")
 showVWAPBounce = input.bool(true,  "Show VWAP Bounce Signals",      group=grpSignal)
 showVWAPRev    = input.bool(true,  "Show VWAP Reversion Signals",   group=grpSignal)
-showOTESignals = input.bool(true,  "Show OTE Entry Signals",        group=grpSignal)
-showOFSignals  = input.bool(true,  "Show Order Flow Signals (OF BUY/SELL)", group=grpSignal)
+showOTESignals = input.bool(true,  "Show OTE Entry Signals",        group=grpSignal, tooltip="ICT Optimal Trade Entry — retroceso 62-79% Fib del leg confirmado por BOS/CHoCH.")
+showOFSignals  = input.bool(true,  "Show Order Flow Signals (OF BUY/SELL)", group=grpSignal, tooltip="Absorción + Agotamiento + Iniciación.")
 ofAbsorpVolMult   = input.float(1.4, "  OF: Absorption Min Volume (×Avg)", minval=1.0, step=0.1, group=grpSignal, tooltip="Absorción institucional = volumen alto SIN progreso de precio. Exige volumen mínimo en la vela que absorbe.")
 ofAbsorpRangeMult = input.float(0.8, "  OF: Absorption Max Range (×ATR)", minval=0.2, step=0.1, group=grpSignal, tooltip="Rango máximo de la vela de absorción — alto volumen + rango contenido = esfuerzo vs. resultado.")
 paMaxSignalGap = input.int(4, "Min Bars Between Signals", minval=1, maxval=30, group=grpSignal)
-showSweepSignal= input.bool(true,  "Señal Sweep EQH/EQL",          group=grpSignal)
+showSweepSignal= input.bool(true,  "Señal Sweep EQH/EQL",          group=grpSignal, tooltip="ICT Judas Swing / Turtle Soup — barrida de liquidez + reclaim.")
+// v6.9: toggles nuevos — antes Wyckoff Spring/UTAD y Silver Bullet Pattern se detectaban correctamente pero
+// no llegaban a ser una señal de trade con SL/TP; Sweep+Divergencia es una señal nueva que no existía.
+showWyckoffSignal  = input.bool(true, "Señal Wyckoff Spring/UTAD",  group=grpSignal, tooltip="Reversión Wyckoff confirmada en Trading Range (ADX bajo) — requiere 'Show Wyckoff Phases' activo en ICT Key Levels para dibujar la etiqueta.")
+showSBSignal       = input.bool(true, "Señal Silver Bullet Pattern", group=grpSignal, tooltip="Kill Zone + sweep + FVG presente + confirmación PA — requiere 'Show Silver Bullet Windows' activo en ICT Key Levels.")
+showSweepDivSignal = input.bool(true, "Señal Sweep + Delta Divergence", group=grpSignal, tooltip="Barrida de liquidez no confirmada por el Delta Acumulado (absorción) + vela de rechazo.")
 paRequireNoChop= input.bool(true,  "Filter Choppy Market (ADX)",   group=grpSignal)
 paAdxLen       = input.int(14,     "  ADX Length", minval=5,        group=grpSignal)
 paAdxMin       = input.int(22,     "  Min ADX", minval=10, maxval=40, group=grpSignal)
@@ -778,10 +788,12 @@ sbPatternBear := isSilverBullet and sbSweepHighDone and (pBarDn or engulfBear) a
 if showSilverBullet and barstate.isconfirmed
     if sbPatternBull
         label.new(bar_index, low, "🎯 SB BUY\nSweep+FVG", color=#C0CA33, textcolor=color.black, style=label.style_label_up, size=size.tiny)
-        f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+        if showSBSignal
+            f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
     if sbPatternBear
         label.new(bar_index, high, "🎯 SB SELL\nSweep+FVG", color=#C0CA33, textcolor=color.black, style=label.style_label_down, size=size.tiny)
-        f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+        if showSBSignal
+            f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ VWAP + STD BANDS
@@ -1088,8 +1100,8 @@ if showCumDelta and showContext and barstate.isconfirmed and (bar_index - lastDe
 // Patrón institucional completo: precio barre un extremo reciente pero el order flow (CVD) no lo confirma
 // (absorción), seguido de una vela de reversión con volumen — es el mismo principio que el ejemplo de
 // "divergencia" pedido, ahora como señal independiente con SL/TP en vez de quedar solo como contexto.
-bool sweepDivBull = isSweepLow  and cumDeltaDivBull and (pBarUp or engulfBull) and volume > avgVol and not isDeadZone
-bool sweepDivBear = isSweepHigh and cumDeltaDivBear and (pBarDn or engulfBear) and volume > avgVol and not isDeadZone
+bool sweepDivBull = showSweepDivSignal and isSweepLow  and cumDeltaDivBull and (pBarUp or engulfBull) and volume > avgVol and not isDeadZone
+bool sweepDivBear = showSweepDivSignal and isSweepHigh and cumDeltaDivBear and (pBarDn or engulfBear) and volume > avgVol and not isDeadZone
 
 var int lastSweepDivBuyBar  = -999
 var int lastSweepDivSellBar = -999
@@ -1554,10 +1566,12 @@ if eqhStillValid and wyckRangingCtx
 if showWyckoff and showContext and barstate.isconfirmed
     if wyckSpring
         label.new(bar_index, low, "🔄 SPRING\nAccumulation", color=color.new(#00E676, 10), textcolor=color.black, style=label.style_label_up, size=size.tiny)
-        f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+        if showWyckoffSignal
+            f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
     if wyckUTAD
         label.new(bar_index, high, "🔄 UTAD\nDistribution", color=color.new(#FF5252, 10), textcolor=color.white, style=label.style_label_down, size=size.tiny)
-        f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+        if showWyckoffSignal
+            f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ LIQUIDITY VOIDS
@@ -2410,7 +2424,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.9 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.10 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
@@ -2527,8 +2541,8 @@ alertcondition((isDiamondBuy or isDiamondSell) and barstate.isconfirmed, "🎯 S
 alertcondition((ofBuy or ofSell) and barstate.isconfirmed, "🎯 SEÑAL: 📊 OF BUY/SELL", "📊 Order Flow Signal — Absorción+Agotamiento+Iniciación")
 alertcondition(sweepBullSig or sweepBearSig, "🎯 SEÑAL: SWEEP EQL/EQH", "💧 Liquidity Sweep Signal")
 alertcondition((oteBullPA or oteBearPA) and barstate.isconfirmed, "🎯 SEÑAL: OTE BUY/SELL", "🎯 OTE Zone Signal — 62-79% Fib")
-alertcondition((wyckSpring or wyckUTAD) and barstate.isconfirmed, "🎯 SEÑAL: 🔄 WYCKOFF SPRING/UTAD", "🔄 Wyckoff Spring/UTAD — Reversión confirmada")
-alertcondition((sbPatternBull or sbPatternBear) and barstate.isconfirmed, "🎯 SEÑAL: 🎯 SILVER BULLET", "🎯 Silver Bullet Pattern — Sweep+FVG")
+alertcondition((wyckSpring or wyckUTAD) and showWyckoffSignal and barstate.isconfirmed, "🎯 SEÑAL: 🔄 WYCKOFF SPRING/UTAD", "🔄 Wyckoff Spring/UTAD — Reversión confirmada")
+alertcondition((sbPatternBull or sbPatternBear) and showSBSignal and barstate.isconfirmed, "🎯 SEÑAL: 🎯 SILVER BULLET", "🎯 Silver Bullet Pattern — Sweep+FVG")
 alertcondition(sweepDivBuySig or sweepDivSellSig, "🎯 SEÑAL: 💧Δ SWEEP+DIV", "💧Δ Liquidity Sweep + Delta Divergence")
 
 // ── 🎯 SEÑAL — salidas (v6.6: antes no existía ninguna; v6.7: Long+Short fusionados) ──
