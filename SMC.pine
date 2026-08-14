@@ -1,9 +1,10 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.2 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.3 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
+// v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.2 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.2", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.3 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.3", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -280,7 +281,7 @@ showWMSwings    = input.bool(true,  "Show Weekly/Monthly Swings",  group=grpICT)
 wmColor         = input.color(color.new(#00E5FF, 40), "W/M Swing Color", group=grpICT)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ██ DYNAMIC TIMEFRAME AUTO-CALIBRATION ENGINE v6.2
+// ██ DYNAMIC TIMEFRAME AUTO-CALIBRATION ENGINE v6.3
 // ══════════════════════════════════════════════════════════════════════════════
 
 f_auto_calibrate() =>
@@ -573,12 +574,16 @@ get_mtf_trend_v2(w180, wEng, wEle, wRbi, wExh) =>
 
     [_dir, _str]
 
-[_tD_dir, _tD_str] = request.security(syminfo.tickerid, "D", get_mtf_trend_v2(w180Weight, wEngulfWeight, wEleWeight, wRbiWeight, wExhaustWeight), barmerge.gaps_off, barmerge.lookahead_off)
-[_pdh, _pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], barmerge.gaps_off, barmerge.lookahead_off)
+// v6.3 fix: fusionadas las dos llamadas a "D" en una sola request.security (reduce de 6 a 5 fuentes externas)
+f_daily_bundle() =>
+    [_dD, _sD] = get_mtf_trend_v2(w180Weight, wEngulfWeight, wEleWeight, wRbiWeight, wExhaustWeight)
+    [_dD, _sD, high[1], low[1]]
+
+[_tD_dir, _tD_str, _pdh, _pdl] = request.security(syminfo.tickerid, "D", f_daily_bundle(), barmerge.gaps_off, barmerge.lookahead_off)
 int tD = _tD_dir[1]
 float tD_str = _tD_str[1]
-[_pwh, _pwl] = request.security(syminfo.tickerid, "W", [high[1], low[1]])
-[_pmh, _pml] = request.security(syminfo.tickerid, "M", [high[1], low[1]])
+[_pwh, _pwl] = request.security(syminfo.tickerid, "W", [high[1], low[1]], barmerge.gaps_off, barmerge.lookahead_off)
+[_pmh, _pml] = request.security(syminfo.tickerid, "M", [high[1], low[1]], barmerge.gaps_off, barmerge.lookahead_off)
 
 var line pdhLine = na
 var line pdlLine = na
@@ -1447,7 +1452,7 @@ if showLiqVoids and showContext and barstate.isconfirmed
         box.new(bar_index - lvMinBars + 1, lvBearTop, bar_index, lvBearBot, border_color=color.new(#B71C1C, 40), bgcolor=lvColor, text="LV ↓", text_color=color.white, text_size=size.tiny)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ██ UNIFIED SCORING ENGINE v6.2
+// ██ UNIFIED SCORING ENGINE v6.3
 // ══════════════════════════════════════════════════════════════════════════════
 
 float scoreBull = 0.0
@@ -1493,7 +1498,8 @@ if sbPatternBull
     scoreBull += 0.5
 if orRetestBull
     scoreBull += 0.5
-if obNearPOC
+// v6.3 fix: bonus de POC ahora depende de la tendencia local — evita inflar ambos scores a la vez en un pivote neutral
+if obNearPOC and trend == 1
     scoreBull += 0.5
 
 if chochWeakDown
@@ -1543,7 +1549,7 @@ if sbPatternBear
     scoreBear += 0.5
 if orRetestBear
     scoreBear += 0.5
-if obNearPOC
+if obNearPOC and trend == -1
     scoreBear += 0.5
 
 if chochWeakUp
@@ -1932,6 +1938,9 @@ for i = 1 to 5
         ofAbsorpBull := true
     if nearSupply_i and close[i] > open[i]
         ofAbsorpBear := true
+    // v6.3 fix: cortar el loop apenas ambas condiciones quedaron confirmadas (evita iteraciones ociosas)
+    if ofAbsorpBull and ofAbsorpBear
+        break
 
 // NOTE: OF Absorption detectada exclusivamente por selling en demand zones (loop arriba)
 // OB/FVG proximity ya contribuye al scoring, no se fuerza aquí
@@ -2125,7 +2134,7 @@ plot(showSLTP ? trailStopBull : na, "Trail Stop Bull", color=color.new(#00E676, 
 plot(showSLTP ? trailStopBear : na, "Trail Stop Bear", color=color.new(#FF5252, 40), style=plot.style_linebr, linewidth=2)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ██ DASHBOARD v6.2 (Enhanced with Auto-Calibration Status)
+// ██ DASHBOARD v6.3 (Enhanced with Auto-Calibration Status)
 // ══════════════════════════════════════════════════════════════════════════════
 
 f_arrowSignal(dir) =>
