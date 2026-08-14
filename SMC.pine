@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.5 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.6 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -9,8 +9,11 @@
 //       (no el extremo del swing), EQH/EQL con separación mínima entre coincidencias, IDM confirmado por sweep
 //       posterior (no solo por formación), Premium/Discount anclado al leg activo, Wyckoff Spring/UTAD exige
 //       contexto de rango (ADX bajo)
+// v6.6: Alertas realineadas a práctica institucional — alertas de SALIDA (SL/TP1/TP2/Trailing hit, ausentes
+//       hasta ahora), detección de flanco en alertas de estado (Dead Zone/Near OB/Near Key Level/OTE Zone,
+//       antes repetían en cada barra), y convención de nombres 🎯 SEÑAL (riesgo definido) vs ℹ️ CONTEXTO
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.5 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.5", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.6 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.6", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1868,6 +1871,20 @@ bool isPABearPattern = pBarDn or validOutsideBear
 var int lastSignalBullBar = -999
 var int lastSignalBearBar = -999
 
+// v6.6: Virtual trade tracker — captura el SL/TP1/TP2 de CUALQUIER señal de entrada (Diamond/Elite/Buy/OF/INST)
+// para poder alertar cuando esos niveles se toquen. Antes solo existían alertas de ENTRADA; ninguna avisaba
+// cuándo el SL, el TP1/TP2 o el trailing stop de la última señal activa habían sido alcanzados.
+var float vtBullSL      = na
+var float vtBullTP1     = na
+var float vtBullTP2     = na
+var bool  vtBullTP1Done = false
+var bool  vtBullActive  = false
+var float vtBearSL      = na
+var float vtBearTP1     = na
+var float vtBearTP2     = na
+var bool  vtBearTP1Done = false
+var bool  vtBearActive  = false
+
 bool signalNotSpamBull = (bar_index - lastSignalBullBar) >= paMaxSignalGap or (finalScoreBull >= tierElite and (bar_index - lastSignalBullBar) >= 2)
 bool signalNotSpamBear = (bar_index - lastSignalBearBar) >= paMaxSignalGap or (finalScoreBear >= tierElite and (bar_index - lastSignalBearBar) >= 2)
 
@@ -1952,6 +1969,11 @@ if isDiamondBuy and maxSignalRankThisBar < 6
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlBuy)
     f_sl_tp(true, paSlBuy, close, atr, riskReward, showSLTP, showTP2)
     alert('{"signal": "DIAMOND BUY", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(paSlBuy) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBull, "#.1") + '}', alert.freq_once_per_bar_close)
+    vtBullSL := paSlBuy
+    vtBullTP1 := _tp1Val
+    vtBullTP2 := _tp2Val
+    vtBullTP1Done := false
+    vtBullActive := true
 
 if isDiamondSell and maxSignalRankThisBar < 6
     maxSignalRankThisBar := 6
@@ -1963,6 +1985,11 @@ if isDiamondSell and maxSignalRankThisBar < 6
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlSell)
     f_sl_tp(false, paSlSell, close, atr, riskReward, showSLTP, showTP2)
     alert('{"signal": "DIAMOND SELL", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(paSlSell) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBear, "#.1") + '}', alert.freq_once_per_bar_close)
+    vtBearSL := paSlSell
+    vtBearTP1 := _tp1Val
+    vtBearTP2 := _tp2Val
+    vtBearTP1Done := false
+    vtBearActive := true
 
 if paBuy and not isDiamondBuy
     int signalRank = finalScoreBull >= tierElite ? 5 : 3
@@ -1978,6 +2005,11 @@ if paBuy and not isDiamondBuy
         int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlBuy)
         f_sl_tp(true, paSlBuy, close, atr, riskReward, showSLTP, showTP2)
         alert('{"signal": "' + tierStr + '", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(paSlBuy) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBull, "#.1") + '}', alert.freq_once_per_bar_close)
+        vtBullSL := paSlBuy
+        vtBullTP1 := _tp1Val
+        vtBullTP2 := _tp2Val
+        vtBullTP1Done := false
+        vtBullActive := true
 
 if paSell and not isDiamondSell
     int signalRank = finalScoreBear >= tierElite ? 5 : 3
@@ -1993,6 +2025,11 @@ if paSell and not isDiamondSell
         int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlSell)
         f_sl_tp(false, paSlSell, close, atr, riskReward, showSLTP, showTP2)
         alert('{"signal": "' + tierStr + '", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(paSlSell) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBear, "#.1") + '}', alert.freq_once_per_bar_close)
+        vtBearSL := paSlSell
+        vtBearTP1 := _tp1Val
+        vtBearTP2 := _tp2Val
+        vtBearTP1Done := false
+        vtBearActive := true
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ ORDER FLOW ENTRY SIGNAL
@@ -2072,6 +2109,11 @@ if ofBuy and maxSignalRankThisBar < 2
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
     f_sl_tp(true, _slVal, close, atr, riskReward, showSLTP, false)
     alert('{"signal": "OF BUY", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(_slVal) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBull, "#.1") + '}', alert.freq_once_per_bar_close)
+    vtBullSL := _slVal
+    vtBullTP1 := _tp1Val
+    vtBullTP2 := _tp2Val
+    vtBullTP1Done := false
+    vtBullActive := true
 
 if ofSell and maxSignalRankThisBar < 2
     maxSignalRankThisBar := 2
@@ -2084,6 +2126,11 @@ if ofSell and maxSignalRankThisBar < 2
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
     f_sl_tp(false, _slVal, close, atr, riskReward, showSLTP, false)
     alert('{"signal": "OF SELL", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(_slVal) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBear, "#.1") + '}', alert.freq_once_per_bar_close)
+    vtBearSL := _slVal
+    vtBearTP1 := _tp1Val
+    vtBearTP2 := _tp2Val
+    vtBearTP1Done := false
+    vtBearActive := true
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ OB EXTEND, MITIGATION & INST SIGNAL
@@ -2157,6 +2204,11 @@ if signalBuy and barstate.isconfirmed and maxSignalRankThisBar < 4
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
     f_sl_tp(true, _slVal, close, atr, riskReward, true, showTP2)
     alert('{"signal": "INST BUY", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(_slVal) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBull, "#.1") + '}', alert.freq_once_per_bar_close)
+    vtBullSL := _slVal
+    vtBullTP1 := _tp1Val
+    vtBullTP2 := _tp2Val
+    vtBullTP1Done := false
+    vtBullActive := true
 
 if signalSell and barstate.isconfirmed and maxSignalRankThisBar < 4
     maxSignalRankThisBar := 4
@@ -2168,6 +2220,11 @@ if signalSell and barstate.isconfirmed and maxSignalRankThisBar < 4
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
     f_sl_tp(false, _slVal, close, atr, riskReward, true, showTP2)
     alert('{"signal": "INST SELL", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(_slVal) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBear, "#.1") + '}', alert.freq_once_per_bar_close)
+    vtBearSL := _slVal
+    vtBearTP1 := _tp1Val
+    vtBearTP2 := _tp2Val
+    vtBearTP1Done := false
+    vtBearActive := true
 
 bool nearBullOBAlert = false
 bool nearBearOBAlert = false
@@ -2213,6 +2270,48 @@ else if not na(trailStopBear)
 
 plot(showSLTP ? trailStopBull : na, "Trail Stop Bull", color=color.new(#00E676, 40), style=plot.style_linebr, linewidth=2)
 plot(showSLTP ? trailStopBear : na, "Trail Stop Bear", color=color.new(#FF5252, 40), style=plot.style_linebr, linewidth=2)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ EXIT TRACKING — SL / TP1 / TP2 / Trailing Stop v6.6
+// ══════════════════════════════════════════════════════════════════════════════
+// v6.6: cierra el ciclo señal→gestión. Hasta v6.5 solo existían alertas de ENTRADA — ninguna avisaba cuándo
+// el SL, el TP1/TP2 o el trailing stop de la última señal activa habían sido tocados. Se usa el tracker
+// vtBull*/vtBear* (compartido entre Diamond/Elite/Buy/OF/INST) para detectar el cruce y notificar una sola vez.
+
+bool vtBullSLHit  = vtBullActive and not na(vtBullSL)  and low  <= vtBullSL
+bool vtBullTP1Hit = vtBullActive and not vtBullTP1Done and not na(vtBullTP1) and high >= vtBullTP1
+bool vtBullTP2Hit = vtBullActive and not na(vtBullTP2) and high >= vtBullTP2
+bool vtBearSLHit  = vtBearActive and not na(vtBearSL)  and high >= vtBearSL
+bool vtBearTP1Hit = vtBearActive and not vtBearTP1Done and not na(vtBearTP1) and low  <= vtBearTP1
+bool vtBearTP2Hit = vtBearActive and not na(vtBearTP2) and low  <= vtBearTP2
+
+bool trailBullHit = vtBullActive and not na(trailStopBull[1]) and close < trailStopBull[1]
+bool trailBearHit = vtBearActive and not na(trailStopBear[1]) and close > trailStopBear[1]
+
+if barstate.isconfirmed
+    if vtBullSLHit
+        alert('{"event": "SL_HIT", "side": "LONG", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + ', "level": ' + str.tostring(vtBullSL) + '}', alert.freq_once_per_bar_close)
+    if vtBullTP1Hit
+        alert('{"event": "TP1_HIT", "side": "LONG", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + ', "level": ' + str.tostring(vtBullTP1) + '}', alert.freq_once_per_bar_close)
+        vtBullTP1Done := true
+    if vtBullTP2Hit
+        alert('{"event": "TP2_HIT", "side": "LONG", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + ', "level": ' + str.tostring(vtBullTP2) + '}', alert.freq_once_per_bar_close)
+    if trailBullHit
+        alert('{"event": "TRAIL_HIT", "side": "LONG", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
+    if vtBullSLHit or vtBullTP2Hit or trailBullHit
+        vtBullActive := false
+
+    if vtBearSLHit
+        alert('{"event": "SL_HIT", "side": "SHORT", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + ', "level": ' + str.tostring(vtBearSL) + '}', alert.freq_once_per_bar_close)
+    if vtBearTP1Hit
+        alert('{"event": "TP1_HIT", "side": "SHORT", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + ', "level": ' + str.tostring(vtBearTP1) + '}', alert.freq_once_per_bar_close)
+        vtBearTP1Done := true
+    if vtBearTP2Hit
+        alert('{"event": "TP2_HIT", "side": "SHORT", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + ', "level": ' + str.tostring(vtBearTP2) + '}', alert.freq_once_per_bar_close)
+    if trailBearHit
+        alert('{"event": "TRAIL_HIT", "side": "SHORT", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
+    if vtBearSLHit or vtBearTP2Hit or trailBearHit
+        vtBearActive := false
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ DASHBOARD v6.3 (Enhanced with Auto-Calibration Status)
@@ -2275,7 +2374,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.5 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.6 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
@@ -2359,57 +2458,85 @@ else if showMTFDash and barstate.islast
     table.cell(mtfDash, 1, 5, localStr,    text_color=localCol,     bgcolor=#1A237E, text_size=dSize)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ██ ALERTS
+// ██ ALERTS v6.6
 // ══════════════════════════════════════════════════════════════════════════════
+// v6.6: convención de nombres — el título de cada alertcondition() se prefija según su naturaleza:
+//   🎯 SEÑAL:    setup con riesgo definido (SL/TP dibujado) apto para ejecución/gestión de una mesa real.
+//   ℹ️ CONTEXTO:  información de mercado (estructura, patrón, proximidad) sin plan de trade adjunto.
+// Además, las condiciones de "estado" que antes podían quedar en true durante muchas barras seguidas
+// (Dead Zone, Near OB, Near Key Level, OTE Zone) ahora usan detección de flanco (cond and not cond[1])
+// para notificar una sola vez al ENTRAR al estado, no en cada barra mientras se mantenga vigente.
 
-alertcondition(signalBuy  and barstate.isconfirmed, "INST BUY (OB Touch)",  "🏦 Institutional BUY — OB Touch")
-alertcondition(signalSell and barstate.isconfirmed, "INST SELL (OB Touch)", "🏦 Institutional SELL — OB Touch")
+bool deadZoneEnter     = isDeadZone and not isDeadZone[1]
+bool nearOBCond        = showOBProximity and (nearBullOBAlert or nearBearOBAlert)
+bool nearOBEnter       = nearOBCond and not nearOBCond[1]
+bool nearKeyLevelCond  = nearPDH or nearPDL or nearPWH or nearPWL
+bool nearKeyLevelEnter = nearKeyLevelCond and not nearKeyLevelCond[1]
+bool oteZoneCond       = inOTEBull or inOTEBear
+bool oteZoneEnter      = oteZoneCond and not oteZoneCond[1]
 
-alertcondition(paBuy  and barstate.isconfirmed, "BUY Signal",  "🟢 BUY Signal")
-alertcondition(paSell and barstate.isconfirmed, "SELL Signal", "🔴 SELL Signal")
-alertcondition(paBuy  and finalScoreBull >= tierElite and barstate.isconfirmed, "ELITE BUY",  "💎 ELITE BUY")
-alertcondition(paSell and finalScoreBear >= tierElite and barstate.isconfirmed, "ELITE SELL", "💎 ELITE SELL")
+// ── 🎯 SEÑAL — entradas con riesgo definido ──
+alertcondition(signalBuy  and barstate.isconfirmed, "🎯 SEÑAL: INST BUY (OB Touch)",  "🏦 Institutional BUY — OB Touch")
+alertcondition(signalSell and barstate.isconfirmed, "🎯 SEÑAL: INST SELL (OB Touch)", "🏦 Institutional SELL — OB Touch")
 
-alertcondition(isDiamondBuy  and barstate.isconfirmed, "⬡ DIAMOND BUY",  "⬡ DIAMOND BUY — Máxima Confluencia")
-alertcondition(isDiamondSell and barstate.isconfirmed, "⬡ DIAMOND SELL", "⬡ DIAMOND SELL — Máxima Confluencia")
+alertcondition(paBuy  and barstate.isconfirmed, "🎯 SEÑAL: BUY Signal",  "🟢 BUY Signal")
+alertcondition(paSell and barstate.isconfirmed, "🎯 SEÑAL: SELL Signal", "🔴 SELL Signal")
+alertcondition(paBuy  and finalScoreBull >= tierElite and barstate.isconfirmed, "🎯 SEÑAL: ELITE BUY",  "💎 ELITE BUY")
+alertcondition(paSell and finalScoreBear >= tierElite and barstate.isconfirmed, "🎯 SEÑAL: ELITE SELL", "💎 ELITE SELL")
 
-alertcondition((bosUp or bosDown) and barstate.isconfirmed, "BOS Detected",   "📈📉 BOS Break of Structure")
-alertcondition((chochUp or chochDown) and barstate.isconfirmed, "CHoCH Signal", "🔄 CHoCH detected")
-alertcondition((chochWeakUp or chochWeakDown) and barstate.isconfirmed, "wCHoCH Signal", "⚠️ wCHoCH detected")
+alertcondition(isDiamondBuy  and barstate.isconfirmed, "🎯 SEÑAL: ⬡ DIAMOND BUY",  "⬡ DIAMOND BUY — Máxima Confluencia")
+alertcondition(isDiamondSell and barstate.isconfirmed, "🎯 SEÑAL: ⬡ DIAMOND SELL", "⬡ DIAMOND SELL — Máxima Confluencia")
 
-alertcondition(superEleBull and barstate.isconfirmed, "🐘 ELEPHANT BUY",  "🐘 Elephant Bar BUY")
-alertcondition(superEleBear and barstate.isconfirmed, "🐘 ELEPHANT SELL", "🐘 Elephant Bar SELL")
+alertcondition(ofBuy  and barstate.isconfirmed, "🎯 SEÑAL: 📊 OF BUY",  "📊 Order Flow BUY — Absorción+Agotamiento+Iniciación")
+alertcondition(ofSell and barstate.isconfirmed, "🎯 SEÑAL: 📊 OF SELL", "📊 Order Flow SELL — Absorción+Agotamiento+Iniciación")
 
-alertcondition(sweepBullSig, "SWEEP EQL BUY",  "💧 EQL Sweep BUY")
-alertcondition(sweepBearSig, "SWEEP EQH SELL", "💧 EQH Sweep SELL")
-alertcondition((showOBProximity and (nearBullOBAlert or nearBearOBAlert)) and barstate.isconfirmed, "NEAR OB", "📦 Precio cerca de OB")
+alertcondition(sweepBullSig, "🎯 SEÑAL: SWEEP EQL BUY",  "💧 EQL Sweep BUY")
+alertcondition(sweepBearSig, "🎯 SEÑAL: SWEEP EQH SELL", "💧 EQH Sweep SELL")
 
-alertcondition((wyckSpring or wyckUTAD) and barstate.isconfirmed, "🔄 WYCKOFF", "🔄 Wyckoff Spring/UTAD detected")
-alertcondition((isDisplacementBull or isDisplacementBear) and barstate.isconfirmed, "⚡ DISPLACEMENT", "⚡ Displacement detected")
-alertcondition((cumDeltaDivBull or cumDeltaDivBear) and barstate.isconfirmed, "Δ DELTA DIV", "Δ Cum. Delta Divergence")
-alertcondition((lvBullGap or lvBearGap) and barstate.isconfirmed, "LV Gap", "🟥 Liquidity Void detected")
-alertcondition((nearPDH or nearPDL or nearPWH or nearPWL) and barstate.isconfirmed, "NEAR KEY LEVEL", "📍 Near PDH/PDL/PWH/PWL")
-alertcondition((inOTEBull or inOTEBear) and barstate.isconfirmed, "OTE ZONE", "🎯 Price in OTE Zone")
+alertcondition(oteBullPA and barstate.isconfirmed, "🎯 SEÑAL: OTE BUY", "🎯 OTE Zone BUY — 62-79% Fib")
+alertcondition(oteBearPA and barstate.isconfirmed, "🎯 SEÑAL: OTE SELL", "🎯 OTE Zone SELL — 62-79% Fib")
 
-alertcondition(sbPatternBull and barstate.isconfirmed, "🎯 SB PATTERN BUY", "🎯 Silver Bullet Pattern BUY — Sweep+FVG")
-alertcondition(sbPatternBear and barstate.isconfirmed, "🎯 SB PATTERN SELL", "🎯 Silver Bullet Pattern SELL — Sweep+FVG")
-alertcondition(orRetestBull and barstate.isconfirmed, "🔄 OR RETEST BUY", "🔄 OR Breakout Retest BUY")
-alertcondition(orRetestBear and barstate.isconfirmed, "🔄 OR RETEST SELL", "🔄 OR Breakout Retest SELL")
-alertcondition(isDeadZone and barstate.isconfirmed, "⚠️ DEAD ZONE", "⚠️ Dead Zone — No operar (lunch/cierre)")
+// ── 🎯 SEÑAL — salidas (v6.6: antes no existía ninguna) ──
+alertcondition(vtBullSLHit  and barstate.isconfirmed, "🎯 SEÑAL: 🛑 SL HIT (Long)",    "🛑 Stop Loss alcanzado — posición larga")
+alertcondition(vtBullTP1Hit and barstate.isconfirmed, "🎯 SEÑAL: 🎯 TP1 HIT (Long)",   "🎯 Take Profit 1 alcanzado — posición larga")
+alertcondition(vtBullTP2Hit and barstate.isconfirmed, "🎯 SEÑAL: 🎯 TP2 HIT (Long)",   "🎯 Take Profit 2 alcanzado — cierre total posición larga")
+alertcondition(trailBullHit and barstate.isconfirmed, "🎯 SEÑAL: 🐌 TRAIL HIT (Long)", "🐌 Trailing stop alcanzado — posición larga")
+alertcondition(vtBearSLHit  and barstate.isconfirmed, "🎯 SEÑAL: 🛑 SL HIT (Short)",    "🛑 Stop Loss alcanzado — posición corta")
+alertcondition(vtBearTP1Hit and barstate.isconfirmed, "🎯 SEÑAL: 🎯 TP1 HIT (Short)",   "🎯 Take Profit 1 alcanzado — posición corta")
+alertcondition(vtBearTP2Hit and barstate.isconfirmed, "🎯 SEÑAL: 🎯 TP2 HIT (Short)",   "🎯 Take Profit 2 alcanzado — cierre total posición corta")
+alertcondition(trailBearHit and barstate.isconfirmed, "🎯 SEÑAL: 🐌 TRAIL HIT (Short)", "🐌 Trailing stop alcanzado — posición corta")
 
-alertcondition(vwapBounceBull and barstate.isconfirmed, "🌊 VWAP BOUNCE BUY", "🌊 VWAP Bounce Continuación BUY")
-alertcondition(vwapBounceBear and barstate.isconfirmed, "🌊 VWAP BOUNCE SELL", "🌊 VWAP Bounce Continuación SELL")
-alertcondition(vwapRevBull and barstate.isconfirmed, "🔄 VWAP REV BUY", "🔄 VWAP Mean Reversion BUY — Oversold")
-alertcondition(vwapRevBear and barstate.isconfirmed, "🔄 VWAP REV SELL", "🔄 VWAP Mean Reversion SELL — Overbought")
-alertcondition(oteBullPA and barstate.isconfirmed, "🎯 OTE BUY", "🎯 OTE Zone BUY — 62-79% Fib")
-alertcondition(oteBearPA and barstate.isconfirmed, "🎯 OTE SELL", "🎯 OTE Zone SELL — 62-79% Fib")
+// ── ℹ️ CONTEXTO — estructura, patrones y estado de mercado (sin plan de trade adjunto) ──
+alertcondition((bosUp or bosDown) and barstate.isconfirmed, "ℹ️ CONTEXTO: BOS Detected",   "📈📉 BOS Break of Structure")
+alertcondition((chochUp or chochDown) and barstate.isconfirmed, "ℹ️ CONTEXTO: CHoCH Signal", "🔄 CHoCH detected")
+alertcondition((chochWeakUp or chochWeakDown) and barstate.isconfirmed, "ℹ️ CONTEXTO: wCHoCH Signal", "⚠️ wCHoCH detected")
 
-alertcondition((bull180 or bear180) and barstate.isconfirmed, "🔄 180 REVERSAL", "🔄 180 Reversal detected")
-alertcondition((vbsSignal or vssSignal) and barstate.isconfirmed, "📊 VBS/VSS", "📊 Velez Buy/Sell Signal")
-alertcondition((rbiSignal or gbiSignal) and barstate.isconfirmed, "🚦 RBI/GBI", "🚦 Bar Ignored — Continuation")
-alertcondition((ccBull or ccBear) and barstate.isconfirmed, "🎨 COLOR CHANGE", "🎨 Color Change at VWAP")
-alertcondition((exhaust5Bull or exhaust5Bear) and barstate.isconfirmed, "⚠️ 5th BAR", "⚠️ Regla 3-5-8: 5ta vela consecutiva")
-alertcondition((exhaust8Bull or exhaust8Bear) and barstate.isconfirmed, "🛑 8th BAR", "🛑 Regla 3-5-8: 8va vela consecutiva")
+alertcondition(superEleBull and barstate.isconfirmed, "ℹ️ CONTEXTO: 🐘 ELEPHANT BUY",  "🐘 Elephant Bar BUY")
+alertcondition(superEleBear and barstate.isconfirmed, "ℹ️ CONTEXTO: 🐘 ELEPHANT SELL", "🐘 Elephant Bar SELL")
 
-alertcondition(ofBuy  and barstate.isconfirmed, "📊 OF BUY",  "📊 Order Flow BUY — Absorción+Agotamiento+Iniciación")
-alertcondition(ofSell and barstate.isconfirmed, "📊 OF SELL", "📊 Order Flow SELL — Absorción+Agotamiento+Iniciación")
+alertcondition(nearOBEnter, "ℹ️ CONTEXTO: NEAR OB", "📦 Precio entrando en zona cercana a OB")
+
+alertcondition((wyckSpring or wyckUTAD) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 WYCKOFF", "🔄 Wyckoff Spring/UTAD detected")
+alertcondition((isDisplacementBull or isDisplacementBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: ⚡ DISPLACEMENT", "⚡ Displacement detected")
+alertcondition((cumDeltaDivBull or cumDeltaDivBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: Δ DELTA DIV", "Δ Cum. Delta Divergence")
+alertcondition((lvBullGap or lvBearGap) and barstate.isconfirmed, "ℹ️ CONTEXTO: LV Gap", "🟥 Liquidity Void detected")
+alertcondition(nearKeyLevelEnter, "ℹ️ CONTEXTO: NEAR KEY LEVEL", "📍 Precio entrando cerca de PDH/PDL/PWH/PWL")
+alertcondition(oteZoneEnter, "ℹ️ CONTEXTO: OTE ZONE", "🎯 Precio entrando en zona OTE")
+
+alertcondition(sbPatternBull and barstate.isconfirmed, "ℹ️ CONTEXTO: 🎯 SB PATTERN BUY", "🎯 Silver Bullet Pattern BUY — Sweep+FVG")
+alertcondition(sbPatternBear and barstate.isconfirmed, "ℹ️ CONTEXTO: 🎯 SB PATTERN SELL", "🎯 Silver Bullet Pattern SELL — Sweep+FVG")
+alertcondition(orRetestBull and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 OR RETEST BUY", "🔄 OR Breakout Retest BUY")
+alertcondition(orRetestBear and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 OR RETEST SELL", "🔄 OR Breakout Retest SELL")
+alertcondition(deadZoneEnter, "ℹ️ CONTEXTO: ⚠️ DEAD ZONE", "⚠️ Entrando en Dead Zone — No operar (lunch/cierre)")
+
+alertcondition(vwapBounceBull and barstate.isconfirmed, "ℹ️ CONTEXTO: 🌊 VWAP BOUNCE BUY", "🌊 VWAP Bounce Continuación BUY")
+alertcondition(vwapBounceBear and barstate.isconfirmed, "ℹ️ CONTEXTO: 🌊 VWAP BOUNCE SELL", "🌊 VWAP Bounce Continuación SELL")
+alertcondition(vwapRevBull and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 VWAP REV BUY", "🔄 VWAP Mean Reversion BUY — Oversold")
+alertcondition(vwapRevBear and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 VWAP REV SELL", "🔄 VWAP Mean Reversion SELL — Overbought")
+
+alertcondition((bull180 or bear180) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 180 REVERSAL", "🔄 180 Reversal detected")
+alertcondition((vbsSignal or vssSignal) and barstate.isconfirmed, "ℹ️ CONTEXTO: 📊 VBS/VSS", "📊 Velez Buy/Sell Signal")
+alertcondition((rbiSignal or gbiSignal) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🚦 RBI/GBI", "🚦 Bar Ignored — Continuation")
+alertcondition((ccBull or ccBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🎨 COLOR CHANGE", "🎨 Color Change at VWAP")
+alertcondition((exhaust5Bull or exhaust5Bear) and barstate.isconfirmed, "ℹ️ CONTEXTO: ⚠️ 5th BAR", "⚠️ Regla 3-5-8: 5ta vela consecutiva")
+alertcondition((exhaust8Bull or exhaust8Bear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🛑 8th BAR", "🛑 Regla 3-5-8: 8va vela consecutiva")
