@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.6 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.7 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -12,8 +12,12 @@
 // v6.6: Alertas realineadas a práctica institucional — alertas de SALIDA (SL/TP1/TP2/Trailing hit, ausentes
 //       hasta ahora), detección de flanco en alertas de estado (Dead Zone/Near OB/Near Key Level/OTE Zone,
 //       antes repetían en cada barra), y convención de nombres 🎯 SEÑAL (riesgo definido) vs ℹ️ CONTEXTO
+// v6.7: Fix runtime error "too many plots" — alertcondition() consume el mismo presupuesto de "plots" que
+//       plot()/bgcolor()/fill() (máx. 64 combinados). Se fusionaron los pares BUY/SELL y Long/Short de cada
+//       alertcondition() en uno solo con OR (de 50 a 36), preservando la distinción de dirección en el
+//       payload alert() JSON de cada señal, que no cuenta para este límite.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.6 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.6", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.7 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.7", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2374,7 +2378,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.6 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.7 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
@@ -2458,7 +2462,7 @@ else if showMTFDash and barstate.islast
     table.cell(mtfDash, 1, 5, localStr,    text_color=localCol,     bgcolor=#1A237E, text_size=dSize)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ██ ALERTS v6.6
+// ██ ALERTS v6.7
 // ══════════════════════════════════════════════════════════════════════════════
 // v6.6: convención de nombres — el título de cada alertcondition() se prefija según su naturaleza:
 //   🎯 SEÑAL:    setup con riesgo definido (SL/TP dibujado) apto para ejecución/gestión de una mesa real.
@@ -2466,6 +2470,13 @@ else if showMTFDash and barstate.islast
 // Además, las condiciones de "estado" que antes podían quedar en true durante muchas barras seguidas
 // (Dead Zone, Near OB, Near Key Level, OTE Zone) ahora usan detección de flanco (cond and not cond[1])
 // para notificar una sola vez al ENTRAR al estado, no en cada barra mientras se mantenga vigente.
+// v6.7 fix: alertcondition() consume el MISMO presupuesto de "plots" que plot()/bgcolor()/fill() (máx. 64
+// combinados) — no se documenta así en el editor, pero es el comportamiento real de Pine. Tener un par
+// BUY/SELL separado por cada señal (50 alertcondition en total) hacía que el script superara el límite
+// ("creates too many plots (71). The limit is 64"). Se fusiona cada par BUY/SELL o Long/Short en UNA sola
+// alertcondition() con OR — el payload alert() JSON de cada lado (que NO cuenta para este límite) sigue
+// siendo independiente, así que la distinción de dirección para uso algorítmico no se pierde, solo el
+// nombre en el dropdown de alertas simples de TradingView ya no separa BUY de SELL.
 
 bool deadZoneEnter     = isDeadZone and not isDeadZone[1]
 bool nearOBCond        = showOBProximity and (nearBullOBAlert or nearBearOBAlert)
@@ -2475,44 +2486,27 @@ bool nearKeyLevelEnter = nearKeyLevelCond and not nearKeyLevelCond[1]
 bool oteZoneCond       = inOTEBull or inOTEBear
 bool oteZoneEnter      = oteZoneCond and not oteZoneCond[1]
 
-// ── 🎯 SEÑAL — entradas con riesgo definido ──
-alertcondition(signalBuy  and barstate.isconfirmed, "🎯 SEÑAL: INST BUY (OB Touch)",  "🏦 Institutional BUY — OB Touch")
-alertcondition(signalSell and barstate.isconfirmed, "🎯 SEÑAL: INST SELL (OB Touch)", "🏦 Institutional SELL — OB Touch")
+// ── 🎯 SEÑAL — entradas con riesgo definido (BUY+SELL fusionados) ──
+alertcondition((signalBuy or signalSell) and barstate.isconfirmed, "🎯 SEÑAL: INST BUY/SELL (OB Touch)", "🏦 Institutional Signal — OB Touch")
+alertcondition((paBuy or paSell) and barstate.isconfirmed, "🎯 SEÑAL: BUY/SELL Signal", "🟢🔴 BUY/SELL Signal")
+alertcondition(((paBuy and finalScoreBull >= tierElite) or (paSell and finalScoreBear >= tierElite)) and barstate.isconfirmed, "🎯 SEÑAL: ELITE BUY/SELL", "💎 ELITE Signal")
+alertcondition((isDiamondBuy or isDiamondSell) and barstate.isconfirmed, "🎯 SEÑAL: ⬡ DIAMOND BUY/SELL", "⬡ DIAMOND Signal — Máxima Confluencia")
+alertcondition((ofBuy or ofSell) and barstate.isconfirmed, "🎯 SEÑAL: 📊 OF BUY/SELL", "📊 Order Flow Signal — Absorción+Agotamiento+Iniciación")
+alertcondition(sweepBullSig or sweepBearSig, "🎯 SEÑAL: SWEEP EQL/EQH", "💧 Liquidity Sweep Signal")
+alertcondition((oteBullPA or oteBearPA) and barstate.isconfirmed, "🎯 SEÑAL: OTE BUY/SELL", "🎯 OTE Zone Signal — 62-79% Fib")
 
-alertcondition(paBuy  and barstate.isconfirmed, "🎯 SEÑAL: BUY Signal",  "🟢 BUY Signal")
-alertcondition(paSell and barstate.isconfirmed, "🎯 SEÑAL: SELL Signal", "🔴 SELL Signal")
-alertcondition(paBuy  and finalScoreBull >= tierElite and barstate.isconfirmed, "🎯 SEÑAL: ELITE BUY",  "💎 ELITE BUY")
-alertcondition(paSell and finalScoreBear >= tierElite and barstate.isconfirmed, "🎯 SEÑAL: ELITE SELL", "💎 ELITE SELL")
-
-alertcondition(isDiamondBuy  and barstate.isconfirmed, "🎯 SEÑAL: ⬡ DIAMOND BUY",  "⬡ DIAMOND BUY — Máxima Confluencia")
-alertcondition(isDiamondSell and barstate.isconfirmed, "🎯 SEÑAL: ⬡ DIAMOND SELL", "⬡ DIAMOND SELL — Máxima Confluencia")
-
-alertcondition(ofBuy  and barstate.isconfirmed, "🎯 SEÑAL: 📊 OF BUY",  "📊 Order Flow BUY — Absorción+Agotamiento+Iniciación")
-alertcondition(ofSell and barstate.isconfirmed, "🎯 SEÑAL: 📊 OF SELL", "📊 Order Flow SELL — Absorción+Agotamiento+Iniciación")
-
-alertcondition(sweepBullSig, "🎯 SEÑAL: SWEEP EQL BUY",  "💧 EQL Sweep BUY")
-alertcondition(sweepBearSig, "🎯 SEÑAL: SWEEP EQH SELL", "💧 EQH Sweep SELL")
-
-alertcondition(oteBullPA and barstate.isconfirmed, "🎯 SEÑAL: OTE BUY", "🎯 OTE Zone BUY — 62-79% Fib")
-alertcondition(oteBearPA and barstate.isconfirmed, "🎯 SEÑAL: OTE SELL", "🎯 OTE Zone SELL — 62-79% Fib")
-
-// ── 🎯 SEÑAL — salidas (v6.6: antes no existía ninguna) ──
-alertcondition(vtBullSLHit  and barstate.isconfirmed, "🎯 SEÑAL: 🛑 SL HIT (Long)",    "🛑 Stop Loss alcanzado — posición larga")
-alertcondition(vtBullTP1Hit and barstate.isconfirmed, "🎯 SEÑAL: 🎯 TP1 HIT (Long)",   "🎯 Take Profit 1 alcanzado — posición larga")
-alertcondition(vtBullTP2Hit and barstate.isconfirmed, "🎯 SEÑAL: 🎯 TP2 HIT (Long)",   "🎯 Take Profit 2 alcanzado — cierre total posición larga")
-alertcondition(trailBullHit and barstate.isconfirmed, "🎯 SEÑAL: 🐌 TRAIL HIT (Long)", "🐌 Trailing stop alcanzado — posición larga")
-alertcondition(vtBearSLHit  and barstate.isconfirmed, "🎯 SEÑAL: 🛑 SL HIT (Short)",    "🛑 Stop Loss alcanzado — posición corta")
-alertcondition(vtBearTP1Hit and barstate.isconfirmed, "🎯 SEÑAL: 🎯 TP1 HIT (Short)",   "🎯 Take Profit 1 alcanzado — posición corta")
-alertcondition(vtBearTP2Hit and barstate.isconfirmed, "🎯 SEÑAL: 🎯 TP2 HIT (Short)",   "🎯 Take Profit 2 alcanzado — cierre total posición corta")
-alertcondition(trailBearHit and barstate.isconfirmed, "🎯 SEÑAL: 🐌 TRAIL HIT (Short)", "🐌 Trailing stop alcanzado — posición corta")
+// ── 🎯 SEÑAL — salidas (v6.6: antes no existía ninguna; v6.7: Long+Short fusionados) ──
+alertcondition((vtBullSLHit  or vtBearSLHit)  and barstate.isconfirmed, "🎯 SEÑAL: 🛑 SL HIT",    "🛑 Stop Loss alcanzado")
+alertcondition((vtBullTP1Hit or vtBearTP1Hit) and barstate.isconfirmed, "🎯 SEÑAL: 🎯 TP1 HIT",   "🎯 Take Profit 1 alcanzado")
+alertcondition((vtBullTP2Hit or vtBearTP2Hit) and barstate.isconfirmed, "🎯 SEÑAL: 🎯 TP2 HIT",   "🎯 Take Profit 2 alcanzado — cierre total")
+alertcondition((trailBullHit or trailBearHit) and barstate.isconfirmed, "🎯 SEÑAL: 🐌 TRAIL HIT", "🐌 Trailing stop alcanzado")
 
 // ── ℹ️ CONTEXTO — estructura, patrones y estado de mercado (sin plan de trade adjunto) ──
 alertcondition((bosUp or bosDown) and barstate.isconfirmed, "ℹ️ CONTEXTO: BOS Detected",   "📈📉 BOS Break of Structure")
 alertcondition((chochUp or chochDown) and barstate.isconfirmed, "ℹ️ CONTEXTO: CHoCH Signal", "🔄 CHoCH detected")
 alertcondition((chochWeakUp or chochWeakDown) and barstate.isconfirmed, "ℹ️ CONTEXTO: wCHoCH Signal", "⚠️ wCHoCH detected")
 
-alertcondition(superEleBull and barstate.isconfirmed, "ℹ️ CONTEXTO: 🐘 ELEPHANT BUY",  "🐘 Elephant Bar BUY")
-alertcondition(superEleBear and barstate.isconfirmed, "ℹ️ CONTEXTO: 🐘 ELEPHANT SELL", "🐘 Elephant Bar SELL")
+alertcondition((superEleBull or superEleBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🐘 ELEPHANT", "🐘 Elephant Bar detected")
 
 alertcondition(nearOBEnter, "ℹ️ CONTEXTO: NEAR OB", "📦 Precio entrando en zona cercana a OB")
 
@@ -2523,16 +2517,12 @@ alertcondition((lvBullGap or lvBearGap) and barstate.isconfirmed, "ℹ️ CONTEX
 alertcondition(nearKeyLevelEnter, "ℹ️ CONTEXTO: NEAR KEY LEVEL", "📍 Precio entrando cerca de PDH/PDL/PWH/PWL")
 alertcondition(oteZoneEnter, "ℹ️ CONTEXTO: OTE ZONE", "🎯 Precio entrando en zona OTE")
 
-alertcondition(sbPatternBull and barstate.isconfirmed, "ℹ️ CONTEXTO: 🎯 SB PATTERN BUY", "🎯 Silver Bullet Pattern BUY — Sweep+FVG")
-alertcondition(sbPatternBear and barstate.isconfirmed, "ℹ️ CONTEXTO: 🎯 SB PATTERN SELL", "🎯 Silver Bullet Pattern SELL — Sweep+FVG")
-alertcondition(orRetestBull and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 OR RETEST BUY", "🔄 OR Breakout Retest BUY")
-alertcondition(orRetestBear and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 OR RETEST SELL", "🔄 OR Breakout Retest SELL")
+alertcondition((sbPatternBull or sbPatternBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🎯 SB PATTERN", "🎯 Silver Bullet Pattern — Sweep+FVG")
+alertcondition((orRetestBull or orRetestBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 OR RETEST", "🔄 OR Breakout Retest")
 alertcondition(deadZoneEnter, "ℹ️ CONTEXTO: ⚠️ DEAD ZONE", "⚠️ Entrando en Dead Zone — No operar (lunch/cierre)")
 
-alertcondition(vwapBounceBull and barstate.isconfirmed, "ℹ️ CONTEXTO: 🌊 VWAP BOUNCE BUY", "🌊 VWAP Bounce Continuación BUY")
-alertcondition(vwapBounceBear and barstate.isconfirmed, "ℹ️ CONTEXTO: 🌊 VWAP BOUNCE SELL", "🌊 VWAP Bounce Continuación SELL")
-alertcondition(vwapRevBull and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 VWAP REV BUY", "🔄 VWAP Mean Reversion BUY — Oversold")
-alertcondition(vwapRevBear and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 VWAP REV SELL", "🔄 VWAP Mean Reversion SELL — Overbought")
+alertcondition((vwapBounceBull or vwapBounceBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🌊 VWAP BOUNCE", "🌊 VWAP Bounce Continuación")
+alertcondition((vwapRevBull or vwapRevBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 VWAP REV", "🔄 VWAP Mean Reversion")
 
 alertcondition((bull180 or bear180) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 180 REVERSAL", "🔄 180 Reversal detected")
 alertcondition((vbsSignal or vssSignal) and barstate.isconfirmed, "ℹ️ CONTEXTO: 📊 VBS/VSS", "📊 Velez Buy/Sell Signal")
