@@ -806,8 +806,12 @@ bool nearVWAPB3Bot  = math.abs(close - vwapBand3Bot) < atr * 1.0
 // confirmado por la Structure Engine), no a una ventana rolling fija que puede arrastrar extremos ya invalidados
 // a mitad de tendencia. Si todavía no hay estructura confirmada, cae a la ventana rolling como respaldo.
 bool pdUseActiveLeg = not na(structureHigh) and not na(structureLow) and structureHigh > structureLow
-pdHigh  = pdUseActiveLeg ? structureHigh : ta.highest(high, effPdLookback)
-pdLow   = pdUseActiveLeg ? structureLow  : ta.lowest(low,  effPdLookback)
+// v6.5.1 fix: ta.highest/ta.lowest deben llamarse sin condicionar en cada barra (warning del compilador) —
+// se extraen del ternario para que mantengan su estado interno de forma consistente.
+float pdRollingHigh = ta.highest(high, effPdLookback)
+float pdRollingLow  = ta.lowest(low,  effPdLookback)
+pdHigh  = pdUseActiveLeg ? structureHigh : pdRollingHigh
+pdLow   = pdUseActiveLeg ? structureLow  : pdRollingLow
 pdMid   = (pdHigh + pdLow) / 2
 inPremium = close > pdMid
 inDiscount= close < pdMid
