@@ -1,12 +1,16 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.4 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.5 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
 //       inside bar direccional por tendencia, Cumulative Delta Divergence integrado a la pata de Absorción)
+// v6.5: Price Action / SMC realineado a criterios institucionales — Order Block = última vela de color opuesto
+//       (no el extremo del swing), EQH/EQL con separación mínima entre coincidencias, IDM confirmado por sweep
+//       posterior (no solo por formación), Premium/Discount anclado al leg activo, Wyckoff Spring/UTAD exige
+//       contexto de rango (ADX bajo)
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.4 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.4", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.5 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.5", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -91,6 +95,18 @@ f_calc_contracts(accountBal, riskPct, entryPrice, slPrice) =>
     float riskVal = accountBal * (riskPct / 100)
     int contracts = dist > 0 ? math.max(1, math.round(riskVal / (dist * syminfo.pointvalue))) : 1
     contracts
+
+// v6.5 fix: definición institucional de Order Block = ÚLTIMA vela de color OPUESTO al impulso antes del
+// BOS/CHoCH (no el extremo del swing). Busca hacia atrás desde el origen del impulso; si no encuentra ninguna
+// vela opuesta en la ventana (todo el tramo fue del mismo color, caso raro), cae al extremo del swing como antes.
+f_lastOppositeCandle(bullishOB, maxBars, fallbackIdx) =>
+    int idx = fallbackIdx
+    for k = 1 to maxBars
+        bool isOpposite = bullishOB ? close[k] < open[k] : close[k] > open[k]
+        if isOpposite
+            idx := k
+            break
+    idx
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ INPUTS
@@ -653,6 +669,9 @@ isSweepHigh = high > ta.highest(high[1], 3)
 pBarUp = isSweepLow  and range_bar > 0 and (bodySize / range_bar) * 100 <= 30 and (lowerWick / range_bar) * 100 >= 60 and (upperWick / range_bar) * 100 <= 25 and rel_pos(close) > 0.6 and isSizeValid
 pBarDn = isSweepHigh and range_bar > 0 and (bodySize / range_bar) * 100 <= 30 and (upperWick / range_bar) * 100 >= 60 and (lowerWick / range_bar) * 100 <= 25 and rel_pos(close) < 0.4 and isSizeValid
 
+// v6.5: nombre heredado — no es un engulfing clásico (que solo exige encerrar el CUERPO previo). Acá exige
+// además barrer el low/high previo y CERRAR más allá del high/low previo, es decir sweep + reclaim + breakout
+// combinados. Se deja el nombre para no romper todas las referencias existentes, pero es un patrón más estricto.
 engulfBull = close > open and close > high[1] and low  < low[1]  and rel_pos(close) > 0.7
 engulfBear = close < open and close < low[1]  and high > high[1] and rel_pos(close) < 0.3
 
@@ -783,8 +802,12 @@ bool nearVWAPB3Bot  = math.abs(close - vwapBand3Bot) < atr * 1.0
 // ██ PREMIUM / DISCOUNT (Auto-Calibrated effPdLookback)
 // ══════════════════════════════════════════════════════════════════════════════
 
-pdHigh  = ta.highest(high, effPdLookback)
-pdLow   = ta.lowest(low,  effPdLookback)
+// v6.5 fix: Premium/Discount institucional se ancla al dealing range del LEG activo (último swing high/low
+// confirmado por la Structure Engine), no a una ventana rolling fija que puede arrastrar extremos ya invalidados
+// a mitad de tendencia. Si todavía no hay estructura confirmada, cae a la ventana rolling como respaldo.
+bool pdUseActiveLeg = not na(structureHigh) and not na(structureLow) and structureHigh > structureLow
+pdHigh  = pdUseActiveLeg ? structureHigh : ta.highest(high, effPdLookback)
+pdLow   = pdUseActiveLeg ? structureLow  : ta.lowest(low,  effPdLookback)
 pdMid   = (pdHigh + pdLow) / 2
 inPremium = close > pdMid
 inDiscount= close < pdMid
@@ -1273,23 +1296,29 @@ var float lastEQLLevel = na
 var int   lastEQHBar   = 0
 var int   lastEQLBar   = 0
 
+// v6.5 fix: exige separación mínima entre coincidencias contadas — antes cualquier vela dentro de la
+// tolerancia en la ventana sumaba, sobrecontando un mismo clúster de velas adyacentes como "iguales" distintos.
 if isSwingHigh
     float refHigh = high[effSwingLen]
     float eqTol   = atr * eqTolerance
+    int lastEqHighMatch = -999
     for i = effSwingLen + 1 to effSwingLen + eqLookback
-        if not na(high[i]) and math.abs(high[i] - refHigh) <= eqTol
+        if not na(high[i]) and math.abs(high[i] - refHigh) <= eqTol and (i - lastEqHighMatch) >= 3
             eqHighLevel    := refHigh
             eqHighDetected := true
             eqHighCount    += 1
+            lastEqHighMatch := i
 
 if isSwingLow
     float refLow = low[effSwingLen]
     float eqTol  = atr * eqTolerance
+    int lastEqLowMatch = -999
     for i = effSwingLen + 1 to effSwingLen + eqLookback
-        if not na(low[i]) and math.abs(low[i] - refLow) <= eqTol
+        if not na(low[i]) and math.abs(low[i] - refLow) <= eqTol and (i - lastEqLowMatch) >= 3
             eqLowLevel    := refLow
             eqLowDetected := true
             eqLowCount    += 1
+            lastEqLowMatch := i
 
 if eqHighDetected
     lastEQHLevel := eqHighLevel
@@ -1331,11 +1360,34 @@ float _idmHighRef = ta.highest(high, effSwingLen * 4 + 1)
 float _idmLowRef  = ta.lowest(low,  effSwingLen * 4 + 1)
 bool idmHighFalse = isSwingHigh and not bosUp   and not chochUp   and high[effSwingLen] < _idmHighRef
 bool idmLowFalse  = isSwingLow  and not bosDown and not chochDown and low[effSwingLen]  > _idmLowRef
+
+// v6.5 fix: el inducement institucional se CONFIRMA cuando el nivel candidato es barrido más tarde —
+// antes se etiquetaba "IDM" solo por no romper estructura, sin verificar el sweep posterior. Ahora se
+// distingue el candidato ("IDM?", sin confirmar) de la barrida confirmada ("IDM ✅ Swept").
+var float idmPendingHigh = na
+var float idmPendingLow  = na
+bool idmHighSwept = not na(idmPendingHigh) and high > idmPendingHigh
+bool idmLowSwept  = not na(idmPendingLow)  and low  < idmPendingLow
+
+if idmHighFalse
+    idmPendingHigh := high[effSwingLen]
+else if idmHighSwept
+    idmPendingHigh := na
+
+if idmLowFalse
+    idmPendingLow := low[effSwingLen]
+else if idmLowSwept
+    idmPendingLow := na
+
 if showIDM and showContext
     if idmHighFalse
-        label.new(bar_index - effSwingLen, high[effSwingLen], "IDM ↑", color=color.new(colIDM, 60), textcolor=colIDM, style=label.style_label_down, size=size.tiny)
+        label.new(bar_index - effSwingLen, high[effSwingLen], "IDM? ↑", color=color.new(colIDM, 60), textcolor=colIDM, style=label.style_label_down, size=size.tiny)
     if idmLowFalse
-        label.new(bar_index - effSwingLen, low[effSwingLen],  "IDM ↓", color=color.new(colIDM, 60), textcolor=colIDM, style=label.style_label_up,   size=size.tiny)
+        label.new(bar_index - effSwingLen, low[effSwingLen],  "IDM? ↓", color=color.new(colIDM, 60), textcolor=colIDM, style=label.style_label_up,   size=size.tiny)
+    if idmHighSwept and barstate.isconfirmed
+        label.new(bar_index, high, "IDM ✅ Swept", color=color.new(colIDM, 0), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+    if idmLowSwept and barstate.isconfirmed
+        label.new(bar_index, low,  "IDM ✅ Swept", color=color.new(colIDM, 0), textcolor=color.white, style=label.style_label_up,   size=size.tiny)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ OTE ZONE
@@ -1405,15 +1457,22 @@ if showOTESignals and barstate.isconfirmed
         f_sl_tp(false, oteSwingH + atr * 0.1, close, atr, riskReward, showSLTP, false)
 
 // ██ WYCKOFF PHASE DETECTION
+// v6.5 fix: un Spring/UTAD real ocurre al FINAL de un Trading Range de acumulación/distribución, no en medio
+// de una tendencia limpia. Antes cualquier sweep+reclaim de un EQL/EQH se etiquetaba "Wyckoff" sin verificar
+// que el mercado estuviera efectivamente lateral — se exige ADX bajo (mismo criterio que usa el resto del
+// script para "no tendencia") como proxy del contexto de rango.
+[_wyckAdxP, _wyckAdxM, _wyckAdxVal] = ta.dmi(paAdxLen, paAdxLen)
+bool wyckRangingCtx = _wyckAdxVal < paAdxMin
+
 bool wyckSpring = false
 bool wyckUTAD   = false
 bool eqlStillValid = not na(lastEQLLevel) and (bar_index - lastEQLBar) < 50
 bool eqhStillValid = not na(lastEQHLevel) and (bar_index - lastEQHBar) < 50
 
-if eqlStillValid
+if eqlStillValid and wyckRangingCtx
     if low < lastEQLLevel and close > lastEQLLevel and (pBarUp or engulfBull) and volume > avgVol
         wyckSpring := true
-if eqhStillValid
+if eqhStillValid and wyckRangingCtx
     if high > lastEQHLevel and close < lastEQHLevel and (pBarDn or engulfBear) and volume > avgVol
         wyckUTAD := true
 
@@ -1612,8 +1671,10 @@ if bearOBs.size() > 0
             bearOBs.remove(i)
 
 // OB Creation on BOS/CHoCH
+// v6.5 fix: el origen del OB ya no es el extremo del swing (ta.lowestbars/highestbars) sino la última vela
+// de color opuesto al impulso — definición institucional real del Order Block.
 if bosUp or chochUp
-    int lowestIndex = -1 * obLbVal
+    int lowestIndex = f_lastOppositeCandle(true, effSwingLen * 2 + 1, -1 * obLbVal)
     bool hasUni  = bullFVGs.size() > 0 and bullFVGs.get(bullFVGs.size() - 1).bottom >= low[lowestIndex]
     bool isWeakB = bosWeakUp
     int  obStr   = (hasUni and mtfBullCongruence) ? 4 : mtfBullCongruence ? 3 : hasUni ? 2 : 1
@@ -1633,7 +1694,7 @@ if bosUp or chochUp
     bullOBs.clean()
 
 if bosDown or chochDown
-    int highestIndex = -1 * obHbVal
+    int highestIndex = f_lastOppositeCandle(false, effSwingLen * 2 + 1, -1 * obHbVal)
     bool hasUni  = bearFVGs.size() > 0 and bearFVGs.get(bearFVGs.size() - 1).top <= high[highestIndex]
     bool isWeakB = bosWeakDown
     int  obStr   = (hasUni and mtfBearCongruence) ? 4 : mtfBearCongruence ? 3 : hasUni ? 2 : 1
@@ -2210,7 +2271,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.4 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.5 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
