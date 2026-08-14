@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.8 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.9 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -20,8 +20,12 @@
 //       (ignoraba el input configurable de horario NY en el scoring y el multiplicador de sesión); Volume
 //       Profile ahora se ancla a la sesión (como el VWAP) en vez de una ventana fija de 50 barras, y reparte
 //       el volumen de cada vela por todo su rango low-high en vez de concentrarlo en el bin del close.
+// v6.9: Alertas de trade reorganizadas — SOLO patrones con nombre en metodología institucional. Se eliminó
+//       el tier genérico BUY/ELITE BUY (pin bar/outside bar + score, sin POI institucional específico) y se
+//       promovieron a señal completa (SL/TP) Wyckoff Spring/UTAD, Silver Bullet Pattern, y una nueva señal
+//       de Sweep de liquidez + Divergencia de Delta Acumulado.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.8 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.8", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.9 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.9", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -769,6 +773,16 @@ bool sbBearFVGPresent = bearFVGs.size() > 0 and isSilverBullet
 sbPatternBull := isSilverBullet and sbSweepLowDone  and (pBarUp or engulfBull) and sbBullFVGPresent and volume > avgVol
 sbPatternBear := isSilverBullet and sbSweepHighDone and (pBarDn or engulfBear) and sbBearFVGPresent and volume > avgVol
 
+// v6.9: Silver Bullet Pattern promovido a señal de trade con riesgo definido — es uno de los setups ICT
+// con nombre propio más específicos del script (ventana horaria + sweep + FVG), antes solo era contexto.
+if showSilverBullet and barstate.isconfirmed
+    if sbPatternBull
+        label.new(bar_index, low, "🎯 SB BUY\nSweep+FVG", color=#C0CA33, textcolor=color.black, style=label.style_label_up, size=size.tiny)
+        f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+    if sbPatternBear
+        label.new(bar_index, high, "🎯 SB SELL\nSweep+FVG", color=#C0CA33, textcolor=color.black, style=label.style_label_down, size=size.tiny)
+        f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ VWAP + STD BANDS
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1069,6 +1083,28 @@ if showCumDelta and showContext and barstate.isconfirmed and (bar_index - lastDe
     if cumDeltaDivBull
         label.new(bar_index, low, "Δ DIV ↑", color=color.new(#00E676, 40), textcolor=color.rgb(0, 0, 0), style=label.style_label_up, size=size.tiny)
         lastDeltaLblBar := bar_index
+
+// v6.9: nueva señal de trade — Barrida de liquidez + Divergencia de Delta Acumulado + vela de rechazo.
+// Patrón institucional completo: precio barre un extremo reciente pero el order flow (CVD) no lo confirma
+// (absorción), seguido de una vela de reversión con volumen — es el mismo principio que el ejemplo de
+// "divergencia" pedido, ahora como señal independiente con SL/TP en vez de quedar solo como contexto.
+bool sweepDivBull = isSweepLow  and cumDeltaDivBull and (pBarUp or engulfBull) and volume > avgVol and not isDeadZone
+bool sweepDivBear = isSweepHigh and cumDeltaDivBear and (pBarDn or engulfBear) and volume > avgVol and not isDeadZone
+
+var int lastSweepDivBuyBar  = -999
+var int lastSweepDivSellBar = -999
+bool sweepDivBuySig  = sweepDivBull and barstate.isconfirmed and (bar_index - lastSweepDivBuyBar)  >= paMaxSignalGap
+bool sweepDivSellSig = sweepDivBear and barstate.isconfirmed and (bar_index - lastSweepDivSellBar) >= paMaxSignalGap
+
+if sweepDivBuySig
+    label.new(bar_index, low, "💧Δ SWEEP+DIV BUY", color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny)
+    f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+    lastSweepDivBuyBar := bar_index
+
+if sweepDivSellSig
+    label.new(bar_index, high, "💧Δ SWEEP+DIV SELL", color=#00E5FF, textcolor=color.black, style=label.style_label_down, size=size.tiny)
+    f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+    lastSweepDivSellBar := bar_index
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ DISPLACEMENT DETECTION
@@ -1513,11 +1549,15 @@ if eqhStillValid and wyckRangingCtx
     if high > lastEQHLevel and close < lastEQHLevel and (pBarDn or engulfBear) and volume > avgVol
         wyckUTAD := true
 
+// v6.9: Spring/UTAD promovido a señal de trade con riesgo definido — antes solo quedaba como etiqueta de
+// contexto pese a ser uno de los patrones de reversión institucional (Wyckoff) mejor definidos del script.
 if showWyckoff and showContext and barstate.isconfirmed
     if wyckSpring
         label.new(bar_index, low, "🔄 SPRING\nAccumulation", color=color.new(#00E676, 10), textcolor=color.black, style=label.style_label_up, size=size.tiny)
+        f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
     if wyckUTAD
         label.new(bar_index, high, "🔄 UTAD\nDistribution", color=color.new(#FF5252, 10), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+        f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ LIQUIDITY VOIDS
@@ -2021,45 +2061,11 @@ if isDiamondSell and maxSignalRankThisBar < 6
     vtBearTP1Done := false
     vtBearActive := true
 
-if paBuy and not isDiamondBuy
-    int signalRank = finalScoreBull >= tierElite ? 5 : 3
-    if maxSignalRankThisBar < signalRank
-        maxSignalRankThisBar := signalRank
-        string tierStr = finalScoreBull >= tierElite ? "💎 ELITE BUY" : "🟢 BUY"
-        color  tierCol = finalScoreBull >= tierElite ? #00E676 : #00C853
-        label.new(bar_index, low, tierStr + "\nScore: " + str.tostring(finalScoreBull, "#.1"), color=tierCol, textcolor=color.black, style=label.style_label_up, size=size.tiny, tooltip=bullTooltip)
-        float paSlBuy = not na(paBullOBBottom) ? math.min(paBullOBBottom - atr * 0.1, localSwingLow - atr * 0.1) : localSwingLow - atr * 0.1
-        float _rkVal = math.max(close - paSlBuy, atr * 0.1)
-        float _tp1Val = close + _rkVal * riskReward * 0.5
-        float _tp2Val = close + _rkVal * riskReward
-        int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlBuy)
-        f_sl_tp(true, paSlBuy, close, atr, riskReward, showSLTP, showTP2)
-        alert('{"signal": "' + tierStr + '", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(paSlBuy) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBull, "#.1") + '}', alert.freq_once_per_bar_close)
-        vtBullSL := paSlBuy
-        vtBullTP1 := _tp1Val
-        vtBullTP2 := _tp2Val
-        vtBullTP1Done := false
-        vtBullActive := true
-
-if paSell and not isDiamondSell
-    int signalRank = finalScoreBear >= tierElite ? 5 : 3
-    if maxSignalRankThisBar < signalRank
-        maxSignalRankThisBar := signalRank
-        string tierStr = finalScoreBear >= tierElite ? "💎 ELITE SELL" : "🔴 SELL"
-        color  tierCol = finalScoreBear >= tierElite ? #FF5252 : #D50000
-        label.new(bar_index, high, tierStr + "\nScore: " + str.tostring(finalScoreBear, "#.1"), color=tierCol, textcolor=color.white, style=label.style_label_down, size=size.tiny, tooltip=bearTooltip)
-        float paSlSell = not na(paBearOBTop) ? math.max(paBearOBTop + atr * 0.1, localSwingHigh + atr * 0.1) : localSwingHigh + atr * 0.1
-        float _rkVal = math.max(paSlSell - close, atr * 0.1)
-        float _tp1Val = close - _rkVal * riskReward * 0.5
-        float _tp2Val = close - _rkVal * riskReward
-        int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlSell)
-        f_sl_tp(false, paSlSell, close, atr, riskReward, showSLTP, showTP2)
-        alert('{"signal": "' + tierStr + '", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(paSlSell) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBear, "#.1") + '}', alert.freq_once_per_bar_close)
-        vtBearSL := paSlSell
-        vtBearTP1 := _tp1Val
-        vtBearTP2 := _tp2Val
-        vtBearTP1Done := false
-        vtBearActive := true
+// v6.9 fix: se eliminó el tier genérico "BUY/ELITE BUY" (pin bar/outside bar + score ≥ umbral, sin
+// exigir cercanía a ningún POI institucional específico) como alerta de TRADE — no corresponde a ningún
+// patrón con nombre en la metodología ICT/SMC/Wyckoff/Order Flow, era el más discrecional de todos los
+// tiers. paBuy/paSell se conservan como ingrediente interno de isDiamondBuy/Sell y de la validación de
+// mitigación de OB (paValidBull/paValidBear), pero ya no disparan una señal de trade por sí solos.
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ ORDER FLOW ENTRY SIGNAL
@@ -2404,7 +2410,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.8 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.9 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
@@ -2512,14 +2518,18 @@ bool nearKeyLevelEnter = nearKeyLevelCond and not nearKeyLevelCond[1]
 bool oteZoneCond       = inOTEBull or inOTEBear
 bool oteZoneEnter      = oteZoneCond and not oteZoneCond[1]
 
-// ── 🎯 SEÑAL — entradas con riesgo definido (BUY+SELL fusionados) ──
+// ── 🎯 SEÑAL — entradas con riesgo definido, todas patrones con nombre en metodología institucional
+// (ICT/SMC: OB retest, Order Flow, Liquidity Sweep, OTE; Wyckoff: Spring/UTAD; ICT: Silver Bullet;
+// Order Flow: Sweep+Delta Divergence). v6.9: se eliminó el tier genérico BUY/ELITE BUY (pin bar/outside
+// bar + score, sin POI institucional específico) y se promovieron Wyckoff, Silver Bullet y Sweep+Div.
 alertcondition((signalBuy or signalSell) and barstate.isconfirmed, "🎯 SEÑAL: INST BUY/SELL (OB Touch)", "🏦 Institutional Signal — OB Touch")
-alertcondition((paBuy or paSell) and barstate.isconfirmed, "🎯 SEÑAL: BUY/SELL Signal", "🟢🔴 BUY/SELL Signal")
-alertcondition(((paBuy and finalScoreBull >= tierElite) or (paSell and finalScoreBear >= tierElite)) and barstate.isconfirmed, "🎯 SEÑAL: ELITE BUY/SELL", "💎 ELITE Signal")
 alertcondition((isDiamondBuy or isDiamondSell) and barstate.isconfirmed, "🎯 SEÑAL: ⬡ DIAMOND BUY/SELL", "⬡ DIAMOND Signal — Máxima Confluencia")
 alertcondition((ofBuy or ofSell) and barstate.isconfirmed, "🎯 SEÑAL: 📊 OF BUY/SELL", "📊 Order Flow Signal — Absorción+Agotamiento+Iniciación")
 alertcondition(sweepBullSig or sweepBearSig, "🎯 SEÑAL: SWEEP EQL/EQH", "💧 Liquidity Sweep Signal")
 alertcondition((oteBullPA or oteBearPA) and barstate.isconfirmed, "🎯 SEÑAL: OTE BUY/SELL", "🎯 OTE Zone Signal — 62-79% Fib")
+alertcondition((wyckSpring or wyckUTAD) and barstate.isconfirmed, "🎯 SEÑAL: 🔄 WYCKOFF SPRING/UTAD", "🔄 Wyckoff Spring/UTAD — Reversión confirmada")
+alertcondition((sbPatternBull or sbPatternBear) and barstate.isconfirmed, "🎯 SEÑAL: 🎯 SILVER BULLET", "🎯 Silver Bullet Pattern — Sweep+FVG")
+alertcondition(sweepDivBuySig or sweepDivSellSig, "🎯 SEÑAL: 💧Δ SWEEP+DIV", "💧Δ Liquidity Sweep + Delta Divergence")
 
 // ── 🎯 SEÑAL — salidas (v6.6: antes no existía ninguna; v6.7: Long+Short fusionados) ──
 alertcondition((vtBullSLHit  or vtBearSLHit)  and barstate.isconfirmed, "🎯 SEÑAL: 🛑 SL HIT",    "🛑 Stop Loss alcanzado")
@@ -2536,14 +2546,12 @@ alertcondition((superEleBull or superEleBear) and barstate.isconfirmed, "ℹ️ 
 
 alertcondition(nearOBEnter, "ℹ️ CONTEXTO: NEAR OB", "📦 Precio entrando en zona cercana a OB")
 
-alertcondition((wyckSpring or wyckUTAD) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 WYCKOFF", "🔄 Wyckoff Spring/UTAD detected")
 alertcondition((isDisplacementBull or isDisplacementBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: ⚡ DISPLACEMENT", "⚡ Displacement detected")
 alertcondition((cumDeltaDivBull or cumDeltaDivBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: Δ DELTA DIV", "Δ Cum. Delta Divergence")
 alertcondition((lvBullGap or lvBearGap) and barstate.isconfirmed, "ℹ️ CONTEXTO: LV Gap", "🟥 Liquidity Void detected")
 alertcondition(nearKeyLevelEnter, "ℹ️ CONTEXTO: NEAR KEY LEVEL", "📍 Precio entrando cerca de PDH/PDL/PWH/PWL")
 alertcondition(oteZoneEnter, "ℹ️ CONTEXTO: OTE ZONE", "🎯 Precio entrando en zona OTE")
 
-alertcondition((sbPatternBull or sbPatternBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🎯 SB PATTERN", "🎯 Silver Bullet Pattern — Sweep+FVG")
 alertcondition((orRetestBull or orRetestBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 OR RETEST", "🔄 OR Breakout Retest")
 alertcondition(deadZoneEnter, "ℹ️ CONTEXTO: ⚠️ DEAD ZONE", "⚠️ Entrando en Dead Zone — No operar (lunch/cierre)")
 
