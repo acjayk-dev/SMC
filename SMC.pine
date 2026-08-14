@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.10 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.11 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -28,8 +28,11 @@
 //        Confluence" (ya no dispara alerta propia); nuevos toggles independientes "Señal Wyckoff
 //        Spring/UTAD", "Señal Silver Bullet Pattern" y "Señal Sweep + Delta Divergence" en 🎯 UNIFIED
 //        SIGNALS, separados de sus toggles visuales en 🔑 ICT KEY LEVELS.
+// v6.11: Auditoría completa de los 156 inputs del panel de Settings — dashShowScore ("Show Scores") estaba
+//        declarado pero nunca leído; las filas Bull/Bear Score del dashboard se dibujaban siempre sin
+//        importar el toggle. Ahora lo controla correctamente.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.10 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.10", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.11 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.11", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2424,7 +2427,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.10 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.11 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
@@ -2446,10 +2449,18 @@ if showDash and barstate.islast
     table.cell(dash, 1, 9,  lvlStr,           text_color=lvlCol,        bgcolor=#263238, text_size=dSize)
     table.cell(dash, 0, 10, "Confluence",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 10, confStr,          text_color=confCol,       bgcolor=#263238, text_size=dSize)
-    table.cell(dash, 0, 11, "Bull Score",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
-    table.cell(dash, 1, 11, str.tostring(finalScoreBull, "#.1"),  text_color=_cb, bgcolor=#263238, text_size=dSize)
-    table.cell(dash, 0, 12, "Bear Score",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
-    table.cell(dash, 1, 12, str.tostring(finalScoreBear, "#.1"),  text_color=_cs, bgcolor=#263238, text_size=dSize)
+    // v6.11 fix: dashShowScore ("Show Scores") estaba declarado pero nunca leído — las filas de score se
+    // dibujaban siempre sin importar el toggle. Ahora controla si se muestran los valores o la fila queda vacía.
+    if dashShowScore
+        table.cell(dash, 0, 11, "Bull Score",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
+        table.cell(dash, 1, 11, str.tostring(finalScoreBull, "#.1"),  text_color=_cb, bgcolor=#263238, text_size=dSize)
+        table.cell(dash, 0, 12, "Bear Score",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
+        table.cell(dash, 1, 12, str.tostring(finalScoreBear, "#.1"),  text_color=_cs, bgcolor=#263238, text_size=dSize)
+    else
+        table.cell(dash, 0, 11, "", bgcolor=#263238, text_size=dSize)
+        table.cell(dash, 1, 11, "", bgcolor=#263238, text_size=dSize)
+        table.cell(dash, 0, 12, "", bgcolor=#263238, text_size=dSize)
+        table.cell(dash, 1, 12, "", bgcolor=#263238, text_size=dSize)
 
     if showMTFDash
         string s15Str = f_arrowSignal(t15)
