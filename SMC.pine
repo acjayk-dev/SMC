@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.12 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.13 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -37,8 +37,16 @@
 //        actualizándose igual que antes (estructura + Early Shift) para no romper OB/scoring/OTE/dashboard.
 //        (2) Nueva capa de Estructura Interna (ICT internal vs. external structure): swing length reducido
 //        a la mitad, con su propio iBOS/iCHoCH — puramente informativa, no alimenta OB/FVG/OTE/EQH/PD.
+// v6.13: Auditoría institucional de Divergencia/Displacement/Wyckoff Spring-UTAD/Squeeze/Sweep — la lógica
+//        de detección ya era sólida, pero 5 señales "🎯 SEÑAL" (Wyckoff Spring/UTAD, Silver Bullet, OTE,
+//        Sweep EQL/EQH, Sweep+Delta Div) dibujaban SL/TP sin registrarse ni en el Signal Interlock ni en el
+//        Virtual Trade Tracker — podían pisarse entre sí en la misma barra y sus salidas nunca disparaban
+//        alerta de SL/TP1/TP2/Trailing. Las 5 quedaron integradas a ambos sistemas (rango 3). Además, el
+//        "sweep" de Sweep+Delta Div dependía de romper el extremo de solo 3 barras (sin relación con ningún
+//        pool de liquidez real) — ahora exige estar sobre un EQL/EQH genuino, igual que su señal hermana.
+//        Squeeze (Pre-Breakout) sumó su propio toggle y alertcondition, que no tenía.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.12 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.12", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.13 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.13", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -103,20 +111,26 @@ f_ma(src, len, type) =>
         "VWMA" => ta.vwma(src, len)
         =>        ta.ema(src, len)
 
-// Helper SL/TP unificado
+// Helper SL/TP unificado — v6.13: ahora retorna [sl, tp1, tp2] (na si no dibujó nada) para que las señales
+// que no tenían su propio cálculo local (Wyckoff, Silver Bullet, Sweep EQL/EQH, Sweep+Div, OTE) puedan
+// registrar el mismo nivel exacto que se dibuja en el chart en el Virtual Trade Tracker.
 f_sl_tp(isBuy, slLevel, tpRef, _atr, _rr, _show, _showTP2) =>
+    float _sl  = na
+    float _tp1 = na
+    float _tp2 = na
     if _show and not na(slLevel)
-        float _sl = slLevel
+        _sl := slLevel
         float _rk = math.max(isBuy ? tpRef - _sl : _sl - tpRef, _atr * 0.1)
         if _rk > _atr * 3.5
             _sl := isBuy ? tpRef - _atr * 2.0 : tpRef + _atr * 2.0
             _rk := _atr * 2.0
-        float _tp1 = isBuy ? tpRef + _rk * _rr * 0.5 : tpRef - _rk * _rr * 0.5
-        float _tp2 = isBuy ? tpRef + _rk * _rr       : tpRef - _rk * _rr
+        _tp1 := isBuy ? tpRef + _rk * _rr * 0.5 : tpRef - _rk * _rr * 0.5
+        _tp2 := isBuy ? tpRef + _rk * _rr       : tpRef - _rk * _rr
         line.new(bar_index, _sl, bar_index + 8, _sl, color=color.new(#FF5252, 20), style=line.style_dashed, width=2)
         if _showTP2
             line.new(bar_index, _tp1, bar_index + 8, _tp1, color=color.new(#00E676, 50), width=1, style=line.style_dashed)
         line.new(bar_index, _tp2, bar_index + 8, _tp2, color=color.new(#00E676, 20), width=2)
+    [_sl, _tp1, _tp2]
 
 f_calc_contracts(accountBal, riskPct, entryPrice, slPrice) =>
     float dist = math.abs(entryPrice - slPrice)
@@ -331,6 +345,7 @@ lvColor         = input.color(color.new(#B71C1C, 80), "Liq. Void Color", group=g
 lvMinBars       = input.int(2, "Min Consecutive Bars for Void", minval=2, maxval=5, group=grpICT)
 showCumDelta    = input.bool(true,  "Show Cum. Delta Divergence",  group=grpICT)
 showDisplacement= input.bool(true,  "Show Multi-Bar Displacement", group=grpICT)
+showSqueeze     = input.bool(true,  "Show Squeeze (Pre-Breakout)", group=grpICT)
 showWyckoff     = input.bool(true,  "Show Wyckoff Phases",         group=grpICT)
 showWMSwings    = input.bool(true,  "Show Weekly/Monthly Swings",  group=grpICT)
 wmColor         = input.color(color.new(#00E5FF, 40), "W/M Swing Color", group=grpICT)
@@ -394,6 +409,23 @@ var float internalStructureLow     = na
 var float lastConfirmedInternalHigh = na
 var float lastConfirmedInternalLow  = na
 var int   lastInternalBOSBar        = -999
+
+// v6.13: trackers de señal (Virtual Trade Tracker + Signal Interlock Rank) declarados acá arriba —antes
+// vivían más abajo en el script, después de varias señales institucionales (Silver Bullet, Sweep EQL/EQH,
+// Sweep+Div, OTE, Wyckoff Spring/UTAD) que por eso nunca pudieron registrarse en ninguno de los dos sistemas.
+var float vtBullSL      = na
+var float vtBullTP1     = na
+var float vtBullTP2     = na
+var bool  vtBullTP1Done = false
+var bool  vtBullActive  = false
+var float vtBearSL      = na
+var float vtBearTP1     = na
+var float vtBearTP2     = na
+var bool  vtBearTP1Done = false
+var bool  vtBearActive  = false
+
+// v6.3: Signal Interlock Rank Tracker (Higher rank suppresses lower rank on same bar)
+int maxSignalRankThisBar = -1
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ SESSIONS
@@ -807,15 +839,32 @@ sbPatternBear := isSilverBullet and sbSweepHighDone and (pBarDn or engulfBear) a
 
 // v6.9: Silver Bullet Pattern promovido a señal de trade con riesgo definido — es uno de los setups ICT
 // con nombre propio más específicos del script (ventana horaria + sweep + FVG), antes solo era contexto.
+// v6.13: integrado al Signal Interlock (rango 3, junto con Wyckoff/Sweep EQL-EQH/Sweep+Div/OTE) y al
+// Virtual Trade Tracker, para que no se pise con otra señal de su mismo nivel en la misma barra y para
+// que sus niveles de SL/TP1/TP2 también disparen las alertas de salida.
 if showSilverBullet and barstate.isconfirmed
     if sbPatternBull
         label.new(bar_index, low, "🎯 SB BUY\nSweep+FVG", color=#C0CA33, textcolor=color.black, style=label.style_label_up, size=size.tiny)
-        if showSBSignal
-            f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+        if showSBSignal and maxSignalRankThisBar < 3
+            maxSignalRankThisBar := 3
+            [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+            if not na(_sbSl)
+                vtBullSL := _sbSl
+                vtBullTP1 := _sbTp1
+                vtBullTP2 := _sbTp2
+                vtBullTP1Done := false
+                vtBullActive := true
     if sbPatternBear
         label.new(bar_index, high, "🎯 SB SELL\nSweep+FVG", color=#C0CA33, textcolor=color.black, style=label.style_label_down, size=size.tiny)
-        if showSBSignal
-            f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+        if showSBSignal and maxSignalRankThisBar < 3
+            maxSignalRankThisBar := 3
+            [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+            if not na(_sbSl)
+                vtBearSL := _sbSl
+                vtBearTP1 := _sbTp1
+                vtBearTP2 := _sbTp2
+                vtBearTP1Done := false
+                vtBearActive := true
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ VWAP + STD BANDS
@@ -1117,28 +1166,6 @@ if showCumDelta and showContext and barstate.isconfirmed and (bar_index - lastDe
     if cumDeltaDivBull
         label.new(bar_index, low, "Δ DIV ↑", color=color.new(#00E676, 40), textcolor=color.rgb(0, 0, 0), style=label.style_label_up, size=size.tiny)
         lastDeltaLblBar := bar_index
-
-// v6.9: nueva señal de trade — Barrida de liquidez + Divergencia de Delta Acumulado + vela de rechazo.
-// Patrón institucional completo: precio barre un extremo reciente pero el order flow (CVD) no lo confirma
-// (absorción), seguido de una vela de reversión con volumen — es el mismo principio que el ejemplo de
-// "divergencia" pedido, ahora como señal independiente con SL/TP en vez de quedar solo como contexto.
-bool sweepDivBull = showSweepDivSignal and isSweepLow  and cumDeltaDivBull and (pBarUp or engulfBull) and volume > avgVol and not isDeadZone
-bool sweepDivBear = showSweepDivSignal and isSweepHigh and cumDeltaDivBear and (pBarDn or engulfBear) and volume > avgVol and not isDeadZone
-
-var int lastSweepDivBuyBar  = -999
-var int lastSweepDivSellBar = -999
-bool sweepDivBuySig  = sweepDivBull and barstate.isconfirmed and (bar_index - lastSweepDivBuyBar)  >= paMaxSignalGap
-bool sweepDivSellSig = sweepDivBear and barstate.isconfirmed and (bar_index - lastSweepDivSellBar) >= paMaxSignalGap
-
-if sweepDivBuySig
-    label.new(bar_index, low, "💧Δ SWEEP+DIV BUY", color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny)
-    f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
-    lastSweepDivBuyBar := bar_index
-
-if sweepDivSellSig
-    label.new(bar_index, high, "💧Δ SWEEP+DIV SELL", color=#00E5FF, textcolor=color.black, style=label.style_label_down, size=size.tiny)
-    f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
-    lastSweepDivSellBar := bar_index
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ DISPLACEMENT DETECTION
@@ -1517,13 +1544,68 @@ bool paNearEQH_sw = eqHighDetected and not na(eqHighLevel) and math.abs(high - e
 bool sweepBullSig = showSweepSignal and barstate.isconfirmed and isSweepLow  and paNearEQL_sw and pBarUp  and volume > avgVol and not isDeadZone
 bool sweepBearSig = showSweepSignal and barstate.isconfirmed and isSweepHigh and paNearEQH_sw and pBarDn  and volume > avgVol and not isDeadZone
 
-if sweepBullSig
+// v6.13: integrado al Signal Interlock (rango 3) y al Virtual Trade Tracker — antes dibujaba SL/TP pero
+// nunca quedaba registrado, así que sus salidas nunca disparaban alerta de SL/TP1/TP2/Trailing.
+if sweepBullSig and maxSignalRankThisBar < 3
+    maxSignalRankThisBar := 3
     label.new(bar_index, low, "💧 EQL SWEEP BUY", color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny)
-    f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+    [_swSl, _swTp1, _swTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+    if not na(_swSl)
+        vtBullSL := _swSl
+        vtBullTP1 := _swTp1
+        vtBullTP2 := _swTp2
+        vtBullTP1Done := false
+        vtBullActive := true
 
-if sweepBearSig
+if sweepBearSig and maxSignalRankThisBar < 3
+    maxSignalRankThisBar := 3
     label.new(bar_index, high, "💧 EQH SWEEP SELL", color=#00E5FF, textcolor=color.black, style=label.style_label_down, size=size.tiny)
-    f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+    [_swSl, _swTp1, _swTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+    if not na(_swSl)
+        vtBearSL := _swSl
+        vtBearTP1 := _swTp1
+        vtBearTP2 := _swTp2
+        vtBearTP1Done := false
+        vtBearActive := true
+
+// v6.9: señal de trade — Barrida de liquidez + Divergencia de Delta Acumulado + vela de rechazo. Patrón
+// institucional completo: precio barre un pool de liquidez real pero el order flow (CVD) no lo confirma
+// (absorción), seguido de una vela de reversión con volumen.
+// v6.13 fix: antes "barrida" solo exigía romper el extremo de las últimas 3 barras (isSweepLow/isSweepHigh)
+// sin relación con ningún pool de liquidez real — ahora exige además estar sobre un EQL/EQH genuino
+// (paNearEQL_sw/paNearEQH_sw), el mismo criterio que usa la señal "Sweep EQL/EQH" de arriba. También se
+// integra al Signal Interlock (rango 3) y al Virtual Trade Tracker.
+bool sweepDivBull = showSweepDivSignal and isSweepLow  and paNearEQL_sw and cumDeltaDivBull and (pBarUp or engulfBull) and volume > avgVol and not isDeadZone
+bool sweepDivBear = showSweepDivSignal and isSweepHigh and paNearEQH_sw and cumDeltaDivBear and (pBarDn or engulfBear) and volume > avgVol and not isDeadZone
+
+var int lastSweepDivBuyBar  = -999
+var int lastSweepDivSellBar = -999
+bool sweepDivBuySig  = sweepDivBull and barstate.isconfirmed and (bar_index - lastSweepDivBuyBar)  >= paMaxSignalGap
+bool sweepDivSellSig = sweepDivBear and barstate.isconfirmed and (bar_index - lastSweepDivSellBar) >= paMaxSignalGap
+
+if sweepDivBuySig and maxSignalRankThisBar < 3
+    maxSignalRankThisBar := 3
+    label.new(bar_index, low, "💧Δ SWEEP+DIV BUY", color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny)
+    [_sdSl, _sdTp1, _sdTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+    lastSweepDivBuyBar := bar_index
+    if not na(_sdSl)
+        vtBullSL := _sdSl
+        vtBullTP1 := _sdTp1
+        vtBullTP2 := _sdTp2
+        vtBullTP1Done := false
+        vtBullActive := true
+
+if sweepDivSellSig and maxSignalRankThisBar < 3
+    maxSignalRankThisBar := 3
+    label.new(bar_index, high, "💧Δ SWEEP+DIV SELL", color=#00E5FF, textcolor=color.black, style=label.style_label_down, size=size.tiny)
+    [_sdSl, _sdTp1, _sdTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+    lastSweepDivSellBar := bar_index
+    if not na(_sdSl)
+        vtBearSL := _sdSl
+        vtBearTP1 := _sdTp1
+        vtBearTP2 := _sdTp2
+        vtBearTP1Done := false
+        vtBearActive := true
 
 // ── IDM ──
 float _idmHighRef = ta.highest(high, effSwingLen * 4 + 1)
@@ -1616,15 +1698,30 @@ bool oteSignalCooldown = (bar_index - lastOTESignalBar) >= 8
 bool oteBullPA  = inOTEBull and (pBarUp or engulfBull or momBull) and volume > avgVol and oteSignalCooldown and not isDeadZone
 bool oteBearPA  = inOTEBear and (pBarDn or engulfBear or momBear) and volume > avgVol and oteSignalCooldown and not isDeadZone
 
+// v6.13: integrado al Signal Interlock (rango 3) y al Virtual Trade Tracker.
 if showOTESignals and barstate.isconfirmed
-    if oteBullPA
+    if oteBullPA and maxSignalRankThisBar < 3
+        maxSignalRankThisBar := 3
         label.new(bar_index, low, "🎯 OTE BUY\n62-79% Fib", color=#FF6F00, textcolor=color.white, style=label.style_label_up, size=size.tiny)
         lastOTESignalBar := bar_index
-        f_sl_tp(true, oteSwingL - atr * 0.1, close, atr, riskReward, showSLTP, false)
-    if oteBearPA
+        [_oteSl, _oteTp1, _oteTp2] = f_sl_tp(true, oteSwingL - atr * 0.1, close, atr, riskReward, showSLTP, false)
+        if not na(_oteSl)
+            vtBullSL := _oteSl
+            vtBullTP1 := _oteTp1
+            vtBullTP2 := _oteTp2
+            vtBullTP1Done := false
+            vtBullActive := true
+    if oteBearPA and maxSignalRankThisBar < 3
+        maxSignalRankThisBar := 3
         label.new(bar_index, high, "🎯 OTE SELL\n62-79% Fib", color=#FF6F00, textcolor=color.white, style=label.style_label_down, size=size.tiny)
         lastOTESignalBar := bar_index
-        f_sl_tp(false, oteSwingH + atr * 0.1, close, atr, riskReward, showSLTP, false)
+        [_oteSl, _oteTp1, _oteTp2] = f_sl_tp(false, oteSwingH + atr * 0.1, close, atr, riskReward, showSLTP, false)
+        if not na(_oteSl)
+            vtBearSL := _oteSl
+            vtBearTP1 := _oteTp1
+            vtBearTP2 := _oteTp2
+            vtBearTP1Done := false
+            vtBearActive := true
 
 // ██ WYCKOFF PHASE DETECTION
 // v6.5 fix: un Spring/UTAD real ocurre al FINAL de un Trading Range de acumulación/distribución, no en medio
@@ -1648,15 +1745,30 @@ if eqhStillValid and wyckRangingCtx
 
 // v6.9: Spring/UTAD promovido a señal de trade con riesgo definido — antes solo quedaba como etiqueta de
 // contexto pese a ser uno de los patrones de reversión institucional (Wyckoff) mejor definidos del script.
+// v6.13: integrado al Signal Interlock (rango 3) y al Virtual Trade Tracker.
 if showWyckoff and showContext and barstate.isconfirmed
     if wyckSpring
         label.new(bar_index, low, "🔄 SPRING\nAccumulation", color=color.new(#00E676, 10), textcolor=color.black, style=label.style_label_up, size=size.tiny)
-        if showWyckoffSignal
-            f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+        if showWyckoffSignal and maxSignalRankThisBar < 3
+            maxSignalRankThisBar := 3
+            [_wSl, _wTp1, _wTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+            if not na(_wSl)
+                vtBullSL := _wSl
+                vtBullTP1 := _wTp1
+                vtBullTP2 := _wTp2
+                vtBullTP1Done := false
+                vtBullActive := true
     if wyckUTAD
         label.new(bar_index, high, "🔄 UTAD\nDistribution", color=color.new(#FF5252, 10), textcolor=color.white, style=label.style_label_down, size=size.tiny)
-        if showWyckoffSignal
-            f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+        if showWyckoffSignal and maxSignalRankThisBar < 3
+            maxSignalRankThisBar := 3
+            [_wSl, _wTp1, _wTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+            if not na(_wSl)
+                vtBearSL := _wSl
+                vtBearTP1 := _wTp1
+                vtBearTP2 := _wTp2
+                vtBearTP1Done := false
+                vtBearActive := true
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ LIQUIDITY VOIDS
@@ -2025,10 +2137,12 @@ float tierElite   = effMinScore * 1.4
 float tierDiamond = effMinScore * 1.75
 
 // v6.3: Squeeze / Pre-Breakout Consolidation Detection
+// v6.13: agregado toggle propio (showSqueeze) y alertcondition de contexto — antes solo dependía del
+// showContext global, sin control individual ni forma de alertar, a diferencia de Displacement/Cum Delta Div.
 bool isNR4 = (high - low) == ta.lowest(high - low, 4)
 bool isInsideBarSeries = (high <= high[1] and low >= low[1]) and (high[1] <= high[2] and low[1] >= low[2])
 bool isSqueeze = (isNR4 or isInsideBarSeries) and nearVWAP
-if isSqueeze and barstate.isconfirmed and showContext
+if isSqueeze and barstate.isconfirmed and showSqueeze and showContext
     label.new(bar_index, high, "🔄 SQUEEZE", color=color.new(#FF9800, 30), textcolor=color.white, style=label.style_label_down, size=size.tiny)
 
 string bullTooltip = "T:" + str.tostring(scoreBull, "#.1") + " POI:" + str.tostring(poiBonusBull, "#.1") + " Mult:" + str.tostring(sessionMult, "#.2")
@@ -2040,20 +2154,9 @@ bool isPABearPattern = pBarDn or validOutsideBear
 var int lastSignalBullBar = -999
 var int lastSignalBearBar = -999
 
-// v6.6: Virtual trade tracker — captura el SL/TP1/TP2 de CUALQUIER señal de entrada (Diamond/Elite/Buy/OF/INST)
-// para poder alertar cuando esos niveles se toquen. Antes solo existían alertas de ENTRADA; ninguna avisaba
-// cuándo el SL, el TP1/TP2 o el trailing stop de la última señal activa habían sido alcanzados.
-var float vtBullSL      = na
-var float vtBullTP1     = na
-var float vtBullTP2     = na
-var bool  vtBullTP1Done = false
-var bool  vtBullActive  = false
-var float vtBearSL      = na
-var float vtBearTP1     = na
-var float vtBearTP2     = na
-var bool  vtBearTP1Done = false
-var bool  vtBearActive  = false
-
+// v6.6: Virtual trade tracker — captura el SL/TP1/TP2 de CUALQUIER señal de entrada (Diamond/Elite/Buy/OF/INST/
+// Wyckoff/Silver Bullet/Sweep/OTE) para poder alertar cuando esos niveles se toquen. Declarado en CORE VARIABLES
+// (ver v6.13) para que también esté disponible para las señales que se detectan más arriba en el script.
 bool signalNotSpamBull = (bar_index - lastSignalBullBar) >= paMaxSignalGap or (finalScoreBull >= tierElite and (bar_index - lastSignalBullBar) >= 2)
 bool signalNotSpamBear = (bar_index - lastSignalBearBar) >= paMaxSignalGap or (finalScoreBear >= tierElite and (bar_index - lastSignalBearBar) >= 2)
 
@@ -2123,9 +2226,6 @@ else if showInsideBars and validInsideBear
     _barCol := colInBear
 
 barcolor(_barCol)
-
-// v6.3: Signal Interlock Rank Tracker (Higher rank suppresses lower rank on same bar)
-int maxSignalRankThisBar = -1
 
 // Signals Labels
 if isDiamondBuy and maxSignalRankThisBar < 6
@@ -2509,7 +2609,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.12 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.13 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
@@ -2657,6 +2757,7 @@ alertcondition(nearOBEnter, "ℹ️ CONTEXTO: NEAR OB", "📦 Precio entrando en
 
 alertcondition((isDisplacementBull or isDisplacementBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: ⚡ DISPLACEMENT", "⚡ Displacement detected")
 alertcondition((cumDeltaDivBull or cumDeltaDivBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: Δ DELTA DIV", "Δ Cum. Delta Divergence")
+alertcondition(isSqueeze and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 SQUEEZE", "🔄 Pre-Breakout Squeeze detected")
 alertcondition((lvBullGap or lvBearGap) and barstate.isconfirmed, "ℹ️ CONTEXTO: LV Gap", "🟥 Liquidity Void detected")
 alertcondition(nearKeyLevelEnter, "ℹ️ CONTEXTO: NEAR KEY LEVEL", "📍 Precio entrando cerca de PDH/PDL/PWH/PWL")
 alertcondition(oteZoneEnter, "ℹ️ CONTEXTO: OTE ZONE", "🎯 Precio entrando en zona OTE")
