@@ -789,8 +789,10 @@ float eleEMA8    = showElephant ? ta.ema(close, 8) : na
 // follow-through citado por Velez) exige que la vela LIMPIE (cierre más allá del rango de) 3 o más velas
 // previas consecutivas del color OPUESTO, no solo tamaño/cuerpo/volumen. Antes, una vela grande verde
 // después de otras velas verdes también calificaba como "Elephant" sin haber limpiado ninguna resistencia.
-bool eleClearsBull = not eleRequireClear or (isBearC[1] and isBearC[2] and isBearC[3] and close > ta.highest(high[1], 3))
-bool eleClearsBear = not eleRequireClear or (isBullC[1] and isBullC[2] and isBullC[3] and close < ta.lowest(low[1], 3))
+float eleHighest3 = ta.highest(high[1], 3)
+float eleLowest3  = ta.lowest(low[1], 3)
+bool eleClearsBull = not eleRequireClear or (isBearC[1] and isBearC[2] and isBearC[3] and close > eleHighest3)
+bool eleClearsBear = not eleRequireClear or (isBullC[1] and isBullC[2] and isBullC[3] and close < eleLowest3)
 
 isElephantUp = isBigBull and (showElephant ? close > eleEMA8 : false) and volume > avgVol * eleVolMult and eleClearsBull
 isElephantDn = isBigBear and (showElephant ? close < eleEMA8 : false) and volume > avgVol * eleVolMult and eleClearsBear
