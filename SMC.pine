@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.13 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.14 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -45,8 +45,13 @@
 //        "sweep" de Sweep+Delta Div dependía de romper el extremo de solo 3 barras (sin relación con ningún
 //        pool de liquidez real) — ahora exige estar sobre un EQL/EQH genuino, igual que su señal hermana.
 //        Squeeze (Pre-Breakout) sumó su propio toggle y alertcondition, que no tenía.
+// v6.14: Auditoría institucional de la metodología Oliver Velez (180/VBS-VSS/Color Change/RBI-GBI/Regla
+//        3-5-8) contra fuentes externas — la lógica ya estaba bien alineada en general, salvo el Elephant
+//        Bar: le faltaba el criterio que distingue el "institutional footprint" real (~87% follow-through
+//        citado por Velez) de una vela grande cualquiera — que la vela LIMPIE 3+ velas previas consecutivas
+//        del color opuesto. Nuevo toggle "Elephant Requires Clearing 3 Opposite Bars" (activado por defecto).
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.13 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.13", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.14 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.14", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -238,6 +243,7 @@ colEleBear     = input.color(#FF0000, "Elephant Bear",    group=grpPat)
 eleBodyPct     = input.int(75,  "Elephant Min Body %", minval=50, group=grpPat)
 eleAtrMult     = input.float(1.3, "Elephant Size (×ATR)", minval=0.5, step=0.1, group=grpPat)
 eleVolMult     = input.float(1.2, "Elephant Volume (×Avg)", minval=0.5, step=0.1, group=grpPat)
+eleRequireClear= input.bool(true, "Elephant Requires Clearing 3 Opposite Bars", group=grpPat, tooltip="Metodología Velez: el 'institutional footprint' real exige que la vela limpie (cierre más allá del rango de) 3+ velas previas consecutivas del color opuesto, no solo tamaño/volumen.")
 useEleTrigger  = input.bool(true, "Elephant = Super-Signal", group=grpPat)
 showEQH        = input.bool(true,  "Show EQH (Equal Highs)", group=grpPat)
 showEQL        = input.bool(true,  "Show EQL (Equal Lows)",  group=grpPat)
@@ -778,8 +784,16 @@ float eleBodyPctV = range_bar > 0 ? (bodySize / range_bar) * 100 : 0.0
 bool  isBigBull   = close > open and eleBodyPctV >= eleBodyPct and bodySize >= atr[1] * eleAtrMult
 bool  isBigBear   = close < open and eleBodyPctV >= eleBodyPct and bodySize >= atr[1] * eleAtrMult
 float eleEMA8    = showElephant ? ta.ema(close, 8) : na
-isElephantUp = isBigBull and (showElephant ? close > eleEMA8 : false) and volume > avgVol * eleVolMult
-isElephantDn = isBigBear and (showElephant ? close < eleEMA8 : false) and volume > avgVol * eleVolMult
+
+// v6.14 fix: definición institucional de Elephant Bar (Velez) — el "institutional footprint" real (~87%
+// follow-through citado por Velez) exige que la vela LIMPIE (cierre más allá del rango de) 3 o más velas
+// previas consecutivas del color OPUESTO, no solo tamaño/cuerpo/volumen. Antes, una vela grande verde
+// después de otras velas verdes también calificaba como "Elephant" sin haber limpiado ninguna resistencia.
+bool eleClearsBull = not eleRequireClear or (isBearC[1] and isBearC[2] and isBearC[3] and close > ta.highest(high[1], 3))
+bool eleClearsBear = not eleRequireClear or (isBullC[1] and isBullC[2] and isBullC[3] and close < ta.lowest(low[1], 3))
+
+isElephantUp = isBigBull and (showElephant ? close > eleEMA8 : false) and volume > avgVol * eleVolMult and eleClearsBull
+isElephantDn = isBigBear and (showElephant ? close < eleEMA8 : false) and volume > avgVol * eleVolMult and eleClearsBear
 validEleBull = isElephantUp and trend == 1
 validEleBear = isElephantDn and trend == -1
 superEleBull = isElephantUp and useEleTrigger and not isDeadZone
@@ -2609,7 +2623,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.13 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.14 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
