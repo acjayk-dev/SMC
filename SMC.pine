@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.15 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.16 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -60,8 +60,17 @@
 //        respetaba "Show OTE Entry Signals" (inconsistente con Wyckoff/Silver Bullet, que sí lo hacían).
 //        Ahora los 35 alertcondition() exigen su toggle correspondiente. Se agregó "Alert: Dead Zone" para
 //        la única alerta que no tenía ningún interruptor.
+// v6.16: Validación de las 5 señales integradas en v6.13 (Wyckoff Spring/UTAD, Silver Bullet, Sweep EQL/EQH,
+//        Sweep+Delta Div, OTE) — las 5 se siguen generando correctamente con la configuración por defecto,
+//        pero Wyckoff y Silver Bullet tenían el registro de SL/TP (Signal Interlock + Virtual Trade Tracker)
+//        anidado dentro de su toggle puramente VISUAL ("Show Wyckoff Phases"+showContext / "Show Silver
+//        Bullet Windows") en vez de depender solo de su toggle de señal dedicado. Si el usuario apagaba la
+//        visual para despejar el gráfico dejando la señal activa, el alertcondition() igual disparaba pero
+//        el SL/TP nunca se registraba — una "🎯 SEÑAL" sin riesgo definido detrás. Desacoplado: el registro
+//        de SL/TP ahora depende únicamente de "Señal Wyckoff Spring/UTAD" / "Señal Silver Bullet Pattern",
+//        igual que las otras 3 señales de esta familia.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.15 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.15", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.16 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.16", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -874,29 +883,33 @@ sbPatternBear := isSilverBullet and sbSweepHighDone and (pBarDn or engulfBear) a
 // v6.13: integrado al Signal Interlock (rango 3, junto con Wyckoff/Sweep EQL-EQH/Sweep+Div/OTE) y al
 // Virtual Trade Tracker, para que no se pise con otra señal de su mismo nivel en la misma barra y para
 // que sus niveles de SL/TP1/TP2 también disparen las alertas de salida.
-if showSilverBullet and barstate.isconfirmed
-    if sbPatternBull
+// v6.16 fix: el registro de SL/TP ya no depende de "Show Silver Bullet Windows" (toggle puramente visual
+// de la ventana horaria) — antes, si el usuario lo apagaba para despejar el gráfico pero dejaba "Señal
+// Silver Bullet Pattern" activo, el alertcondition() igual disparaba pero el SL/TP nunca se registraba.
+if sbPatternBull
+    if showSilverBullet and barstate.isconfirmed
         label.new(bar_index, low, "🎯 SB BUY\nSweep+FVG", color=#C0CA33, textcolor=color.black, style=label.style_label_up, size=size.tiny)
-        if showSBSignal and maxSignalRankThisBar < 3
-            maxSignalRankThisBar := 3
-            [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
-            if not na(_sbSl)
-                vtBullSL := _sbSl
-                vtBullTP1 := _sbTp1
-                vtBullTP2 := _sbTp2
-                vtBullTP1Done := false
-                vtBullActive := true
-    if sbPatternBear
+    if showSBSignal and barstate.isconfirmed and maxSignalRankThisBar < 3
+        maxSignalRankThisBar := 3
+        [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+        if not na(_sbSl)
+            vtBullSL := _sbSl
+            vtBullTP1 := _sbTp1
+            vtBullTP2 := _sbTp2
+            vtBullTP1Done := false
+            vtBullActive := true
+if sbPatternBear
+    if showSilverBullet and barstate.isconfirmed
         label.new(bar_index, high, "🎯 SB SELL\nSweep+FVG", color=#C0CA33, textcolor=color.black, style=label.style_label_down, size=size.tiny)
-        if showSBSignal and maxSignalRankThisBar < 3
-            maxSignalRankThisBar := 3
-            [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
-            if not na(_sbSl)
-                vtBearSL := _sbSl
-                vtBearTP1 := _sbTp1
-                vtBearTP2 := _sbTp2
-                vtBearTP1Done := false
-                vtBearActive := true
+    if showSBSignal and barstate.isconfirmed and maxSignalRankThisBar < 3
+        maxSignalRankThisBar := 3
+        [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+        if not na(_sbSl)
+            vtBearSL := _sbSl
+            vtBearTP1 := _sbTp1
+            vtBearTP2 := _sbTp2
+            vtBearTP1Done := false
+            vtBearActive := true
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ VWAP + STD BANDS
@@ -1778,29 +1791,33 @@ if eqhStillValid and wyckRangingCtx
 // v6.9: Spring/UTAD promovido a señal de trade con riesgo definido — antes solo quedaba como etiqueta de
 // contexto pese a ser uno de los patrones de reversión institucional (Wyckoff) mejor definidos del script.
 // v6.13: integrado al Signal Interlock (rango 3) y al Virtual Trade Tracker.
-if showWyckoff and showContext and barstate.isconfirmed
-    if wyckSpring
+// v6.16 fix: el registro de SL/TP ya no depende de "Show Wyckoff Phases" ni de showContext (displayMode) —
+// antes, si el usuario apagaba la visual (o estaba en modo SCALP) pero dejaba "Señal Wyckoff Spring/UTAD"
+// activo, el alertcondition() igual disparaba pero el SL/TP nunca se registraba en el tracker.
+if wyckSpring
+    if showWyckoff and showContext and barstate.isconfirmed
         label.new(bar_index, low, "🔄 SPRING\nAccumulation", color=color.new(#00E676, 10), textcolor=color.black, style=label.style_label_up, size=size.tiny)
-        if showWyckoffSignal and maxSignalRankThisBar < 3
-            maxSignalRankThisBar := 3
-            [_wSl, _wTp1, _wTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
-            if not na(_wSl)
-                vtBullSL := _wSl
-                vtBullTP1 := _wTp1
-                vtBullTP2 := _wTp2
-                vtBullTP1Done := false
-                vtBullActive := true
-    if wyckUTAD
+    if showWyckoffSignal and barstate.isconfirmed and maxSignalRankThisBar < 3
+        maxSignalRankThisBar := 3
+        [_wSl, _wTp1, _wTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+        if not na(_wSl)
+            vtBullSL := _wSl
+            vtBullTP1 := _wTp1
+            vtBullTP2 := _wTp2
+            vtBullTP1Done := false
+            vtBullActive := true
+if wyckUTAD
+    if showWyckoff and showContext and barstate.isconfirmed
         label.new(bar_index, high, "🔄 UTAD\nDistribution", color=color.new(#FF5252, 10), textcolor=color.white, style=label.style_label_down, size=size.tiny)
-        if showWyckoffSignal and maxSignalRankThisBar < 3
-            maxSignalRankThisBar := 3
-            [_wSl, _wTp1, _wTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
-            if not na(_wSl)
-                vtBearSL := _wSl
-                vtBearTP1 := _wTp1
-                vtBearTP2 := _wTp2
-                vtBearTP1Done := false
-                vtBearActive := true
+    if showWyckoffSignal and barstate.isconfirmed and maxSignalRankThisBar < 3
+        maxSignalRankThisBar := 3
+        [_wSl, _wTp1, _wTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+        if not na(_wSl)
+            vtBearSL := _wSl
+            vtBearTP1 := _wTp1
+            vtBearTP2 := _wTp2
+            vtBearTP1Done := false
+            vtBearActive := true
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ LIQUIDITY VOIDS
@@ -2641,7 +2658,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.15 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.16 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
