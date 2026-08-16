@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.14 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.15 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -50,8 +50,18 @@
 //        Bar: le faltaba el criterio que distingue el "institutional footprint" real (~87% follow-through
 //        citado por Velez) de una vela grande cualquiera — que la vela LIMPIE 3+ velas previas consecutivas
 //        del color opuesto. Nuevo toggle "Elephant Requires Clearing 3 Opposite Bars" (activado por defecto).
+// v6.15: Auditoría completa de las 35 alertas del indicador — (1) todos los interruptores que habilitan
+//        una alerta (antes dispersos en 6 grupos distintos) se unificaron en una sola sección nueva
+//        "🔔 ALERTS — ENABLE/DISABLE". (2) Se encontró que ~15 alertcondition() ℹ️ CONTEXTO (BOS/CHoCH,
+//        iBOS/iCHoCH, Displacement, Cum Delta Div, Squeeze, LV Gap, Near Key Level, OTE Zone, OR Retest,
+//        VWAP Bounce/Rev, y los 5 patrones Velez) se calculaban SIN condicionar a su propio toggle "Show
+//        X" — el toggle solo apagaba la etiqueta visual, pero la alerta seguía disparando en segundo plano
+//        aunque el usuario la hubiera desactivado. También afectaba a la señal 🎯 OTE BUY/SELL, que no
+//        respetaba "Show OTE Entry Signals" (inconsistente con Wyckoff/Silver Bullet, que sí lo hacían).
+//        Ahora los 35 alertcondition() exigen su toggle correspondiente. Se agregó "Alert: Dead Zone" para
+//        la única alerta que no tenía ningún interruptor.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.14 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.14", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.15 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.15", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -166,6 +176,12 @@ displayMode    = input.string("CONTEXT", "Mode", options=["FULL","CONTEXT","SCAL
 useAutoCalib   = input.bool(true, "⚡ Auto-Calibrate Parameters by Timeframe", group=grpMode,
                   tooltip="Automatically adjusts OB/FVG age limits, swing lengths, ATR displacement and BOS cooldown based on active timeframe (1M-3M, 5M-15M, 30M-1H, 4H/Daily)")
 
+// ── 0b. ALERTS — ENABLE/DISABLE (v6.15: todos los interruptores maestros de alertas, unificados en una
+//        sola sección. Cada uno también condiciona directamente su alertcondition() correspondiente más
+//        abajo — antes varios toggles solo apagaban la etiqueta visual pero la alerta seguía disparando.) ──
+grpAlerts          = "═══ 🔔 ALERTS — ENABLE/DISABLE ═══"
+showDeadZoneAlert  = input.bool(true, "Alert: Dead Zone (No Trade)", group=grpAlerts)
+
 // ── 1. ORDER BLOCKS ──
 grpOB          = "═══ 📦 ORDER BLOCKS ═══"
 showOB         = input.bool(true,  "Show Order Blocks",       group=grpOB)
@@ -184,8 +200,8 @@ showPartialMit = input.bool(true,  "Mark 50% OB Mitigation",  group=grpOB)
 // ── 2. MARKET STRUCTURE ──
 grpSMC           = "═══ 🏦 STRUCTURE & ORDER FLOW ═══"
 swingLen         = input.int(5,   "Swing Length",               group=grpSMC, minval=3, maxval=15, tooltip="5min: 5 = mira 25min a cada lado para confirmar swing")
-showBOS          = input.bool(true, "Show BOS / CHoCH",         group=grpSMC)
-showInternalStructure = input.bool(false, "Show Internal Structure (iBOS/iCHoCH)", group=grpSMC, tooltip="Capa de estructura menor (swing length reducido) según distinción ICT interno vs. externo. Solo contexto — no dispara señales de entrada.")
+showBOS          = input.bool(true, "Show BOS / CHoCH",         group=grpAlerts)
+showInternalStructure = input.bool(false, "Show Internal Structure (iBOS/iCHoCH)", group=grpAlerts, tooltip="Capa de estructura menor (swing length reducido) según distinción ICT interno vs. externo. Solo contexto — no dispara señales de entrada.")
 atrMult          = input.float(0.8, "Displacement (×ATR)",      group=grpSMC, minval=0.3, step=0.1, tooltip="5min MES/MNQ: 0.8 — movimientos institucionales")
 volMultStructural= input.float(1.2, "Volume Confirm (×Avg)",    group=grpSMC, minval=1.0, step=0.1, tooltip="5min: 1.2 — volumen MES/MNQ más distribuido")
 bosCooldown      = input.int(3, "Min Bars Between BOS", minval=1, maxval=10, group=grpSMC, tooltip="5min: 3 = 15min cooldown.")
@@ -237,7 +253,7 @@ colShavedBear  = input.color(#d500b9, "Shaved Bear",      group=grpPat)
 showInsideBars = input.bool(false, "Show Inside Bars",    group=grpPat)
 colInBull      = input.color(#FFEB3B, "Inside Bull",      group=grpPat)
 colInBear      = input.color(#FBC02D, "Inside Bear",      group=grpPat)
-showElephant   = input.bool(true,  "Show Elephant Bars",  group=grpPat)
+showElephant   = input.bool(true,  "Show Elephant Bars",  group=grpAlerts)
 colEleBull     = input.color(#00FF13, "Elephant Bull",    group=grpPat)
 colEleBear     = input.color(#FF0000, "Elephant Bear",    group=grpPat)
 eleBodyPct     = input.int(75,  "Elephant Min Body %", minval=50, group=grpPat)
@@ -253,16 +269,16 @@ colEQH         = input.color(color.new(#FF5252, 30), "EQH Color", group=grpPat)
 colEQL         = input.color(color.new(#00E676, 30), "EQL Color", group=grpPat)
 showIDM        = input.bool(false, "Show Inducement (IDM)", group=grpPat)
 colIDM         = input.color(color.new(#FF9800, 0),  "IDM Color", group=grpPat)
-showVelezPat   = input.bool(true,  "Show Oliver Velez Patterns (Master)", group=grpPat)
-showVelez180   = input.bool(true,  "  Show 180 Reversal", group=grpPat)
-showVelezVBS   = input.bool(true,  "  Show VBS/VSS",      group=grpPat)
-showVelezCC    = input.bool(true,  "  Show Color Change", group=grpPat)
-showVelezRBI   = input.bool(true,  "  Show RBI/GBI",      group=grpPat)
-showVelez358   = input.bool(true,  "  Show Rule 3-5-8",   group=grpPat)
+showVelezPat   = input.bool(true,  "Show Oliver Velez Patterns (Master)", group=grpAlerts)
+showVelez180   = input.bool(true,  "  Show 180 Reversal", group=grpAlerts)
+showVelezVBS   = input.bool(true,  "  Show VBS/VSS",      group=grpAlerts)
+showVelezCC    = input.bool(true,  "  Show Color Change", group=grpAlerts)
+showVelezRBI   = input.bool(true,  "  Show RBI/GBI",      group=grpAlerts)
+showVelez358   = input.bool(true,  "  Show Rule 3-5-8",   group=grpAlerts)
 
 // ── 5. UNIFIED SIGNAL ENGINE (v6.9: solo patrones con nombre en metodología institucional) ──
 grpSignal      = "═══ 🎯 UNIFIED SIGNALS (Institutional Patterns Only) ═══"
-showMitigation = input.bool(true,  "Show Entry on OB Mitigation",   group=grpSignal)
+showMitigation = input.bool(true,  "Show Entry on OB Mitigation",   group=grpAlerts)
 requireDiscount= input.bool(true,  "Require Discount for Buys",  group=grpSignal)
 requirePremium = input.bool(true,  "Require Premium for Sells",  group=grpSignal)
 riskReward     = input.float(2.5,  "Risk:Reward", minval=1.0, step=0.5, group=grpSignal)
@@ -280,19 +296,19 @@ rsiOB_         = input.int(70, "RSI Overbought", group=grpSignal)
 showTP2        = input.bool(true, "Show TP1 + TP2 lines", group=grpSignal)
 showPASignals  = input.bool(true,  "Use PA Pattern as Confluence (Diamond/OB Entry)", group=grpSignal,
                   tooltip="v6.9: ya no dispara una alerta de trade propia — el tier genérico BUY/ELITE BUY fue eliminado por no corresponder a un patrón institucional con nombre (era pin bar/outside bar + score, sin POI específico). Sigue siendo un filtro interno para validar entradas ⬡ DIAMOND y de mitigación de Order Block (🏦 INST).")
-showVWAPBounce = input.bool(true,  "Show VWAP Bounce Signals",      group=grpSignal)
-showVWAPRev    = input.bool(true,  "Show VWAP Reversion Signals",   group=grpSignal)
-showOTESignals = input.bool(true,  "Show OTE Entry Signals",        group=grpSignal, tooltip="ICT Optimal Trade Entry — retroceso 62-79% Fib del leg confirmado por BOS/CHoCH.")
-showOFSignals  = input.bool(true,  "Show Order Flow Signals (OF BUY/SELL)", group=grpSignal, tooltip="Absorción + Agotamiento + Iniciación.")
+showVWAPBounce = input.bool(true,  "Show VWAP Bounce Signals",      group=grpAlerts)
+showVWAPRev    = input.bool(true,  "Show VWAP Reversion Signals",   group=grpAlerts)
+showOTESignals = input.bool(true,  "Show OTE Entry Signals",        group=grpAlerts, tooltip="ICT Optimal Trade Entry — retroceso 62-79% Fib del leg confirmado por BOS/CHoCH.")
+showOFSignals  = input.bool(true,  "Show Order Flow Signals (OF BUY/SELL)", group=grpAlerts, tooltip="Absorción + Agotamiento + Iniciación.")
 ofAbsorpVolMult   = input.float(1.4, "  OF: Absorption Min Volume (×Avg)", minval=1.0, step=0.1, group=grpSignal, tooltip="Absorción institucional = volumen alto SIN progreso de precio. Exige volumen mínimo en la vela que absorbe.")
 ofAbsorpRangeMult = input.float(0.8, "  OF: Absorption Max Range (×ATR)", minval=0.2, step=0.1, group=grpSignal, tooltip="Rango máximo de la vela de absorción — alto volumen + rango contenido = esfuerzo vs. resultado.")
 paMaxSignalGap = input.int(4, "Min Bars Between Signals", minval=1, maxval=30, group=grpSignal)
-showSweepSignal= input.bool(true,  "Señal Sweep EQH/EQL",          group=grpSignal, tooltip="ICT Judas Swing / Turtle Soup — barrida de liquidez + reclaim.")
+showSweepSignal= input.bool(true,  "Señal Sweep EQH/EQL",          group=grpAlerts, tooltip="ICT Judas Swing / Turtle Soup — barrida de liquidez + reclaim.")
 // v6.9: toggles nuevos — antes Wyckoff Spring/UTAD y Silver Bullet Pattern se detectaban correctamente pero
 // no llegaban a ser una señal de trade con SL/TP; Sweep+Divergencia es una señal nueva que no existía.
-showWyckoffSignal  = input.bool(true, "Señal Wyckoff Spring/UTAD",  group=grpSignal, tooltip="Reversión Wyckoff confirmada en Trading Range (ADX bajo) — requiere 'Show Wyckoff Phases' activo en ICT Key Levels para dibujar la etiqueta.")
-showSBSignal       = input.bool(true, "Señal Silver Bullet Pattern", group=grpSignal, tooltip="Kill Zone + sweep + FVG presente + confirmación PA — requiere 'Show Silver Bullet Windows' activo en ICT Key Levels.")
-showSweepDivSignal = input.bool(true, "Señal Sweep + Delta Divergence", group=grpSignal, tooltip="Barrida de liquidez no confirmada por el Delta Acumulado (absorción) + vela de rechazo.")
+showWyckoffSignal  = input.bool(true, "Señal Wyckoff Spring/UTAD",  group=grpAlerts, tooltip="Reversión Wyckoff confirmada en Trading Range (ADX bajo) — requiere 'Show Wyckoff Phases' activo para dibujar la etiqueta.")
+showSBSignal       = input.bool(true, "Señal Silver Bullet Pattern", group=grpAlerts, tooltip="Kill Zone + sweep + FVG presente + confirmación PA — requiere 'Show Silver Bullet Windows' activo.")
+showSweepDivSignal = input.bool(true, "Señal Sweep + Delta Divergence", group=grpAlerts, tooltip="Barrida de liquidez no confirmada por el Delta Acumulado (absorción) + vela de rechazo.")
 paRequireNoChop= input.bool(true,  "Filter Choppy Market (ADX)",   group=grpSignal)
 paAdxLen       = input.int(14,     "  ADX Length", minval=5,        group=grpSignal)
 paAdxMin       = input.int(22,     "  Min ADX", minval=10, maxval=40, group=grpSignal)
@@ -329,30 +345,30 @@ showDash     = input.bool(true,  "Show Dashboard",  group=grpDash)
 dashSize     = input.string("Small", "Size", options=["Tiny","Small","Normal"], group=grpDash)
 showMTFDash  = input.bool(true,  "Show MTF Table",  group=grpDash)
 dashShowScore= input.bool(true,  "Show Scores",     group=grpDash)
-showOBProximity = input.bool(true, "Alert Near OB", group=grpDash)
+showOBProximity = input.bool(true, "Alert Near OB", group=grpAlerts)
 obProximityDist = input.float(1.5, "Near OB (×ATR)", group=grpDash, minval=0.5, step=0.5)
 
 // ── 8. ICT KEY LEVELS ──
 grpICT          = "═══ 🔑 ICT KEY LEVELS ═══"
-showPDLevels    = input.bool(true,  "Show PDH/PDL/PWH/PWL",       group=grpICT)
+showPDLevels    = input.bool(true,  "Show PDH/PDL/PWH/PWL",       group=grpAlerts)
 pdlColor        = input.color(color.new(#FF9800, 30), "PDH/PDL Color", group=grpICT)
 pwlColor        = input.color(color.new(#2196F3, 30), "PWH/PWL Color", group=grpICT)
 showMidnight    = input.bool(true,  "Show Midnight Open (NY 00:00)", group=grpICT)
 midnightColor   = input.color(color.new(#E040FB, 30), "Midnight Color", group=grpICT)
-showOR          = input.bool(true,  "Show Opening Range",          group=grpICT)
+showOR          = input.bool(true,  "Show Opening Range",          group=grpAlerts)
 orMinutes       = input.int(30, "OR Period (minutes)", options=[5, 15, 30], group=grpICT)
 orColor         = input.color(color.new(#00BCD4, 80), "OR Color",  group=grpICT)
-showSilverBullet= input.bool(true,  "Show Silver Bullet Windows",  group=grpICT)
+showSilverBullet= input.bool(true,  "Show Silver Bullet Windows",  group=grpAlerts)
 sbColor         = input.color(color.new(#C0CA33, 93), "Silver Bullet Color", group=grpICT)
-showOTE         = input.bool(true,  "Show OTE Zone (62–79%)",      group=grpICT)
+showOTE         = input.bool(true,  "Show OTE Zone (62–79%)",      group=grpAlerts)
 oteColor        = input.color(color.new(#FF6F00, 75), "OTE Color", group=grpICT)
-showLiqVoids    = input.bool(true,  "Show Liquidity Voids",        group=grpICT)
+showLiqVoids    = input.bool(true,  "Show Liquidity Voids",        group=grpAlerts)
 lvColor         = input.color(color.new(#B71C1C, 80), "Liq. Void Color", group=grpICT)
 lvMinBars       = input.int(2, "Min Consecutive Bars for Void", minval=2, maxval=5, group=grpICT)
-showCumDelta    = input.bool(true,  "Show Cum. Delta Divergence",  group=grpICT)
-showDisplacement= input.bool(true,  "Show Multi-Bar Displacement", group=grpICT)
-showSqueeze     = input.bool(true,  "Show Squeeze (Pre-Breakout)", group=grpICT)
-showWyckoff     = input.bool(true,  "Show Wyckoff Phases",         group=grpICT)
+showCumDelta    = input.bool(true,  "Show Cum. Delta Divergence",  group=grpAlerts)
+showDisplacement= input.bool(true,  "Show Multi-Bar Displacement", group=grpAlerts)
+showSqueeze     = input.bool(true,  "Show Squeeze (Pre-Breakout)", group=grpAlerts)
+showWyckoff     = input.bool(true,  "Show Wyckoff Phases",         group=grpAlerts)
 showWMSwings    = input.bool(true,  "Show Weekly/Monthly Swings",  group=grpICT)
 wmColor         = input.color(color.new(#00E5FF, 40), "W/M Swing Color", group=grpICT)
 
@@ -2625,7 +2641,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.14 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.15 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
@@ -2748,45 +2764,49 @@ bool oteZoneEnter      = oteZoneCond and not oteZoneCond[1]
 alertcondition((signalBuy or signalSell) and barstate.isconfirmed, "🎯 SEÑAL: INST BUY/SELL (OB Touch)", "🏦 Institutional Signal — OB Touch")
 alertcondition((isDiamondBuy or isDiamondSell) and barstate.isconfirmed, "🎯 SEÑAL: ⬡ DIAMOND BUY/SELL", "⬡ DIAMOND Signal — Máxima Confluencia")
 alertcondition((ofBuy or ofSell) and barstate.isconfirmed, "🎯 SEÑAL: 📊 OF BUY/SELL", "📊 Order Flow Signal — Absorción+Agotamiento+Iniciación")
-alertcondition(sweepBullSig or sweepBearSig, "🎯 SEÑAL: SWEEP EQL/EQH", "💧 Liquidity Sweep Signal")
-alertcondition((oteBullPA or oteBearPA) and barstate.isconfirmed, "🎯 SEÑAL: OTE BUY/SELL", "🎯 OTE Zone Signal — 62-79% Fib")
+alertcondition((sweepBullSig or sweepBearSig) and showSweepSignal, "🎯 SEÑAL: SWEEP EQL/EQH", "💧 Liquidity Sweep Signal")
+alertcondition((oteBullPA or oteBearPA) and showOTESignals and barstate.isconfirmed, "🎯 SEÑAL: OTE BUY/SELL", "🎯 OTE Zone Signal — 62-79% Fib")
 alertcondition((wyckSpring or wyckUTAD) and showWyckoffSignal and barstate.isconfirmed, "🎯 SEÑAL: 🔄 WYCKOFF SPRING/UTAD", "🔄 Wyckoff Spring/UTAD — Reversión confirmada")
 alertcondition((sbPatternBull or sbPatternBear) and showSBSignal and barstate.isconfirmed, "🎯 SEÑAL: 🎯 SILVER BULLET", "🎯 Silver Bullet Pattern — Sweep+FVG")
-alertcondition(sweepDivBuySig or sweepDivSellSig, "🎯 SEÑAL: 💧Δ SWEEP+DIV", "💧Δ Liquidity Sweep + Delta Divergence")
+alertcondition((sweepDivBuySig or sweepDivSellSig) and showSweepDivSignal, "🎯 SEÑAL: 💧Δ SWEEP+DIV", "💧Δ Liquidity Sweep + Delta Divergence")
 
 // ── 🎯 SEÑAL — salidas (v6.6: antes no existía ninguna; v6.7: Long+Short fusionados) ──
+// No llevan toggle propio: solo se activan si el tracker fue poblado por una señal de entrada ya habilitada.
 alertcondition((vtBullSLHit  or vtBearSLHit)  and barstate.isconfirmed, "🎯 SEÑAL: 🛑 SL HIT",    "🛑 Stop Loss alcanzado")
 alertcondition((vtBullTP1Hit or vtBearTP1Hit) and barstate.isconfirmed, "🎯 SEÑAL: 🎯 TP1 HIT",   "🎯 Take Profit 1 alcanzado")
 alertcondition((vtBullTP2Hit or vtBearTP2Hit) and barstate.isconfirmed, "🎯 SEÑAL: 🎯 TP2 HIT",   "🎯 Take Profit 2 alcanzado — cierre total")
 alertcondition((trailBullHit or trailBearHit) and barstate.isconfirmed, "🎯 SEÑAL: 🐌 TRAIL HIT", "🐌 Trailing stop alcanzado")
 
 // ── ℹ️ CONTEXTO — estructura, patrones y estado de mercado (sin plan de trade adjunto) ──
-alertcondition((bosUp or bosDown) and barstate.isconfirmed, "ℹ️ CONTEXTO: BOS Detected",   "📈📉 BOS Break of Structure")
-alertcondition((chochUp or chochDown) and barstate.isconfirmed, "ℹ️ CONTEXTO: CHoCH Signal", "🔄 CHoCH detected")
-alertcondition((chochWeakUp or chochWeakDown) and barstate.isconfirmed, "ℹ️ CONTEXTO: wCHoCH Signal", "⚠️ wCHoCH detected")
-alertcondition((iBosUp or iBosDown) and barstate.isconfirmed, "ℹ️ CONTEXTO: iBOS Detected", "📊 Internal BOS (estructura menor)")
-alertcondition((iChochUp or iChochDown) and barstate.isconfirmed, "ℹ️ CONTEXTO: iCHoCH Signal", "🔄 Internal CHoCH (estructura menor)")
+// v6.15 fix: cada alerta de contexto ahora exige su propio toggle "Show X" (sección 🔔 ALERTS) — antes el
+// toggle solo apagaba la etiqueta visual en el gráfico, pero la alerta seguía disparando en segundo plano
+// aunque el usuario la hubiera desactivado explícitamente.
+alertcondition((bosUp or bosDown) and showBOS and barstate.isconfirmed, "ℹ️ CONTEXTO: BOS Detected",   "📈📉 BOS Break of Structure")
+alertcondition((chochUp or chochDown) and showBOS and barstate.isconfirmed, "ℹ️ CONTEXTO: CHoCH Signal", "🔄 CHoCH detected")
+alertcondition((chochWeakUp or chochWeakDown) and showBOS and barstate.isconfirmed, "ℹ️ CONTEXTO: wCHoCH Signal", "⚠️ wCHoCH detected")
+alertcondition((iBosUp or iBosDown) and showInternalStructure and barstate.isconfirmed, "ℹ️ CONTEXTO: iBOS Detected", "📊 Internal BOS (estructura menor)")
+alertcondition((iChochUp or iChochDown) and showInternalStructure and barstate.isconfirmed, "ℹ️ CONTEXTO: iCHoCH Signal", "🔄 Internal CHoCH (estructura menor)")
 
 alertcondition((superEleBull or superEleBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🐘 ELEPHANT", "🐘 Elephant Bar detected")
 
 alertcondition(nearOBEnter, "ℹ️ CONTEXTO: NEAR OB", "📦 Precio entrando en zona cercana a OB")
 
-alertcondition((isDisplacementBull or isDisplacementBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: ⚡ DISPLACEMENT", "⚡ Displacement detected")
-alertcondition((cumDeltaDivBull or cumDeltaDivBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: Δ DELTA DIV", "Δ Cum. Delta Divergence")
-alertcondition(isSqueeze and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 SQUEEZE", "🔄 Pre-Breakout Squeeze detected")
-alertcondition((lvBullGap or lvBearGap) and barstate.isconfirmed, "ℹ️ CONTEXTO: LV Gap", "🟥 Liquidity Void detected")
-alertcondition(nearKeyLevelEnter, "ℹ️ CONTEXTO: NEAR KEY LEVEL", "📍 Precio entrando cerca de PDH/PDL/PWH/PWL")
-alertcondition(oteZoneEnter, "ℹ️ CONTEXTO: OTE ZONE", "🎯 Precio entrando en zona OTE")
+alertcondition((isDisplacementBull or isDisplacementBear) and showDisplacement and barstate.isconfirmed, "ℹ️ CONTEXTO: ⚡ DISPLACEMENT", "⚡ Displacement detected")
+alertcondition((cumDeltaDivBull or cumDeltaDivBear) and showCumDelta and barstate.isconfirmed, "ℹ️ CONTEXTO: Δ DELTA DIV", "Δ Cum. Delta Divergence")
+alertcondition(isSqueeze and showSqueeze and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 SQUEEZE", "🔄 Pre-Breakout Squeeze detected")
+alertcondition((lvBullGap or lvBearGap) and showLiqVoids and barstate.isconfirmed, "ℹ️ CONTEXTO: LV Gap", "🟥 Liquidity Void detected")
+alertcondition(nearKeyLevelEnter and showPDLevels, "ℹ️ CONTEXTO: NEAR KEY LEVEL", "📍 Precio entrando cerca de PDH/PDL/PWH/PWL")
+alertcondition(oteZoneEnter and showOTE, "ℹ️ CONTEXTO: OTE ZONE", "🎯 Precio entrando en zona OTE")
 
-alertcondition((orRetestBull or orRetestBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 OR RETEST", "🔄 OR Breakout Retest")
-alertcondition(deadZoneEnter, "ℹ️ CONTEXTO: ⚠️ DEAD ZONE", "⚠️ Entrando en Dead Zone — No operar (lunch/cierre)")
+alertcondition((orRetestBull or orRetestBear) and showOR and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 OR RETEST", "🔄 OR Breakout Retest")
+alertcondition(deadZoneEnter and showDeadZoneAlert, "ℹ️ CONTEXTO: ⚠️ DEAD ZONE", "⚠️ Entrando en Dead Zone — No operar (lunch/cierre)")
 
-alertcondition((vwapBounceBull or vwapBounceBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🌊 VWAP BOUNCE", "🌊 VWAP Bounce Continuación")
-alertcondition((vwapRevBull or vwapRevBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 VWAP REV", "🔄 VWAP Mean Reversion")
+alertcondition((vwapBounceBull or vwapBounceBear) and showVWAPBounce and barstate.isconfirmed, "ℹ️ CONTEXTO: 🌊 VWAP BOUNCE", "🌊 VWAP Bounce Continuación")
+alertcondition((vwapRevBull or vwapRevBear) and showVWAPRev and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 VWAP REV", "🔄 VWAP Mean Reversion")
 
-alertcondition((bull180 or bear180) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 180 REVERSAL", "🔄 180 Reversal detected")
-alertcondition((vbsSignal or vssSignal) and barstate.isconfirmed, "ℹ️ CONTEXTO: 📊 VBS/VSS", "📊 Velez Buy/Sell Signal")
-alertcondition((rbiSignal or gbiSignal) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🚦 RBI/GBI", "🚦 Bar Ignored — Continuation")
-alertcondition((ccBull or ccBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🎨 COLOR CHANGE", "🎨 Color Change at VWAP")
-alertcondition((exhaust5Bull or exhaust5Bear) and barstate.isconfirmed, "ℹ️ CONTEXTO: ⚠️ 5th BAR", "⚠️ Regla 3-5-8: 5ta vela consecutiva")
-alertcondition((exhaust8Bull or exhaust8Bear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🛑 8th BAR", "🛑 Regla 3-5-8: 8va vela consecutiva")
+alertcondition((bull180 or bear180) and showVelezPat and showVelez180 and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 180 REVERSAL", "🔄 180 Reversal detected")
+alertcondition((vbsSignal or vssSignal) and showVelezPat and showVelezVBS and barstate.isconfirmed, "ℹ️ CONTEXTO: 📊 VBS/VSS", "📊 Velez Buy/Sell Signal")
+alertcondition((rbiSignal or gbiSignal) and showVelezPat and showVelezRBI and barstate.isconfirmed, "ℹ️ CONTEXTO: 🚦 RBI/GBI", "🚦 Bar Ignored — Continuation")
+alertcondition((ccBull or ccBear) and showVelezPat and showVelezCC and barstate.isconfirmed, "ℹ️ CONTEXTO: 🎨 COLOR CHANGE", "🎨 Color Change at VWAP")
+alertcondition((exhaust5Bull or exhaust5Bear) and showVelezPat and showVelez358 and barstate.isconfirmed, "ℹ️ CONTEXTO: ⚠️ 5th BAR", "⚠️ Regla 3-5-8: 5ta vela consecutiva")
+alertcondition((exhaust8Bull or exhaust8Bear) and showVelezPat and showVelez358 and barstate.isconfirmed, "ℹ️ CONTEXTO: 🛑 8th BAR", "🛑 Regla 3-5-8: 8va vela consecutiva")
