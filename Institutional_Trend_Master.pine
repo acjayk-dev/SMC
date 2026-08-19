@@ -1,0 +1,331 @@
+//@version=6
+// ─────────────────────────────────────────────────────────
+// Institutional Trend Master v1.0 | Autor: | TF óptimo: 5m-4H | Activo: Forex/Futuros/Índices/Cripto
+// Motor de tendencia multi-método: Trendlines dinámicas por estructura de swings (auto-redibujado y
+// detección de ruptura), Canal de Regresión Lineal (Standard Error Channel), Filtro Adaptativo de
+// Kaufman (KAMA, basado en Efficiency Ratio), ADX/DMI para fuerza de tendencia, clasificación de
+// estructura de mercado (HH/HL vs LH/LL) y sesgo Multi-Timeframe. Score de confluencia ponderado.
+// ─────────────────────────────────────────────────────────
+indicator("Institutional Trend Master v1.0", shorttitle="ITM v1.0", overlay=true, max_lines_count=300, max_labels_count=200)
+max_bars_back(close, 500)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ TYPES
+// ══════════════════════════════════════════════════════════════════════════════
+
+type Pivot
+    int   bar
+    float price
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ METHODS
+// ══════════════════════════════════════════════════════════════════════════════
+
+method push(Pivot[] arr, Pivot p, int maxLen) =>
+    array.unshift(arr, p)
+    if array.size(arr) > maxLen
+        array.pop(arr)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+grpTL    = "═══ 📐 TRENDLINES · ESTRUCTURA DE SWINGS ═══"
+pivotLen = input.int(15, "Longitud de Swing (pivot)", minval=3, maxval=50, group=grpTL,
+     tooltip="Barras a cada lado para confirmar un swing high/low. Scalping: 5-8 · Intradía: 10-15 · Swing/Posicional: 20-35")
+maxPivots = input.int(6, "Pivotes almacenados", minval=2, maxval=30, group=grpTL,
+     tooltip="Cantidad de swings recientes guardados en memoria para reconstruir las líneas")
+breakConfirmClose = input.bool(true, "Ruptura confirmada por cierre (no mecha)", group=grpTL,
+     tooltip="Institucional: exige cierre de vela más allá de la línea, evita falsas rupturas por mechas")
+minBarsBetweenBreaks = input.int(5, "Cooldown entre señales de ruptura (barras)", minval=1, maxval=50, group=grpTL)
+showBreakLabels = input.bool(true, "Mostrar etiquetas de ruptura (Trend Break)", group=grpTL)
+
+grpReg   = "═══ 📊 CANAL DE REGRESIÓN LINEAL (Standard Error Channel) ═══"
+showRegChannel  = input.bool(true, "Mostrar canal de regresión", group=grpReg)
+regLen          = input.int(100, "Longitud de regresión", minval=20, maxval=300, group=grpReg,
+     tooltip="Ventana estadística para el ajuste de mínimos cuadrados. Mayor = tendencia más estructural")
+regMult1        = input.float(1.0, "Multiplicador banda interna (σ)", minval=0.25, maxval=4.0, step=0.25, group=grpReg)
+regMult2        = input.float(2.0, "Multiplicador banda externa (σ)", minval=0.5, maxval=5.0, step=0.25, group=grpReg)
+showOuterBands  = input.bool(true, "Mostrar bandas externas (2σ)", group=grpReg)
+
+grpKama  = "═══ ⚙️ FILTRO ADAPTATIVO KAMA (Kaufman Efficiency Ratio) ═══"
+showKama = input.bool(true, "Mostrar línea KAMA adaptativa", group=grpKama)
+kamaLen  = input.int(10, "Periodo Efficiency Ratio", minval=2, maxval=50, group=grpKama)
+kamaFast = input.int(2, "Constante rápida (EMA)", minval=2, maxval=10, group=grpKama)
+kamaSlow = input.int(30, "Constante lenta (EMA)", minval=10, maxval=60, group=grpKama)
+
+grpTrend = "═══ 🧭 FUERZA Y CONFIRMACIÓN DE TENDENCIA ═══"
+adxLen       = input.int(14, "Periodo DI", minval=2, maxval=50, group=grpTrend)
+adxSmooth    = input.int(14, "Suavizado ADX", minval=2, maxval=50, group=grpTrend)
+adxThreshold = input.float(20.0, "Umbral ADX (tendencia válida)", minval=5.0, maxval=50.0, step=0.5, group=grpTrend,
+     tooltip="Estándar institucional: ADX > 20-25 confirma régimen de tendencia; por debajo, mercado en rango")
+
+grpMTF = "═══ 🕐 SESGO MULTI-TIMEFRAME ═══"
+htf1TF = input.timeframe("60",  "Timeframe Superior 1", group=grpMTF)
+htf2TF = input.timeframe("240", "Timeframe Superior 2", group=grpMTF)
+
+grpVisual = "═══ 🎨 VISUAL ═══"
+bullColor    = input.color(#00E676, "Color alcista", group=grpVisual)
+bearColor    = input.color(#FF5252, "Color bajista", group=grpVisual)
+neutralColor = input.color(#9E9E9E, "Color neutral", group=grpVisual)
+regColor     = input.color(#FFB300, "Color canal de regresión", group=grpVisual)
+lineWidth    = input.int(2, "Grosor líneas de tendencia", minval=1, maxval=4, group=grpVisual)
+showBgTint   = input.bool(true, "Tinte de fondo por tendencia compuesta", group=grpVisual)
+
+grpDash = "═══ 📋 DASHBOARD ═══"
+showDash    = input.bool(true, "Mostrar dashboard", group=grpDash)
+dashPos     = input.string(position.top_right, "Posición", options=[position.top_right, position.top_left, position.bottom_right, position.bottom_left], group=grpDash)
+dashSize    = input.string("Small", "Tamaño de texto", options=["Tiny", "Small", "Normal"], group=grpDash)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ ESTRUCTURA DE SWINGS (PIVOTES)
+// ══════════════════════════════════════════════════════════════════════════════
+
+var Pivot[] pivHighs = array.new<Pivot>()
+var Pivot[] pivLows  = array.new<Pivot>()
+
+ph = ta.pivothigh(pivotLen, pivotLen)
+pl = ta.pivotlow(pivotLen, pivotLen)
+
+if not na(ph)
+    pivHighs.push(Pivot.new(bar_index - pivotLen, ph), maxPivots)
+if not na(pl)
+    pivLows.push(Pivot.new(bar_index - pivotLen, pl), maxPivots)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ TRENDLINES DINÁMICAS (RESISTENCIA / SOPORTE) — 2 PUNTOS, AUTO-REDIBUJADO
+// ══════════════════════════════════════════════════════════════════════════════
+
+var line  resLine        = na
+var float resSlope       = na
+var int   resAnchorBar   = na
+var float resAnchorPrice = na
+var bool  resBroken      = false
+var bool  resActive      = false
+
+var line  supLine        = na
+var float supSlope       = na
+var int   supAnchorBar   = na
+var float supAnchorPrice = na
+var bool  supBroken      = false
+var bool  supActive      = false
+
+var float lineBias        = 0.0
+var int   lastResBreakBar = -999
+var int   lastSupBreakBar = -999
+
+// ── Reconstrucción de la línea de resistencia (última vela: nuevo pivot high) ──
+if not na(ph) and array.size(pivHighs) >= 2
+    p0 = array.get(pivHighs, 0)   // más reciente
+    p1 = array.get(pivHighs, 1)   // anterior
+    if not resBroken and not na(resLine)
+        line.delete(resLine)      // línea aún no rota → se descarta, se reemplaza por una más ajustada
+    newSlope = (p0.price - p1.price) / (p0.bar - p1.bar)
+    resLine        := line.new(p1.bar, p1.price, p0.bar, p0.price, extend=extend.right, color=bearColor, width=lineWidth, style=line.style_solid)
+    resSlope       := newSlope
+    resAnchorBar   := p1.bar
+    resAnchorPrice := p1.price
+    resBroken      := false
+    resActive      := true
+
+// ── Reconstrucción de la línea de soporte (última vela: nuevo pivot low) ──
+if not na(pl) and array.size(pivLows) >= 2
+    p0 = array.get(pivLows, 0)
+    p1 = array.get(pivLows, 1)
+    if not supBroken and not na(supLine)
+        line.delete(supLine)
+    newSlope = (p0.price - p1.price) / (p0.bar - p1.bar)
+    supLine        := line.new(p1.bar, p1.price, p0.bar, p0.price, extend=extend.right, color=bullColor, width=lineWidth, style=line.style_solid)
+    supSlope       := newSlope
+    supAnchorBar   := p1.bar
+    supAnchorPrice := p1.price
+    supBroken      := false
+    supActive      := true
+
+// ── Detección de ruptura (solo en vela confirmada — anti-repaint) ──
+bool resBreakEvent = false
+bool supBreakEvent = false
+
+if resActive and not resBroken and not na(resAnchorBar) and barstate.isconfirmed
+    float resVal = resAnchorPrice + resSlope * (bar_index - resAnchorBar)
+    bool  cond   = breakConfirmClose ? close > resVal : high > resVal
+    if cond
+        line.set_color(resLine, color.new(neutralColor, 40))
+        line.set_style(resLine, line.style_dashed)
+        resBroken := true
+        if (bar_index - lastResBreakBar) >= minBarsBetweenBreaks
+            resBreakEvent := true
+            lastResBreakBar := bar_index
+            lineBias := 1.5
+
+if supActive and not supBroken and not na(supAnchorBar) and barstate.isconfirmed
+    float supVal = supAnchorPrice + supSlope * (bar_index - supAnchorBar)
+    bool  cond   = breakConfirmClose ? close < supVal : low < supVal
+    if cond
+        line.set_color(supLine, color.new(neutralColor, 40))
+        line.set_style(supLine, line.style_dashed)
+        supBroken := true
+        if (bar_index - lastSupBreakBar) >= minBarsBetweenBreaks
+            supBreakEvent := true
+            lastSupBreakBar := bar_index
+            lineBias := -1.5
+
+if showBreakLabels and resBreakEvent
+    label.new(bar_index, high, "▲ TREND BREAK", style=label.style_label_down, color=bullColor, textcolor=color.white, size=size.small)
+if showBreakLabels and supBreakEvent
+    label.new(bar_index, low, "▼ TREND BREAK", style=label.style_label_up, color=bearColor, textcolor=color.white, size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ ESTRUCTURA DE MERCADO (HH/HL vs LH/LL)
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool structUp   = array.size(pivHighs) >= 2 and array.size(pivLows) >= 2 and
+     array.get(pivHighs, 0).price > array.get(pivHighs, 1).price and
+     array.get(pivLows, 0).price  > array.get(pivLows, 1).price
+bool structDown = array.size(pivHighs) >= 2 and array.size(pivLows) >= 2 and
+     array.get(pivHighs, 0).price < array.get(pivHighs, 1).price and
+     array.get(pivLows, 0).price  < array.get(pivLows, 1).price
+
+string structLabel = structUp ? "HH/HL (Alcista)" : structDown ? "LH/LL (Bajista)" : "Mixta/Rango"
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ CANAL DE REGRESIÓN LINEAL (Standard Error Channel)
+// ══════════════════════════════════════════════════════════════════════════════
+
+regBasis  = ta.linreg(close, regLen, 0)
+regStart  = ta.linreg(close, regLen, regLen - 1)
+regSlopePerBar = (regBasis - regStart) / (regLen - 1)
+regDev    = ta.stdev(close, regLen)
+regUpper1 = regBasis + regDev * regMult1
+regLower1 = regBasis - regDev * regMult1
+regUpper2 = regBasis + regDev * regMult2
+regLower2 = regBasis - regDev * regMult2
+
+p_basis = plot(showRegChannel ? regBasis : na, "Reg. Basis", color=color.new(regColor, 15), linewidth=1)
+p_u1    = plot(showRegChannel ? regUpper1 : na, "Reg. +1σ", color=color.new(regColor, 55))
+p_l1    = plot(showRegChannel ? regLower1 : na, "Reg. -1σ", color=color.new(regColor, 55))
+plot(showRegChannel and showOuterBands ? regUpper2 : na, "Reg. +2σ", color=color.new(regColor, 78), style=plot.style_circles)
+plot(showRegChannel and showOuterBands ? regLower2 : na, "Reg. -2σ", color=color.new(regColor, 78), style=plot.style_circles)
+fill(p_u1, p_l1, color=color.new(regColor, 92), title="Canal de Regresión")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ FILTRO ADAPTATIVO KAMA (Kaufman — Efficiency Ratio)
+// ══════════════════════════════════════════════════════════════════════════════
+
+f_kama(src, len, fastLen, slowLen) =>
+    var float kamaVal = na
+    change = math.abs(src - src[len])
+    volatility = 0.0
+    for i = 0 to len - 1
+        volatility += math.abs(src[i] - src[i + 1])
+    er = volatility != 0 ? change / volatility : 0.0
+    fastSC = 2.0 / (fastLen + 1)
+    slowSC = 2.0 / (slowLen + 1)
+    sc = math.pow(er * (fastSC - slowSC) + slowSC, 2)
+    kamaVal := na(kamaVal[1]) ? src : kamaVal[1] + sc * (src - kamaVal[1])
+    kamaVal
+
+kama = f_kama(close, kamaLen, kamaFast, kamaSlow)
+int kamaDir = kama - kama[2] > 0 ? 1 : kama - kama[2] < 0 ? -1 : 0
+color kamaColor = kamaDir == 1 ? bullColor : kamaDir == -1 ? bearColor : neutralColor
+plot(showKama ? kama : na, "KAMA Adaptativo", color=kamaColor, linewidth=3)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ ADX / DMI — FUERZA DE TENDENCIA
+// ══════════════════════════════════════════════════════════════════════════════
+
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxSmooth)
+bool adxStrong = adxVal > adxThreshold
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ SESGO MULTI-TIMEFRAME
+// ══════════════════════════════════════════════════════════════════════════════
+// Nota anti-repaint: el sesgo HTF puede actualizarse intrabar hasta el cierre de la vela superior
+// (comportamiento estándar de request.security con lookahead_off); se usa solo como confluencia de
+// contexto, no como disparador de señal — las señales de ruptura exigen barstate.isconfirmed en TF actual.
+
+f_htfBias() =>
+    e9  = ta.ema(close, 9)
+    e21 = ta.ema(close, 21)
+    e50 = ta.ema(close, 50)
+    e9 > e21 and e21 > e50 ? 1 : e9 < e21 and e21 < e50 ? -1 : 0
+
+htf1Bias = request.security(syminfo.tickerid, htf1TF, f_htfBias(), lookahead=barmerge.lookahead_off)
+htf2Bias = request.security(syminfo.tickerid, htf2TF, f_htfBias(), lookahead=barmerge.lookahead_off)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ SCORE DE CONFLUENCIA COMPUESTO
+// ══════════════════════════════════════════════════════════════════════════════
+
+float score = 0.0
+score += structUp ? 1.5 : structDown ? -1.5 : 0.0
+score += kamaDir == 1 ? 1.0 : kamaDir == -1 ? -1.0 : 0.0
+score += adxStrong ? (diPlus > diMinus ? 1.0 : -1.0) : 0.0
+score += regSlopePerBar > 0 ? 1.0 : regSlopePerBar < 0 ? -1.0 : 0.0
+score += htf1Bias * 0.75
+score += htf2Bias * 0.75
+score += lineBias
+
+f_classify(s) =>
+    s >= 4.5 ? "STRONG BULL 🟢🟢" : s >= 1.5 ? "BULL 🟢" : s <= -4.5 ? "STRONG BEAR 🔴🔴" : s <= -1.5 ? "BEAR 🔴" : "NEUTRAL/RANGE ⚪"
+
+string trendClass = f_classify(score)
+color  trendColor = score >= 1.5 ? bullColor : score <= -1.5 ? bearColor : neutralColor
+
+bgcolor(showBgTint ? (score >= 4.5 ? color.new(bullColor, 92) : score <= -4.5 ? color.new(bearColor, 92) : na) : na)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+if showDash and barstate.islast
+    var table dash = table.new(dashPos, 2, 10, bgcolor=color.new(#1a1a2e, 10), border_width=1, border_color=color.new(color.gray, 70))
+    sz = switch dashSize
+        "Tiny"  => size.tiny
+        "Small" => size.small
+        =>         size.normal
+
+    table.cell(dash, 0, 0, "📈 TREND MASTER", bgcolor=#1a1a2e, text_color=#FFD700, text_size=sz)
+    table.cell(dash, 1, 0, syminfo.ticker + " · " + timeframe.period, bgcolor=#1a1a2e, text_color=color.white, text_size=sz)
+
+    table.cell(dash, 0, 1, "Tendencia Compuesta", bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
+    table.cell(dash, 1, 1, trendClass, bgcolor=#1a1a2e, text_color=trendColor, text_size=sz)
+
+    table.cell(dash, 0, 2, "Score", bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
+    table.cell(dash, 1, 2, str.tostring(score, "#.##") + " / 7.50", bgcolor=#1a1a2e, text_color=trendColor, text_size=sz)
+
+    table.cell(dash, 0, 3, "Estructura (HH/HL)", bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
+    table.cell(dash, 1, 3, structLabel, bgcolor=#1a1a2e, text_color=structUp ? bullColor : structDown ? bearColor : neutralColor, text_size=sz)
+
+    table.cell(dash, 0, 4, "ADX (" + str.tostring(adxLen) + ")", bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
+    table.cell(dash, 1, 4, str.tostring(adxVal, "#.#") + (adxStrong ? " Fuerte" : " Débil/Rango"), bgcolor=#1a1a2e, text_color=adxStrong ? (diPlus > diMinus ? bullColor : bearColor) : neutralColor, text_size=sz)
+
+    table.cell(dash, 0, 5, "KAMA Adaptativo", bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
+    table.cell(dash, 1, 5, kamaDir == 1 ? "Alcista ▲" : kamaDir == -1 ? "Bajista ▼" : "Plano ▬", bgcolor=#1a1a2e, text_color=kamaColor, text_size=sz)
+
+    table.cell(dash, 0, 6, "Canal Regresión", bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
+    table.cell(dash, 1, 6, regSlopePerBar > 0 ? "Alcista ▲" : regSlopePerBar < 0 ? "Bajista ▼" : "Plano ▬", bgcolor=#1a1a2e, text_color=regSlopePerBar > 0 ? bullColor : regSlopePerBar < 0 ? bearColor : neutralColor, text_size=sz)
+
+    table.cell(dash, 0, 7, "MTF " + htf1TF, bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
+    table.cell(dash, 1, 7, htf1Bias == 1 ? "Bull 🟢" : htf1Bias == -1 ? "Bear 🔴" : "Neutral ⚪", bgcolor=#1a1a2e, text_color=htf1Bias == 1 ? bullColor : htf1Bias == -1 ? bearColor : neutralColor, text_size=sz)
+
+    table.cell(dash, 0, 8, "MTF " + htf2TF, bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
+    table.cell(dash, 1, 8, htf2Bias == 1 ? "Bull 🟢" : htf2Bias == -1 ? "Bear 🔴" : "Neutral ⚪", bgcolor=#1a1a2e, text_color=htf2Bias == 1 ? bullColor : htf2Bias == -1 ? bearColor : neutralColor, text_size=sz)
+
+    table.cell(dash, 0, 9, "Trendlines R/S", bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
+    table.cell(dash, 1, 9, (resBroken ? "Res: Rota" : "Res: Intacta") + " / " + (supBroken ? "Sop: Rota" : "Sop: Intacta"),
+         bgcolor=#1a1a2e, text_color=color.white, text_size=sz)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ ALERTAS
+// ══════════════════════════════════════════════════════════════════════════════
+
+var string prevClass = "NEUTRAL/RANGE ⚪"
+bool strongBullFlip = trendClass == "STRONG BULL 🟢🟢" and prevClass != "STRONG BULL 🟢🟢"
+bool strongBearFlip = trendClass == "STRONG BEAR 🔴🔴" and prevClass != "STRONG BEAR 🔴🔴"
+prevClass := trendClass
+
+alertcondition(resBreakEvent, title="Ruptura de Resistencia (Bullish)", message="{{ticker}} {{interval}} — Ruptura alcista de línea de tendencia @ {{close}}")
+alertcondition(supBreakEvent, title="Ruptura de Soporte (Bearish)", message="{{ticker}} {{interval}} — Ruptura bajista de línea de tendencia @ {{close}}")
+alertcondition(strongBullFlip, title="Tendencia Fuerte Alcista Confirmada", message="{{ticker}} {{interval}} — STRONG BULL confirmado por confluencia institucional")
+alertcondition(strongBearFlip, title="Tendencia Fuerte Bajista Confirmada", message="{{ticker}} {{interval}} — STRONG BEAR confirmado por confluencia institucional")
