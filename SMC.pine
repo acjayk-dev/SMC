@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.16 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.17 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -69,8 +69,40 @@
 //        el SL/TP nunca se registraba — una "🎯 SEÑAL" sin riesgo definido detrás. Desacoplado: el registro
 //        de SL/TP ahora depende únicamente de "Señal Wyckoff Spring/UTAD" / "Señal Silver Bullet Pattern",
 //        igual que las otras 3 señales de esta familia.
+// v6.17: Auditoría externa de lógica — 14 defectos corregidos (etiquetados [FIX-Ann] / [FIX-Nn] en el código).
+//        REPINTADO (mutaban estado persistente con precio EN VIVO, no con vela cerrada):
+//          [FIX-A1] La mitigación de Order Blocks: un pinchazo intrabar destruía el OB de forma permanente
+//                   aunque la vela cerrara de vuelta dentro del bloque.
+//          [FIX-A2] structureHigh/structureLow se latcheaban intrabar — isSwingHigh depende de una ventana
+//                   ta.highest que incluye la vela en curso; el nivel podía fijarse en un tick temprano y no
+//                   revertirse al invalidarse el swing. De él dependen BOS/CHoCH, Premium/Discount y los OB.
+//          [FIX-N4] El mismo latcheo, replicado en la capa de Estructura Interna (v6.12).
+//          [FIX-A3] El trailing stop se anulaba con un close intrabar por debajo del nivel.
+//        LÓGICA:
+//          [FIX-A4] El test "Unicorn" comparaba solo fvg.bottom contra ob.low — lo cumplía cualquier FVG por
+//                   encima del bloque, a cualquier distancia. Ahora exige solapamiento real de intervalos.
+//          [FIX-A5] El bonus POI y las señales de Sweep de EQH/EQL eran código muerto: dependían de
+//                   eqLowDetected, cierto solo en la vela en que se confirma el swing, lo que obligaba a que
+//                   confirmación, barrido y vela de rechazo coincidieran. Se unifican con el criterio de
+//                   nivel persistido + vigencia que la señal Wyckoff (v6.9) ya usaba correctamente.
+//          [FIX-A6] La sesión se ponderaba dos veces: aditivamente dentro del score y otra vez vía
+//                   sessionMult. Se retira la aditiva; el volumen queda como componente propio.
+//          [FIX-A7] El Signal Interlock ordenaba por rango pero no impedía señales OPUESTAS: con 16 puntos
+//                   de registro, un BUY rango 3 no bloqueaba un SELL rango 4 o 6, así que BUY y SELL podían
+//                   imprimirse en la misma vela, cada uno con su SL/TP. Añadido candado direccional.
+//          [FIX-A8] Toggles de VISUALIZACIÓN alteraban la LÓGICA: con showElephant=false los patrones
+//                   elefante desaparecían del scoring, de localTrendStr y del veto de contra-tendencia.
+//          [FIX-A9] Una mecha que perforaba el suelo del OB pero cerraba dentro no entraba en ninguna rama
+//                   y el barrido se ignoraba por completo.
+//          [FIX-N1] El exit tracker evaluaba SL y TP de forma independiente: en una vela amplia el mismo
+//                   trade reportaba SL_HIT y TP2_HIT a la vez. Ahora, si ambos caben en la vela, manda el stop.
+//          [FIX-N2] El payload de salida informaba "price": close en vez del nivel realmente tocado.
+//          [FIX-N3] El Virtual Trade Tracker es un slot único y se sobrescribía sin guarda: una segunda señal
+//                   borraba el SL/TP de un trade vivo y sus alertas de salida no disparaban nunca.
+//          [FIX-N5] ta.dmi() duplicado (Wyckoff + filtro de chop) y suavizado del ADX cableado a la longitud
+//                   de DI. Unificado en un cálculo, con input de suavizado propio.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.16 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.16", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.17 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.17", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -320,6 +352,9 @@ showSBSignal       = input.bool(true, "Señal Silver Bullet Pattern", group=grpA
 showSweepDivSignal = input.bool(true, "Señal Sweep + Delta Divergence", group=grpAlerts, tooltip="Barrida de liquidez no confirmada por el Delta Acumulado (absorción) + vela de rechazo.")
 paRequireNoChop= input.bool(true,  "Filter Choppy Market (ADX)",   group=grpSignal)
 paAdxLen       = input.int(14,     "  ADX Length", minval=5,        group=grpSignal)
+// v6.17 [FIX-N5] El suavizado del ADX estaba cableado al mismo valor que la longitud de DI —
+// ta.dmi(paAdxLen, paAdxLen) — sin input propio. Se expone por separado, como es estándar.
+paAdxSmooth    = input.int(14,     "  ADX Smoothing", minval=2, maxval=50, group=grpSignal, tooltip="Suavizado del ADX, independiente de la longitud de DI. Wilder original: 14 en ambos.")
 paAdxMin       = input.int(22,     "  Min ADX", minval=10, maxval=40, group=grpSignal)
 showSLTP       = input.bool(true,  "Show SL/TP Lines",              group=grpSignal)
 maxCandleSizeAtr = input.float(2.2, "Max Confirmation Candle Size (×ATR)", minval=0.5, step=0.1, group=grpSignal)
@@ -457,6 +492,13 @@ var bool  vtBearActive  = false
 
 // v6.3: Signal Interlock Rank Tracker (Higher rank suppresses lower rank on same bar)
 int maxSignalRankThisBar = -1
+
+// v6.17 [FIX-A7] El rank por sí solo NO impedía señales opuestas: con 16 puntos de registro, un BUY de
+// rango 3 (Sweep/OTE/Wyckoff/SB) no bloqueaba un SELL de rango 4 (INST) ni de rango 6 (Diamond), porque el
+// test "maxSignalRankThisBar < N" lo pasaba cualquier señal de rango superior — imprimiendo BUY y SELL en la
+// misma vela, cada una con su SL/TP. Se añade un candado DIRECCIONAL: la primera dirección que emite
+// bloquea la contraria durante toda la vela.
+int sigDirThisBar = 0   // 0 = libre · 1 = alcista tomada · -1 = bajista tomada
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ SESSIONS
@@ -808,7 +850,9 @@ validInsideBear = insideBar and close < open and close < (high[1] + low[1]) / 2 
 float eleBodyPctV = range_bar > 0 ? (bodySize / range_bar) * 100 : 0.0
 bool  isBigBull   = close > open and eleBodyPctV >= eleBodyPct and bodySize >= atr[1] * eleAtrMult
 bool  isBigBear   = close < open and eleBodyPctV >= eleBodyPct and bodySize >= atr[1] * eleAtrMult
-float eleEMA8    = showElephant ? ta.ema(close, 8) : na
+// v6.17 [FIX-A8] ta.ema() dentro de un ternario se evalúa condicionalmente (warning del compilador) y con
+// showElephant=false devolvía na, anulando isElephantUp/Dn en toda la lógica. Se calcula incondicionalmente.
+float eleEMA8    = ta.ema(close, 8)
 
 // v6.14 fix: definición institucional de Elephant Bar (Velez) — el "institutional footprint" real (~87%
 // follow-through citado por Velez) exige que la vela LIMPIE (cierre más allá del rango de) 3 o más velas
@@ -819,8 +863,11 @@ float eleLowest3  = ta.lowest(low[1], 3)
 bool eleClearsBull = not eleRequireClear or (isBearC[1] and isBearC[2] and isBearC[3] and close > eleHighest3)
 bool eleClearsBear = not eleRequireClear or (isBullC[1] and isBullC[2] and isBullC[3] and close < eleLowest3)
 
-isElephantUp = isBigBull and (showElephant ? close > eleEMA8 : false) and volume > avgVol * eleVolMult and eleClearsBull
-isElephantDn = isBigBear and (showElephant ? close < eleEMA8 : false) and volume > avgVol * eleVolMult and eleClearsBear
+// v6.17 [FIX-A8] Un toggle de VISUALIZACIÓN no puede alterar la LÓGICA de señales. Con showElephant=false
+// los patrones elefante desaparecían del scoring, de localTrendStr, del veto de contra-tendencia y de las
+// etiquetas de BOS momentum — un control de dibujo cambiaba las entradas. Se calcula siempre; solo pinta.
+isElephantUp = isBigBull and close > eleEMA8 and volume > avgVol * eleVolMult and eleClearsBull
+isElephantDn = isBigBear and close < eleEMA8 and volume > avgVol * eleVolMult and eleClearsBear
 validEleBull = isElephantUp and trend == 1
 validEleBear = isElephantDn and trend == -1
 superEleBull = isElephantUp and useEleTrigger and not isDeadZone
@@ -889,27 +936,31 @@ sbPatternBear := isSilverBullet and sbSweepHighDone and (pBarDn or engulfBear) a
 if sbPatternBull
     if showSilverBullet and barstate.isconfirmed
         label.new(bar_index, low, "🎯 SB BUY\nSweep+FVG", color=#C0CA33, textcolor=color.black, style=label.style_label_up, size=size.tiny)
-    if showSBSignal and barstate.isconfirmed and maxSignalRankThisBar < 3
+    if showSBSignal and barstate.isconfirmed and maxSignalRankThisBar < 3 and sigDirThisBar >= 0
         maxSignalRankThisBar := 3
+        sigDirThisBar := 1
         [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
         if not na(_sbSl)
-            vtBullSL := _sbSl
-            vtBullTP1 := _sbTp1
-            vtBullTP2 := _sbTp2
-            vtBullTP1Done := false
-            vtBullActive := true
+            if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
+                vtBullSL := _sbSl
+                vtBullTP1 := _sbTp1
+                vtBullTP2 := _sbTp2
+                vtBullTP1Done := false
+                vtBullActive := true
 if sbPatternBear
     if showSilverBullet and barstate.isconfirmed
         label.new(bar_index, high, "🎯 SB SELL\nSweep+FVG", color=#C0CA33, textcolor=color.black, style=label.style_label_down, size=size.tiny)
-    if showSBSignal and barstate.isconfirmed and maxSignalRankThisBar < 3
+    if showSBSignal and barstate.isconfirmed and maxSignalRankThisBar < 3 and sigDirThisBar <= 0
         maxSignalRankThisBar := 3
+        sigDirThisBar := -1
         [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
         if not na(_sbSl)
-            vtBearSL := _sbSl
-            vtBearTP1 := _sbTp1
-            vtBearTP2 := _sbTp2
-            vtBearTP1Done := false
-            vtBearActive := true
+            if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
+                vtBearSL := _sbSl
+                vtBearTP1 := _sbTp1
+                vtBearTP2 := _sbTp2
+                vtBearTP1Done := false
+                vtBearActive := true
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ VWAP + STD BANDS
@@ -1299,7 +1350,11 @@ localSwingHigh = ta.highest(high, effSwingLen * 2 + 1)
 obLbVal        = ta.lowestbars(low,   effSwingLen * 2 + 1)
 obHbVal        = ta.highestbars(high, effSwingLen * 2 + 1)
 
-if isSwingHigh
+// v6.17 [FIX-A2] REPINTADO: isSwingHigh/Low dependen de ta.highest/ta.lowest sobre una ventana que incluye
+// la vela EN CURSO. En un tick temprano la condición puede ser true y latchear structureHigh; si después el
+// precio hace un máximo superior dentro de la misma vela, isSwingHigh pasa a false pero el nivel latcheado
+// NO se revierte — y de él dependen BOS/CHoCH, Premium/Discount y el origen de los Order Blocks.
+if isSwingHigh and barstate.isconfirmed
     float swH = high[effSwingLen]
     if trend == 1
         if na(lastConfirmedHigh) or swH > lastConfirmedHigh
@@ -1309,7 +1364,7 @@ if isSwingHigh
         structureHigh     := swH
         lastConfirmedHigh := swH
 
-if isSwingLow
+if isSwingLow and barstate.isconfirmed
     float swL = low[effSwingLen]
     if trend == -1
         if na(lastConfirmedLow) or swL < lastConfirmedLow
@@ -1416,7 +1471,8 @@ if showBOS and showContext and barstate.isconfirmed
 isInternalSwingHigh = high[internalSwingLen] == ta.highest(high, internalSwingLen * 2 + 1)
 isInternalSwingLow  = low[internalSwingLen]  == ta.lowest(low,   internalSwingLen * 2 + 1)
 
-if isInternalSwingHigh
+// v6.17 [FIX-N4] La capa de Estructura Interna replicó el latcheo intrabar de [FIX-A2]. Mismo remedio.
+if isInternalSwingHigh and barstate.isconfirmed
     float iSwH = high[internalSwingLen]
     if internalTrend == 1
         if na(lastConfirmedInternalHigh) or iSwH > lastConfirmedInternalHigh
@@ -1426,7 +1482,7 @@ if isInternalSwingHigh
         internalStructureHigh     := iSwH
         lastConfirmedInternalHigh := iSwH
 
-if isInternalSwingLow
+if isInternalSwingLow and barstate.isconfirmed
     float iSwL = low[internalSwingLen]
     if internalTrend == -1
         if na(lastConfirmedInternalLow) or iSwL < lastConfirmedInternalLow
@@ -1562,12 +1618,24 @@ if isSwingLow
             eqLowCount    += 1
             lastEqLowMatch := i
 
+// v6.17 [FIX-A5] Se persisten también los CONTEOS. eqHighCount/eqLowCount solo existen en la vela exacta en
+// que se confirma el swing, así que eqBonusH/eqBonusL valían 1.0 el 99% del tiempo.
+var int lastEQHCount = 0
+var int lastEQLCount = 0
 if eqHighDetected
     lastEQHLevel := eqHighLevel
     lastEQHBar   := bar_index
+    lastEQHCount := eqHighCount
 if eqLowDetected
     lastEQLLevel := eqLowLevel
     lastEQLBar   := bar_index
+    lastEQLCount := eqLowCount
+
+// Vigencia del pool de liquidez — mismo criterio que ya usa la señal Wyckoff Spring/UTAD (v6.9), que sí
+// evaluaba contra el nivel persistido. Se unifica aquí para que scoring y señales de Sweep hagan lo mismo.
+int  eqValidBars = eqLookback * 2
+bool eqhAlive = not na(lastEQHLevel) and (bar_index - lastEQHBar) <= eqValidBars
+bool eqlAlive = not na(lastEQLLevel) and (bar_index - lastEQLBar) <= eqValidBars
 
 if eqHighDetected and showEQH and showContext
     int eqHWidth = eqHighCount >= 3 ? 3 : eqHighCount == 2 ? 2 : 1
@@ -1581,37 +1649,43 @@ if eqLowDetected and showEQL and showContext
     line.new(bar_index - effSwingLen - eqLookback, eqLowLevel, bar_index - effSwingLen, eqLowLevel, color=colEQL, width=eqLWidth, style=line.style_dotted)
     label.new(bar_index - effSwingLen, eqLowLevel, eqLLabel, color=color.new(colEQL, 0), textcolor=color.black, style=label.style_label_up, size=size.tiny)
 
-float eqBonusH = eqHighCount >= 4 ? 3.0 : eqHighCount == 3 ? 2.0 : 1.0
-float eqBonusL = eqLowCount  >= 4 ? 3.0 : eqLowCount  == 3 ? 2.0 : 1.0
+float eqBonusH = lastEQHCount >= 4 ? 3.0 : lastEQHCount == 3 ? 2.0 : 1.0
+float eqBonusL = lastEQLCount >= 4 ? 3.0 : lastEQLCount == 3 ? 2.0 : 1.0
 
-bool paNearEQL_sw = eqLowDetected  and not na(eqLowLevel)  and math.abs(low  - eqLowLevel)  < atr * 1.5
-bool paNearEQH_sw = eqHighDetected and not na(eqHighLevel) and math.abs(high - eqHighLevel) < atr * 1.5
+// v6.17 [FIX-A5] La proximidad se mide contra el nivel PERSISTIDO. Antes exigía que la confirmación del
+// swing, el barrido y el pin bar cayeran todos en la MISMA vela: las señales de Sweep casi nunca salían.
+bool paNearEQL_sw = eqlAlive and math.abs(low  - lastEQLLevel) < atr * 1.5
+bool paNearEQH_sw = eqhAlive and math.abs(high - lastEQHLevel) < atr * 1.5
 bool sweepBullSig = showSweepSignal and barstate.isconfirmed and isSweepLow  and paNearEQL_sw and pBarUp  and volume > avgVol and not isDeadZone
 bool sweepBearSig = showSweepSignal and barstate.isconfirmed and isSweepHigh and paNearEQH_sw and pBarDn  and volume > avgVol and not isDeadZone
 
 // v6.13: integrado al Signal Interlock (rango 3) y al Virtual Trade Tracker — antes dibujaba SL/TP pero
 // nunca quedaba registrado, así que sus salidas nunca disparaban alerta de SL/TP1/TP2/Trailing.
-if sweepBullSig and maxSignalRankThisBar < 3
+if sweepBullSig and maxSignalRankThisBar < 3 and sigDirThisBar >= 0
     maxSignalRankThisBar := 3
+    sigDirThisBar := 1
     label.new(bar_index, low, "💧 EQL SWEEP BUY", color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny)
     [_swSl, _swTp1, _swTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
     if not na(_swSl)
-        vtBullSL := _swSl
-        vtBullTP1 := _swTp1
-        vtBullTP2 := _swTp2
-        vtBullTP1Done := false
-        vtBullActive := true
+        if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
+            vtBullSL := _swSl
+            vtBullTP1 := _swTp1
+            vtBullTP2 := _swTp2
+            vtBullTP1Done := false
+            vtBullActive := true
 
-if sweepBearSig and maxSignalRankThisBar < 3
+if sweepBearSig and maxSignalRankThisBar < 3 and sigDirThisBar <= 0
     maxSignalRankThisBar := 3
+    sigDirThisBar := -1
     label.new(bar_index, high, "💧 EQH SWEEP SELL", color=#00E5FF, textcolor=color.black, style=label.style_label_down, size=size.tiny)
     [_swSl, _swTp1, _swTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
     if not na(_swSl)
-        vtBearSL := _swSl
-        vtBearTP1 := _swTp1
-        vtBearTP2 := _swTp2
-        vtBearTP1Done := false
-        vtBearActive := true
+        if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
+            vtBearSL := _swSl
+            vtBearTP1 := _swTp1
+            vtBearTP2 := _swTp2
+            vtBearTP1Done := false
+            vtBearActive := true
 
 // v6.9: señal de trade — Barrida de liquidez + Divergencia de Delta Acumulado + vela de rechazo. Patrón
 // institucional completo: precio barre un pool de liquidez real pero el order flow (CVD) no lo confirma
@@ -1628,29 +1702,33 @@ var int lastSweepDivSellBar = -999
 bool sweepDivBuySig  = sweepDivBull and barstate.isconfirmed and (bar_index - lastSweepDivBuyBar)  >= paMaxSignalGap
 bool sweepDivSellSig = sweepDivBear and barstate.isconfirmed and (bar_index - lastSweepDivSellBar) >= paMaxSignalGap
 
-if sweepDivBuySig and maxSignalRankThisBar < 3
+if sweepDivBuySig and maxSignalRankThisBar < 3 and sigDirThisBar >= 0
     maxSignalRankThisBar := 3
+    sigDirThisBar := 1
     label.new(bar_index, low, "💧Δ SWEEP+DIV BUY", color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny)
     [_sdSl, _sdTp1, _sdTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
     lastSweepDivBuyBar := bar_index
     if not na(_sdSl)
-        vtBullSL := _sdSl
-        vtBullTP1 := _sdTp1
-        vtBullTP2 := _sdTp2
-        vtBullTP1Done := false
-        vtBullActive := true
+        if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
+            vtBullSL := _sdSl
+            vtBullTP1 := _sdTp1
+            vtBullTP2 := _sdTp2
+            vtBullTP1Done := false
+            vtBullActive := true
 
-if sweepDivSellSig and maxSignalRankThisBar < 3
+if sweepDivSellSig and maxSignalRankThisBar < 3 and sigDirThisBar <= 0
     maxSignalRankThisBar := 3
+    sigDirThisBar := -1
     label.new(bar_index, high, "💧Δ SWEEP+DIV SELL", color=#00E5FF, textcolor=color.black, style=label.style_label_down, size=size.tiny)
     [_sdSl, _sdTp1, _sdTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
     lastSweepDivSellBar := bar_index
     if not na(_sdSl)
-        vtBearSL := _sdSl
-        vtBearTP1 := _sdTp1
-        vtBearTP2 := _sdTp2
-        vtBearTP1Done := false
-        vtBearActive := true
+        if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
+            vtBearSL := _sdSl
+            vtBearTP1 := _sdTp1
+            vtBearTP2 := _sdTp2
+            vtBearTP1Done := false
+            vtBearActive := true
 
 // ── IDM ──
 float _idmHighRef = ta.highest(high, effSwingLen * 4 + 1)
@@ -1745,36 +1823,42 @@ bool oteBearPA  = inOTEBear and (pBarDn or engulfBear or momBear) and volume > a
 
 // v6.13: integrado al Signal Interlock (rango 3) y al Virtual Trade Tracker.
 if showOTESignals and barstate.isconfirmed
-    if oteBullPA and maxSignalRankThisBar < 3
+    if oteBullPA and maxSignalRankThisBar < 3 and sigDirThisBar >= 0
         maxSignalRankThisBar := 3
+        sigDirThisBar := 1
         label.new(bar_index, low, "🎯 OTE BUY\n62-79% Fib", color=#FF6F00, textcolor=color.white, style=label.style_label_up, size=size.tiny)
         lastOTESignalBar := bar_index
         [_oteSl, _oteTp1, _oteTp2] = f_sl_tp(true, oteSwingL - atr * 0.1, close, atr, riskReward, showSLTP, false)
         if not na(_oteSl)
-            vtBullSL := _oteSl
-            vtBullTP1 := _oteTp1
-            vtBullTP2 := _oteTp2
-            vtBullTP1Done := false
-            vtBullActive := true
-    if oteBearPA and maxSignalRankThisBar < 3
+            if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
+                vtBullSL := _oteSl
+                vtBullTP1 := _oteTp1
+                vtBullTP2 := _oteTp2
+                vtBullTP1Done := false
+                vtBullActive := true
+    if oteBearPA and maxSignalRankThisBar < 3 and sigDirThisBar <= 0
         maxSignalRankThisBar := 3
+        sigDirThisBar := -1
         label.new(bar_index, high, "🎯 OTE SELL\n62-79% Fib", color=#FF6F00, textcolor=color.white, style=label.style_label_down, size=size.tiny)
         lastOTESignalBar := bar_index
         [_oteSl, _oteTp1, _oteTp2] = f_sl_tp(false, oteSwingH + atr * 0.1, close, atr, riskReward, showSLTP, false)
         if not na(_oteSl)
-            vtBearSL := _oteSl
-            vtBearTP1 := _oteTp1
-            vtBearTP2 := _oteTp2
-            vtBearTP1Done := false
-            vtBearActive := true
+            if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
+                vtBearSL := _oteSl
+                vtBearTP1 := _oteTp1
+                vtBearTP2 := _oteTp2
+                vtBearTP1Done := false
+                vtBearActive := true
 
 // ██ WYCKOFF PHASE DETECTION
 // v6.5 fix: un Spring/UTAD real ocurre al FINAL de un Trading Range de acumulación/distribución, no en medio
 // de una tendencia limpia. Antes cualquier sweep+reclaim de un EQL/EQH se etiquetaba "Wyckoff" sin verificar
 // que el mercado estuviera efectivamente lateral — se exige ADX bajo (mismo criterio que usa el resto del
 // script para "no tendencia") como proxy del contexto de rango.
-[_wyckAdxP, _wyckAdxM, _wyckAdxVal] = ta.dmi(paAdxLen, paAdxLen)
-bool wyckRangingCtx = _wyckAdxVal < paAdxMin
+// v6.17 [FIX-N5] Había DOS ta.dmi(paAdxLen, paAdxLen) idénticos (uno aquí para Wyckoff, otro más abajo
+// para el filtro de chop). Se unifica en un único cálculo, movido aquí para preceder a su primer uso.
+[_adxPlus, _adxMinus, _adxVal] = ta.dmi(paAdxLen, paAdxSmooth)
+bool wyckRangingCtx = _adxVal < paAdxMin
 
 bool wyckSpring = false
 bool wyckUTAD   = false
@@ -1797,27 +1881,31 @@ if eqhStillValid and wyckRangingCtx
 if wyckSpring
     if showWyckoff and showContext and barstate.isconfirmed
         label.new(bar_index, low, "🔄 SPRING\nAccumulation", color=color.new(#00E676, 10), textcolor=color.black, style=label.style_label_up, size=size.tiny)
-    if showWyckoffSignal and barstate.isconfirmed and maxSignalRankThisBar < 3
+    if showWyckoffSignal and barstate.isconfirmed and maxSignalRankThisBar < 3 and sigDirThisBar >= 0
         maxSignalRankThisBar := 3
+        sigDirThisBar := 1
         [_wSl, _wTp1, _wTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
         if not na(_wSl)
-            vtBullSL := _wSl
-            vtBullTP1 := _wTp1
-            vtBullTP2 := _wTp2
-            vtBullTP1Done := false
-            vtBullActive := true
+            if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
+                vtBullSL := _wSl
+                vtBullTP1 := _wTp1
+                vtBullTP2 := _wTp2
+                vtBullTP1Done := false
+                vtBullActive := true
 if wyckUTAD
     if showWyckoff and showContext and barstate.isconfirmed
         label.new(bar_index, high, "🔄 UTAD\nDistribution", color=color.new(#FF5252, 10), textcolor=color.white, style=label.style_label_down, size=size.tiny)
-    if showWyckoffSignal and barstate.isconfirmed and maxSignalRankThisBar < 3
+    if showWyckoffSignal and barstate.isconfirmed and maxSignalRankThisBar < 3 and sigDirThisBar <= 0
         maxSignalRankThisBar := 3
+        sigDirThisBar := -1
         [_wSl, _wTp1, _wTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
         if not na(_wSl)
-            vtBearSL := _wSl
-            vtBearTP1 := _wTp1
-            vtBearTP2 := _wTp2
-            vtBearTP1Done := false
-            vtBearActive := true
+            if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
+                vtBearSL := _wSl
+                vtBearTP1 := _wTp1
+                vtBearTP2 := _wTp2
+                vtBearTP1Done := false
+                vtBearActive := true
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ LIQUIDITY VOIDS
@@ -1886,12 +1974,11 @@ else if momBull
 
 if deltaConfirmBull
     scoreBull += 1.0
-if isInNY and isHighVol
-    scoreBull += 1.5
-else if isSilverBullet
+// v6.17 [FIX-A6] Se retira el bono aditivo por sesión: la sesión ya se pondera de forma multiplicativa en
+// sessionMult, así que aplicarla también aquí la contaba dos veces. Se conserva el componente de VOLUMEN,
+// que es lo que realmente aportaba información independiente de la hora.
+if isHighVol
     scoreBull += 1.0
-else if isInLondon
-    scoreBull += 0.5
 if isDisplacementBull
     scoreBull += 1.0
 if sbPatternBull
@@ -1906,8 +1993,7 @@ if chochWeakDown
     scoreBull -= 1.0
 if nearVWAPB2Top or nearVWAPB3Top
     scoreBull -= 3.0
-if isDeadZone
-    scoreBull -= 2.0
+// v6.17 [FIX-A6] Penalización de dead zone retirada del score aditivo: sessionMult ya aplica ×0.7.
 
 if vwapTrendingDn
     scoreBear += 1.5
@@ -1937,12 +2023,9 @@ else if momBear
 
 if deltaConfirmBear
     scoreBear += 1.0
-if isInNY and isHighVol
-    scoreBear += 1.5
-else if isSilverBullet
+// v6.17 [FIX-A6] Idem bloque alcista: sesión solo vía sessionMult, volumen como componente propio.
+if isHighVol
     scoreBear += 1.0
-else if isInLondon
-    scoreBear += 0.5
 if isDisplacementBear
     scoreBear += 1.0
 if sbPatternBear
@@ -1956,8 +2039,7 @@ if chochWeakUp
     scoreBear -= 1.0
 if nearVWAPB2Bot or nearVWAPB3Bot
     scoreBear -= 3.0
-if isDeadZone
-    scoreBear -= 2.0
+// v6.17 [FIX-A6] Idem: dead zone solo vía sessionMult.
 
 if mtfQualityBull
     scoreBull += 2.0
@@ -2012,7 +2094,12 @@ if bearOBs.size() > 0
 // de color opuesto al impulso — definición institucional real del Order Block.
 if bosUp or chochUp
     int lowestIndex = f_lastOppositeCandle(true, effSwingLen * 2 + 1, -1 * obLbVal)
-    bool hasUni  = bullFVGs.size() > 0 and bullFVGs.get(bullFVGs.size() - 1).bottom >= low[lowestIndex]
+    // v6.17 [FIX-A4] Unicorn = el FVG SOLAPA el Order Block. La prueba anterior (fvg.bottom >= ob.low) la
+    // cumplía cualquier FVG situado por encima del OB, por lejos que estuviera. Ahora es intersección real.
+    bool hasUni = false
+    if bullFVGs.size() > 0
+        FVG _uf = bullFVGs.get(bullFVGs.size() - 1)
+        hasUni := _uf.bottom <= high[lowestIndex] and _uf.top >= low[lowestIndex]
     bool isWeakB = bosWeakUp
     int  obStr   = (hasUni and mtfBullCongruence) ? 4 : mtfBullCongruence ? 3 : hasUni ? 2 : 1
     float bHigh  = math.max(open[lowestIndex], close[lowestIndex])
@@ -2032,7 +2119,11 @@ if bosUp or chochUp
 
 if bosDown or chochDown
     int highestIndex = f_lastOppositeCandle(false, effSwingLen * 2 + 1, -1 * obHbVal)
-    bool hasUni  = bearFVGs.size() > 0 and bearFVGs.get(bearFVGs.size() - 1).top <= high[highestIndex]
+    // v6.17 [FIX-A4] Solapamiento real FVG ↔ OB (ver nota en el bloque alcista).
+    bool hasUni = false
+    if bearFVGs.size() > 0
+        FVG _uf = bearFVGs.get(bearFVGs.size() - 1)
+        hasUni := _uf.bottom <= high[highestIndex] and _uf.top >= low[highestIndex]
     bool isWeakB = bosWeakDown
     int  obStr   = (hasUni and mtfBearCongruence) ? 4 : mtfBearCongruence ? 3 : hasUni ? 2 : 1
     float bHigh  = math.max(open[highestIndex], close[highestIndex])
@@ -2113,7 +2204,6 @@ if bearFVGs.size() > 0
 // ██ UNIFIED SIGNAL ENGINE
 // ══════════════════════════════════════════════════════════════════════════════
 
-[_adxPlus, _adxMinus, _adxVal] = ta.dmi(paAdxLen, paAdxLen)
 bool paMarketTrending = _adxVal >= paAdxMin
 
 bool  paNearBullOB   = false
@@ -2154,8 +2244,9 @@ if bearFVGs.size() > 0
             paNearBearFVG := true
             break
 
-bool paNearEQL = eqLowDetected  and not na(eqLowLevel)  and math.abs(low  - eqLowLevel)  < atr * 1.5
-bool paNearEQH = eqHighDetected and not na(eqHighLevel) and math.abs(high - eqHighLevel) < atr * 1.5
+// v6.17 [FIX-A5] Idem para el bonus POI del score: nivel persistido y vigente.
+bool paNearEQL = eqlAlive and math.abs(low  - lastEQLLevel) < atr * 1.5
+bool paNearEQH = eqhAlive and math.abs(high - lastEQHLevel) < atr * 1.5
 
 float poiBonusBull = 0.0
 if paNearBullOB
@@ -2174,7 +2265,9 @@ if paNearEQH
     poiBonusBear += eqBonusH
 
 // v6.3: Session-Weighted Scoring & Volatility-Adaptive minScore
-float sessionMult = isInNY ? 1.2 : isInLondon ? 1.05 : isDeadZone ? 0.7 : 0.9
+// v6.17 [FIX-A6] Única vía de ponderación por sesión (los bonos aditivos se eliminaron del score).
+// Se incorpora Silver Bullet, que antes solo existía como bono aditivo y quedaba huérfano al retirarlo.
+float sessionMult = isInNY ? 1.2 : isSilverBullet ? 1.15 : isInLondon ? 1.05 : isDeadZone ? 0.7 : 0.9
 float finalScoreBull = (scoreBull + poiBonusBull) * sessionMult
 float finalScoreBear = (scoreBear + poiBonusBear) * sessionMult
 
@@ -2277,8 +2370,9 @@ else if showInsideBars and validInsideBear
 barcolor(_barCol)
 
 // Signals Labels
-if isDiamondBuy and maxSignalRankThisBar < 6
+if isDiamondBuy and maxSignalRankThisBar < 6 and sigDirThisBar >= 0
     maxSignalRankThisBar := 6
+    sigDirThisBar := 1
     label.new(bar_index, low, "💎 DIAMOND BUY\nScore: " + str.tostring(finalScoreBull, "#.1"), color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny, tooltip=bullTooltip)
     float paSlBuy = not na(paBullOBBottom) ? math.min(paBullOBBottom - atr * 0.1, localSwingLow - atr * 0.1) : localSwingLow - atr * 0.1
     float _rkVal = math.max(close - paSlBuy, atr * 0.1)
@@ -2287,14 +2381,16 @@ if isDiamondBuy and maxSignalRankThisBar < 6
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlBuy)
     f_sl_tp(true, paSlBuy, close, atr, riskReward, showSLTP, showTP2)
     alert('{"signal": "DIAMOND BUY", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(paSlBuy) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBull, "#.1") + '}', alert.freq_once_per_bar_close)
-    vtBullSL := paSlBuy
-    vtBullTP1 := _tp1Val
-    vtBullTP2 := _tp2Val
-    vtBullTP1Done := false
-    vtBullActive := true
+    if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
+        vtBullSL := paSlBuy
+        vtBullTP1 := _tp1Val
+        vtBullTP2 := _tp2Val
+        vtBullTP1Done := false
+        vtBullActive := true
 
-if isDiamondSell and maxSignalRankThisBar < 6
+if isDiamondSell and maxSignalRankThisBar < 6 and sigDirThisBar <= 0
     maxSignalRankThisBar := 6
+    sigDirThisBar := -1
     label.new(bar_index, high, "💎 DIAMOND SELL\nScore: " + str.tostring(finalScoreBear, "#.1"), color=#E91E63, textcolor=color.white, style=label.style_label_down, size=size.tiny, tooltip=bearTooltip)
     float paSlSell = not na(paBearOBTop) ? math.max(paBearOBTop + atr * 0.1, localSwingHigh + atr * 0.1) : localSwingHigh + atr * 0.1
     float _rkVal = math.max(paSlSell - close, atr * 0.1)
@@ -2303,11 +2399,12 @@ if isDiamondSell and maxSignalRankThisBar < 6
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlSell)
     f_sl_tp(false, paSlSell, close, atr, riskReward, showSLTP, showTP2)
     alert('{"signal": "DIAMOND SELL", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(paSlSell) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBear, "#.1") + '}', alert.freq_once_per_bar_close)
-    vtBearSL := paSlSell
-    vtBearTP1 := _tp1Val
-    vtBearTP2 := _tp2Val
-    vtBearTP1Done := false
-    vtBearActive := true
+    if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
+        vtBearSL := paSlSell
+        vtBearTP1 := _tp1Val
+        vtBearTP2 := _tp2Val
+        vtBearTP1Done := false
+        vtBearActive := true
 
 // v6.9 fix: se eliminó el tier genérico "BUY/ELITE BUY" (pin bar/outside bar + score ≥ umbral, sin
 // exigir cercanía a ningún POI institucional específico) como alerta de TRADE — no corresponde a ningún
@@ -2382,8 +2479,9 @@ bool ofCooldownSell = (bar_index - lastOFSellBar) >= paMaxSignalGap
 bool ofBuy  = barstate.isconfirmed and showOFSignals and ofAbsorpBull and ofExhaustBull and ofInitBull and trend == 1  and not isDeadZone and paMarketTrending and ofCooldownBuy
 bool ofSell = barstate.isconfirmed and showOFSignals and ofAbsorpBear and ofExhaustBear and ofInitBear and trend == -1 and not isDeadZone and paMarketTrending and ofCooldownSell
 
-if ofBuy and maxSignalRankThisBar < 2
+if ofBuy and maxSignalRankThisBar < 2 and sigDirThisBar >= 0
     maxSignalRankThisBar := 2
+    sigDirThisBar := 1
     lastOFBuyBar := bar_index
     label.new(bar_index, low, "📊 OF BUY\nA+E+I", color=#00BFA5, textcolor=color.white, style=label.style_label_up, size=size.tiny, tooltip=bullTooltip)
     float _slVal = localSwingLow - atr * 0.15
@@ -2393,14 +2491,16 @@ if ofBuy and maxSignalRankThisBar < 2
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
     f_sl_tp(true, _slVal, close, atr, riskReward, showSLTP, false)
     alert('{"signal": "OF BUY", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(_slVal) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBull, "#.1") + '}', alert.freq_once_per_bar_close)
-    vtBullSL := _slVal
-    vtBullTP1 := _tp1Val
-    vtBullTP2 := _tp2Val
-    vtBullTP1Done := false
-    vtBullActive := true
+    if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
+        vtBullSL := _slVal
+        vtBullTP1 := _tp1Val
+        vtBullTP2 := _tp2Val
+        vtBullTP1Done := false
+        vtBullActive := true
 
-if ofSell and maxSignalRankThisBar < 2
+if ofSell and maxSignalRankThisBar < 2 and sigDirThisBar <= 0
     maxSignalRankThisBar := 2
+    sigDirThisBar := -1
     lastOFSellBar := bar_index
     label.new(bar_index, high, "📊 OF SELL\nA+E+I", color=#D50000, textcolor=color.white, style=label.style_label_down, size=size.tiny, tooltip=bearTooltip)
     float _slVal = localSwingHigh + atr * 0.15
@@ -2410,11 +2510,12 @@ if ofSell and maxSignalRankThisBar < 2
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
     f_sl_tp(false, _slVal, close, atr, riskReward, showSLTP, false)
     alert('{"signal": "OF SELL", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(_slVal) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBear, "#.1") + '}', alert.freq_once_per_bar_close)
-    vtBearSL := _slVal
-    vtBearTP1 := _tp1Val
-    vtBearTP2 := _tp2Val
-    vtBearTP1Done := false
-    vtBearActive := true
+    if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
+        vtBearSL := _slVal
+        vtBearTP1 := _tp1Val
+        vtBearTP2 := _tp2Val
+        vtBearTP1Done := false
+        vtBearActive := true
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ OB EXTEND, MITIGATION & INST SIGNAL
@@ -2430,56 +2531,65 @@ bool isPAbear = pBarDn or engulfBear or momBear or validOutsideBear or superEleB
 bool paValidBull = not usePAFilter or (isPAbull and finalScoreBull >= effMinScore)
 bool paValidBear = not usePAFilter or (isPAbear and finalScoreBear >= effMinScore)
 
+// v6.17 [FIX-A1] REPINTADO CRÍTICO: este bucle mutaba estado PERSISTENTE (mitigate / toBreaker) con el
+// close y el low EN VIVO. Un pinchazo intrabar destruía el Order Block de forma permanente aunque la vela
+// cerrara de vuelta dentro del bloque. La mutación va ahora sobre vela cerrada; ob.extend() se mantiene
+// fuera del candado porque es puramente visual.
+// v6.17 [FIX-A9] La rama de contacto exigía low >= ob.bottom, así que una mecha que perforaba el suelo del OB
+// pero cerraba dentro no entraba en NINGUNA rama y el barrido se ignoraba por completo.
 if bullOBs.size() > 0
     for i = bullOBs.size() - 1 to 0
         OrderBlock ob = bullOBs.get(i)
         ob.extend()
-        if not ob.mitigated
+        if not ob.mitigated and barstate.isconfirmed
             if close < ob.bottom
                 ob.mitigate(removeMitigated, mitigatedColor)
                 if trend == -1 and not ob.isBreaker
                     ob.toBreaker(false, obBearColor)
-            else if low <= ob.top and low >= ob.bottom
-                if close >= ob.bottom
-                    if showMitigation and paValidBull and passTrendBull and passVolBull and passRsiBull and passAtrBull and passMTFBull and not isDeadZone
-                        if not requireDiscount or inDiscount
-                            signalBuy := true
-                            obSlBuyVal := ob.bottom
+            else if low <= ob.top
+                // El precio entró en el OB (incluida la mecha que perfora el suelo) y cerró dentro o por encima
+                if showMitigation and paValidBull and passTrendBull and passVolBull and passRsiBull and passAtrBull and passMTFBull and not isDeadZone
+                    if not requireDiscount or inDiscount
+                        signalBuy := true
+                        obSlBuyVal := math.min(ob.bottom, low)
                 if showPartialMit and not ob.isBreaker
                     float obMid = (ob.bodyHigh + ob.bodyLow) / 2
-                    if low <= obMid and low > ob.bottom and not na(ob.id)
+                    if low <= obMid and not na(ob.id)
                         box.set_bgcolor(ob.id, color.new(#FFA500, 70))
                         box.set_text(ob.id, "50% MIT")
 
+// v6.17 [FIX-A1] + [FIX-A9] — mismas correcciones que en el bloque alcista (ver nota arriba).
 if bearOBs.size() > 0
     for i = bearOBs.size() - 1 to 0
         OrderBlock ob = bearOBs.get(i)
         ob.extend()
-        if not ob.mitigated
+        if not ob.mitigated and barstate.isconfirmed
             if close > ob.top
                 ob.mitigate(removeMitigated, mitigatedColor)
                 if trend == 1 and not ob.isBreaker
                     ob.toBreaker(true, obBullColor)
-            else if high >= ob.bottom and high <= ob.top
-                if close <= ob.top
-                    if showMitigation and paValidBear and passTrendBear and passVolBear and passRsiBear and passAtrBear and passMTFBear and not isDeadZone
-                        if not requirePremium or inPremium
-                            signalSell := true
-                            obSlSellVal := ob.top
+            else if high >= ob.bottom
+                if showMitigation and paValidBear and passTrendBear and passVolBear and passRsiBear and passAtrBear and passMTFBear and not isDeadZone
+                    if not requirePremium or inPremium
+                        signalSell := true
+                        obSlSellVal := math.max(ob.top, high)
                 if showPartialMit and not ob.isBreaker
                     float obMid = (ob.bodyHigh + ob.bodyLow) / 2
-                    if high >= obMid and high < ob.top and not na(ob.id)
+                    if high >= obMid and not na(ob.id)
                         box.set_bgcolor(ob.id, color.new(#FFA500, 70))
                         box.set_text(ob.id, "50% MIT")
 
-if showElephant and barstate.isconfirmed
+// v6.17 [FIX-A8] El veto por elefante contra-tendencia es LÓGICA de riesgo, no visualización: antes solo
+// se aplicaba si showElephant estaba activo, de modo que apagar un dibujo dejaba pasar entradas vetadas.
+if barstate.isconfirmed
     if superEleBear
         signalBuy  := false
     if superEleBull
         signalSell := false
 
-if signalBuy and barstate.isconfirmed and maxSignalRankThisBar < 4
+if signalBuy and barstate.isconfirmed and maxSignalRankThisBar < 4 and sigDirThisBar >= 0
     maxSignalRankThisBar := 4
+    sigDirThisBar := 1
     label.new(bar_index, low, "🏦 INST BUY\nScore: " + str.tostring(finalScoreBull, "#.1"), color=#00E676, textcolor=color.black, style=label.style_label_up, size=size.tiny, tooltip=bullTooltip)
     float _slVal = obSlBuyVal - atr * 0.1
     float _rkVal = math.max(close - _slVal, atr * 0.1)
@@ -2488,14 +2598,16 @@ if signalBuy and barstate.isconfirmed and maxSignalRankThisBar < 4
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
     f_sl_tp(true, _slVal, close, atr, riskReward, true, showTP2)
     alert('{"signal": "INST BUY", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(_slVal) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBull, "#.1") + '}', alert.freq_once_per_bar_close)
-    vtBullSL := _slVal
-    vtBullTP1 := _tp1Val
-    vtBullTP2 := _tp2Val
-    vtBullTP1Done := false
-    vtBullActive := true
+    if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
+        vtBullSL := _slVal
+        vtBullTP1 := _tp1Val
+        vtBullTP2 := _tp2Val
+        vtBullTP1Done := false
+        vtBullActive := true
 
-if signalSell and barstate.isconfirmed and maxSignalRankThisBar < 4
+if signalSell and barstate.isconfirmed and maxSignalRankThisBar < 4 and sigDirThisBar <= 0
     maxSignalRankThisBar := 4
+    sigDirThisBar := -1
     label.new(bar_index, high, "🏦 INST SELL\nScore: " + str.tostring(finalScoreBear, "#.1"), color=#FF5252, textcolor=color.white, style=label.style_label_down, size=size.tiny, tooltip=bearTooltip)
     float _slVal = obSlSellVal + atr * 0.1
     float _rkVal = math.max(_slVal - close, atr * 0.1)
@@ -2504,11 +2616,12 @@ if signalSell and barstate.isconfirmed and maxSignalRankThisBar < 4
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
     f_sl_tp(false, _slVal, close, atr, riskReward, true, showTP2)
     alert('{"signal": "INST SELL", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(_slVal) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBear, "#.1") + '}', alert.freq_once_per_bar_close)
-    vtBearSL := _slVal
-    vtBearTP1 := _tp1Val
-    vtBearTP2 := _tp2Val
-    vtBearTP1Done := false
-    vtBearActive := true
+    if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
+        vtBearSL := _slVal
+        vtBearTP1 := _tp1Val
+        vtBearTP2 := _tp2Val
+        vtBearTP1Done := false
+        vtBearActive := true
 
 bool nearBullOBAlert = false
 bool nearBearOBAlert = false
@@ -2526,9 +2639,9 @@ if bearOBs.size() > 0
             break
 
 if showElephant
-    if superEleBull and barstate.isconfirmed and maxSignalRankThisBar < 1
+    if superEleBull and barstate.isconfirmed and maxSignalRankThisBar < 1 and sigDirThisBar >= 0
         label.new(bar_index, low,  "🐘 BUY",  color=colEleBull, textcolor=color.black, style=label.style_label_up,   size=size.tiny)
-    if superEleBear and barstate.isconfirmed and maxSignalRankThisBar < 1
+    if superEleBear and barstate.isconfirmed and maxSignalRankThisBar < 1 and sigDirThisBar <= 0
         label.new(bar_index, high, "🐘 SELL", color=colEleBear, textcolor=color.black, style=label.style_label_down, size=size.tiny)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2538,19 +2651,22 @@ if showElephant
 var float trailStopBull = na
 var float trailStopBear = na
 
-if paBuy or signalBuy or isDiamondBuy
-    trailStopBull := not na(paBullOBBottom) ? math.min(paBullOBBottom - atr * 0.1, localSwingLow - atr * 0.1) : localSwingLow - atr * 0.1
-else if not na(trailStopBull)
-    trailStopBull := math.max(trailStopBull, localSwingLow - atr * 0.1)
-    if close < trailStopBull or trend == -1
-        trailStopBull := na
+// v6.17 [FIX-A3] REPINTADO: el trailing se recalculaba en cada tick, así que un close intrabar por debajo
+// del stop lo anulaba (:= na) de forma permanente aunque la vela cerrara por encima. Solo vela cerrada.
+if barstate.isconfirmed
+    if paBuy or signalBuy or isDiamondBuy
+        trailStopBull := not na(paBullOBBottom) ? math.min(paBullOBBottom - atr * 0.1, localSwingLow - atr * 0.1) : localSwingLow - atr * 0.1
+    else if not na(trailStopBull)
+        trailStopBull := math.max(trailStopBull, localSwingLow - atr * 0.1)
+        if close < trailStopBull or trend == -1
+            trailStopBull := na
 
-if paSell or signalSell or isDiamondSell
-    trailStopBear := not na(paBearOBTop) ? math.max(paBearOBTop + atr * 0.1, localSwingHigh + atr * 0.1) : localSwingHigh + atr * 0.1
-else if not na(trailStopBear)
-    trailStopBear := math.min(trailStopBear, localSwingHigh + atr * 0.1)
-    if close > trailStopBear or trend == 1
-        trailStopBear := na
+    if paSell or signalSell or isDiamondSell
+        trailStopBear := not na(paBearOBTop) ? math.max(paBearOBTop + atr * 0.1, localSwingHigh + atr * 0.1) : localSwingHigh + atr * 0.1
+    else if not na(trailStopBear)
+        trailStopBear := math.min(trailStopBear, localSwingHigh + atr * 0.1)
+        if close > trailStopBear or trend == 1
+            trailStopBear := na
 
 plot(showSLTP ? trailStopBull : na, "Trail Stop Bull", color=color.new(#00E676, 40), style=plot.style_linebr, linewidth=2)
 plot(showSLTP ? trailStopBear : na, "Trail Stop Bear", color=color.new(#FF5252, 40), style=plot.style_linebr, linewidth=2)
@@ -2562,38 +2678,42 @@ plot(showSLTP ? trailStopBear : na, "Trail Stop Bear", color=color.new(#FF5252, 
 // el SL, el TP1/TP2 o el trailing stop de la última señal activa habían sido tocados. Se usa el tracker
 // vtBull*/vtBear* (compartido entre Diamond/Elite/Buy/OF/INST) para detectar el cruce y notificar una sola vez.
 
+// v6.17 [FIX-N1] El SL y los TP se evaluaban de forma independiente, así que en una vela amplia el mismo
+// trade podía reportar SL_HIT y TP2_HIT a la vez. El OHLC no dice qué se tocó primero dentro de la vela, así
+// que se aplica la convención institucional conservadora: si ambos caben en la vela, MANDA EL STOP. Solo
+// cuando el stop no fue tocado se consideran alcanzados los objetivos.
 bool vtBullSLHit  = vtBullActive and not na(vtBullSL)  and low  <= vtBullSL
-bool vtBullTP1Hit = vtBullActive and not vtBullTP1Done and not na(vtBullTP1) and high >= vtBullTP1
-bool vtBullTP2Hit = vtBullActive and not na(vtBullTP2) and high >= vtBullTP2
 bool vtBearSLHit  = vtBearActive and not na(vtBearSL)  and high >= vtBearSL
-bool vtBearTP1Hit = vtBearActive and not vtBearTP1Done and not na(vtBearTP1) and low  <= vtBearTP1
-bool vtBearTP2Hit = vtBearActive and not na(vtBearTP2) and low  <= vtBearTP2
+bool vtBullTP1Hit = vtBullActive and not vtBullSLHit and not vtBullTP1Done and not na(vtBullTP1) and high >= vtBullTP1
+bool vtBullTP2Hit = vtBullActive and not vtBullSLHit and not na(vtBullTP2) and high >= vtBullTP2
+bool vtBearTP1Hit = vtBearActive and not vtBearSLHit and not vtBearTP1Done and not na(vtBearTP1) and low  <= vtBearTP1
+bool vtBearTP2Hit = vtBearActive and not vtBearSLHit and not na(vtBearTP2) and low  <= vtBearTP2
 
 bool trailBullHit = vtBullActive and not na(trailStopBull[1]) and close < trailStopBull[1]
 bool trailBearHit = vtBearActive and not na(trailStopBear[1]) and close > trailStopBear[1]
 
 if barstate.isconfirmed
     if vtBullSLHit
-        alert('{"event": "SL_HIT", "side": "LONG", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + ', "level": ' + str.tostring(vtBullSL) + '}', alert.freq_once_per_bar_close)
+        alert('{"event": "SL_HIT", "side": "LONG", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(vtBullSL) + ', "close": ' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
     if vtBullTP1Hit
-        alert('{"event": "TP1_HIT", "side": "LONG", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + ', "level": ' + str.tostring(vtBullTP1) + '}', alert.freq_once_per_bar_close)
+        alert('{"event": "TP1_HIT", "side": "LONG", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(vtBullTP1) + ', "close": ' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
         vtBullTP1Done := true
     if vtBullTP2Hit
-        alert('{"event": "TP2_HIT", "side": "LONG", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + ', "level": ' + str.tostring(vtBullTP2) + '}', alert.freq_once_per_bar_close)
+        alert('{"event": "TP2_HIT", "side": "LONG", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(vtBullTP2) + ', "close": ' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
     if trailBullHit
-        alert('{"event": "TRAIL_HIT", "side": "LONG", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
+        alert('{"event": "TRAIL_HIT", "side": "LONG", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(trailStopBull[1]) + ', "close": ' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
     if vtBullSLHit or vtBullTP2Hit or trailBullHit
         vtBullActive := false
 
     if vtBearSLHit
-        alert('{"event": "SL_HIT", "side": "SHORT", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + ', "level": ' + str.tostring(vtBearSL) + '}', alert.freq_once_per_bar_close)
+        alert('{"event": "SL_HIT", "side": "SHORT", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(vtBearSL) + ', "close": ' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
     if vtBearTP1Hit
-        alert('{"event": "TP1_HIT", "side": "SHORT", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + ', "level": ' + str.tostring(vtBearTP1) + '}', alert.freq_once_per_bar_close)
+        alert('{"event": "TP1_HIT", "side": "SHORT", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(vtBearTP1) + ', "close": ' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
         vtBearTP1Done := true
     if vtBearTP2Hit
-        alert('{"event": "TP2_HIT", "side": "SHORT", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + ', "level": ' + str.tostring(vtBearTP2) + '}', alert.freq_once_per_bar_close)
+        alert('{"event": "TP2_HIT", "side": "SHORT", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(vtBearTP2) + ', "close": ' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
     if trailBearHit
-        alert('{"event": "TRAIL_HIT", "side": "SHORT", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
+        alert('{"event": "TRAIL_HIT", "side": "SHORT", "ticker": "' + syminfo.ticker + '", "price": ' + str.tostring(trailStopBear[1]) + ', "close": ' + str.tostring(close) + '}', alert.freq_once_per_bar_close)
     if vtBearSLHit or vtBearTP2Hit or trailBearHit
         vtBearActive := false
 
