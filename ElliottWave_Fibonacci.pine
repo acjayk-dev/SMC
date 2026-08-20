@@ -935,7 +935,10 @@ bool newWave     = stWaves > 0 and stWaves != stPrevW and barstate.isconfirmed
 bool impulseEnd  = newWave and stWaves == 5
 bool corrEnd     = newWave and stWaves == 8
 bool inGolden    = barstate.isconfirmed and stWaves > 0 and not na(stGold1) and not na(stGold2) and close <= math.max(stGold1, stGold2) and close >= math.min(stGold1, stGold2)
-bool targetHit   = barstate.isconfirmed and stWaves > 0 and not na(stT2) and ta.cross(close, stT2)
+// ta.cross() se evalúa siempre a nivel global: detrás de un `and` el cortocircuito
+// la dejaría sin ejecutar en algunas barras y su histórico quedaría inconsistente.
+bool crossT2     = ta.cross(close, stT2)
+bool targetHit   = barstate.isconfirmed and stWaves > 0 and not na(stT2) and crossT2
 bool invalidated = barstate.isconfirmed and stWaves > 0 and not na(stInvalid) and (stInvUp ? close > stInvalid : close < stInvalid)
 
 if barstate.isconfirmed and stWaves > 0
