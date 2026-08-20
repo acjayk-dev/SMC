@@ -1,72 +1,157 @@
 //@version=6
-// ─────────────────────────────────────────────────────────
-// Elliott Wave + Fibonacci (Simple) v1.0
-// TF óptimo: 15m – 4H  |  Activo: índices, futuros, forex, cripto
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ELLIOTT WAVE PRO · INSTITUTIONAL  v2.0
+//  Conteo de ondas con el marco completo de R.N. Elliott + proporciones Fibonacci
+//  TF óptimo: 15m – 1D  |  Activo: índices, futuros, forex, cripto, acciones
+// ───────────────────────────────────────────────────────────────────────────────
+//  MARCO TEÓRICO IMPLEMENTADO
 //
-// Qué hace:
-//   1) Detecta swings (pivotes confirmados) con filtro ATR y construye un ZigZag.
-//   2) Etiqueta un impulso 1-2-3-4-5 seguido de una corrección A-B-C validando
-//      las tres reglas inviolables de Elliott.
-//   3) Dibuja retrocesos y extensiones de Fibonacci del tramo activo.
+//  Reglas inviolables (si fallan, el conteo se descarta):
+//    R1 · La onda 2 nunca retrocede el 100% de la onda 1.
+//    R2 · La onda 3 nunca es la más corta de las ondas 1, 3 y 5.
+//    R3 · La onda 4 no entra en el territorio de precio de la onda 1
+//         (excepción: diagonal, donde el solape está permitido).
 //
-// Nota: los pivotes se confirman `swingLen` barras después de formarse, por lo
-// que las etiquetas no repintan una vez dibujadas, pero sí aparecen con retardo.
-// ─────────────────────────────────────────────────────────
-indicator("Elliott Wave + Fibonacci (Simple)", shorttitle="EW + Fib", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=100)
+//  Guías (puntúan la calidad del conteo, no lo invalidan):
+//    · Retroceso de onda 2: ideal 50–61.8 % (alterno 38.2 % / 78.6 %).
+//    · Onda 3: extensión 161.8 % o 261.8 % de la onda 1.
+//    · Retroceso de onda 4: ideal 23.6–38.2 % de la onda 3.
+//    · Onda 5: igualdad con la onda 1, o 61.8 % del tramo 0–3.
+//    · Alternancia: si la onda 2 es profunda y rápida, la 4 es plana y lenta (y viceversa).
+//    · Canalización: canal 2–4 con paralela desde la onda 3 como objetivo de la 5.
+//    · Proporción temporal: relaciones Fibonacci entre las duraciones de las ondas.
+//
+//  Patrones reconocidos:
+//    · Impulso 5-3-5-3-5 · Diagonal (inicial y final, con solape 1-4 y convergencia)
+//    · Zigzag 5-3-5 · Plana regular / expandida / corrida 3-3-5 · Triángulo A-B-C-D-E
+//
+//  Grados de onda: Cycle · Primary · Intermediate · Minor · Minute · Minuette,
+//  con notación estándar y selección automática por timeframe.
+//
+//  Anti-repintado: los pivotes se confirman `swingLen` barras después de formarse.
+//  Las etiquetas no se mueven una vez dibujadas, pero aparecen con ese retardo,
+//  inherente a cualquier conteo automático.
+// ═══════════════════════════════════════════════════════════════════════════════
+indicator("Elliott Wave Pro · Institutional", shorttitle="EW Pro", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 
-// ══════════════════════════════════════════════════════════════════════════════
-// ██ [1] INPUTS
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██ [1] TIPOS
+// ═══════════════════════════════════════════════════════════════════════════════
 
-grpWave = "═══ 🌊 DETECCIÓN DE ONDAS ═══"
-swingLen    = input.int(8, "Swing Length (pivotes)", minval=2, maxval=50, group=grpWave, tooltip="Barras a cada lado necesarias para confirmar un pivote. Menor = más ondas y más ruido.\n5-8 para 5m-15m · 8-12 para 1H-4H · 12+ para diario.")
-minAtrMult  = input.float(0.5, "Filtro mínimo de swing (× ATR)", minval=0.0, maxval=10.0, step=0.1, group=grpWave, tooltip="Descarta swings cuyo recorrido sea menor a este múltiplo del ATR(14). Súbelo si aparecen demasiadas ondas pequeñas.")
-maxLookback = input.int(14, "Pivotes analizados", minval=6, maxval=30, group=grpWave, tooltip="Cuántos pivotes recientes se examinan buscando el mejor conteo de ondas.")
-minWaves    = input.int(3, "Mínimo de ondas para etiquetar", minval=1, maxval=5, group=grpWave, tooltip="No dibuja nada hasta que el conteo válido alcance este número de ondas.")
+type Pivot
+    int   bar    = 0
+    float price  = 0.0
+    bool  isHigh = false
+
+type Count
+    int    si        = -1        // índice del pivote de origen (punto 0)
+    int    dir       = 0         // 1 = impulso alcista · -1 = impulso bajista
+    int    n         = 0         // ondas válidas confirmadas (1-5 impulso, 6-8 = A-B-C)
+    float  score     = 0.0       // calidad del conteo frente a las guías (0-100)
+    string pattern   = "—"       // IMPULSO · DIAGONAL · ZIGZAG · PLANA · TRIÁNGULO
+    string extended  = "—"       // onda extendida (1, 3 o 5)
+    bool   truncated = false     // onda 5 truncada (no supera el extremo de la 3)
+    bool   altOK     = false     // se cumple la guía de alternancia 2/4
+    bool   chanOK    = false     // la onda 5 respeta el canal 2-4
+    bool   isDiag    = false     // el impulso es una diagonal
+    string corrPat   = "—"       // tipo de corrección A-B-C posterior
+    float  r2        = na        // retroceso de la onda 2 sobre la 1
+    float  r3        = na        // extensión de la onda 3 sobre la 1
+    float  r4        = na        // retroceso de la onda 4 sobre la 3
+    float  r5        = na        // proporción de la onda 5 sobre la 1
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██ [2] INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+grpEng = "═══ 🌊 MOTOR DE CONTEO ═══"
+swingLen    = input.int(8, "Swing Length (pivotes)", minval=2, maxval=50, group=grpEng, tooltip="Barras a cada lado necesarias para confirmar un pivote.\n5-8 → 5m-15m · 8-12 → 1H-4H · 12+ → diario.")
+minAtrMult  = input.float(0.5, "Filtro mínimo de swing (× ATR)", minval=0.0, maxval=10.0, step=0.1, group=grpEng, tooltip="Descarta swings cuyo recorrido sea menor a este múltiplo del ATR(14). Súbelo si aparecen ondas de ruido.")
+maxLookback = input.int(16, "Pivotes analizados", minval=6, maxval=34, group=grpEng, tooltip="Cuántos pivotes recientes se examinan buscando el mejor conteo.")
+minWaves    = input.int(3, "Mínimo de ondas para etiquetar", minval=1, maxval=5, group=grpEng)
+minScore    = input.float(35, "Score mínimo del conteo", minval=0, maxval=100, step=5, group=grpEng, tooltip="Calidad mínima frente a las guías de Elliott para dibujar el conteo. 0 = mostrar siempre el mejor disponible.")
+allowDiag   = input.bool(true, "Permitir diagonales (solape 1-4)", group=grpEng, tooltip="Acepta conteos donde la onda 4 solapa a la 1 siempre que las patas converjan: diagonal inicial (onda 1/A) o final (onda 5/C).")
+strictR2    = input.bool(true, "Regla 2 estricta (onda 3 no la más corta)", group=grpEng, tooltip="Desactivarlo relaja la única regla que suele romperse en datos ruidosos. Recomendado dejarlo activo.")
+
+grpDeg = "═══ 🎼 GRADO DE ONDA ═══"
+degMode     = input.string("Auto por timeframe", "Grado", options=["Auto por timeframe", "Cycle", "Primary", "Intermediate", "Minor", "Minute", "Minuette"], group=grpDeg, tooltip="Notación de las etiquetas. Auto elige el grado según el timeframe del gráfico.")
+showSub     = input.bool(false, "Mostrar sub-ondas del grado inferior", group=grpDeg, tooltip="Corre un segundo motor con pivotes más finos y etiqueta la estructura interna de la onda en curso.")
+subDivisor  = input.int(3, "Divisor del swing para sub-ondas", minval=2, maxval=6, group=grpDeg)
 
 grpVis = "═══ 🎨 VISUALIZACIÓN ═══"
-showZigZag  = input.bool(true, "Mostrar ZigZag", group=grpVis)
-showLabels  = input.bool(true, "Mostrar etiquetas de onda", group=grpVis)
+viewMode    = input.string("COMPLETO", "Modo", options=["COMPLETO", "LIMPIO", "SOLO ETIQUETAS"], group=grpVis, tooltip="COMPLETO: todo · LIMPIO: ondas + Fibonacci · SOLO ETIQUETAS: únicamente el conteo.")
+showZigZag  = input.bool(true, "ZigZag estructural", group=grpVis)
+showChannel = input.bool(true, "Canal de Elliott (2-4 y 0-2)", group=grpVis)
+showInvalid = input.bool(true, "Línea de invalidación", group=grpVis)
 labelSize   = input.string("Normal", "Tamaño de etiquetas", options=["Tiny", "Small", "Normal", "Large"], group=grpVis)
-colImpulse  = input.color(#2962FF, "Color impulso (1-2-3-4-5)", group=grpVis)
-colCorrect  = input.color(#FF6D00, "Color corrección (A-B-C)", group=grpVis)
-colZigZag   = input.color(#787B86, "Color ZigZag", group=grpVis)
+colImpulse  = input.color(#2962FF, "Impulso (1-2-3-4-5)", group=grpVis)
+colCorrect  = input.color(#FF6D00, "Corrección (A-B-C)", group=grpVis)
+colZigZag   = input.color(#787B86, "ZigZag", group=grpVis)
+colChannel  = input.color(#AB47BC, "Canal", group=grpVis)
+colInvalid  = input.color(#FF5252, "Invalidación", group=grpVis)
 
 grpFib = "═══ 📐 FIBONACCI ═══"
-showFib     = input.bool(true, "Mostrar Fibonacci del tramo activo", group=grpFib, tooltip="Retrocesos medidos sobre la última onda completada: proyectan dónde puede terminar la onda en curso.")
-showExt     = input.bool(true, "Mostrar extensiones (1.272 / 1.618)", group=grpFib)
-showGolden  = input.bool(true, "Resaltar zona áurea (0.5 – 0.618)", group=grpFib)
-fibExtend   = input.int(30, "Extender líneas (barras)", minval=5, maxval=200, group=grpFib)
-colFib      = input.color(#FFB300, "Color niveles Fibonacci", group=grpFib)
-colGolden   = input.color(#00E676, "Color zona áurea / objetivos", group=grpFib)
+showFib     = input.bool(true, "Retrocesos del tramo activo", group=grpFib, tooltip="Retrocesos de la última onda completada.")
+showTargets = input.bool(true, "Proyecciones de la onda en curso", group=grpFib, tooltip="Objetivos Fibonacci específicos de la onda que el mercado está desarrollando ahora mismo.")
+showGolden  = input.bool(true, "Zona áurea 0.5 – 0.618", group=grpFib)
+fibExtend   = input.int(40, "Extender líneas (barras)", minval=5, maxval=200, group=grpFib)
+colFib      = input.color(#FFB300, "Niveles de retroceso", group=grpFib)
+colTarget   = input.color(#00E676, "Objetivos de proyección", group=grpFib)
 
-grpDash = "═══ 📊 DASHBOARD ═══"
-showDash    = input.bool(true, "Mostrar dashboard", group=grpDash)
-dashPos     = input.string("Top Right", "Posición", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=grpDash)
-dashSize    = input.string("Small", "Tamaño", options=["Tiny", "Small", "Normal"], group=grpDash)
+grpDash = "═══ 📊 PANELES ═══"
+showDash    = input.bool(true, "Dashboard del conteo", group=grpDash)
+showRules   = input.bool(true, "Panel de reglas y guías", group=grpDash)
+showAlt     = input.bool(true, "Mostrar conteo alternativo", group=grpDash, tooltip="Segundo mejor conteo con origen distinto: el escenario que hay que vigilar si el principal se invalida.")
+dashPos     = input.string("Top Right", "Posición dashboard", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=grpDash)
+rulesPos    = input.string("Bottom Right", "Posición panel de reglas", options=["Bottom Right", "Bottom Left", "Top Right", "Top Left"], group=grpDash)
+dashSize    = input.string("Small", "Tamaño de texto", options=["Tiny", "Small", "Normal"], group=grpDash)
 
-// ══════════════════════════════════════════════════════════════════════════════
-// ██ [2] VARIABLES PERSISTENTES
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██ [3] VARIABLES PERSISTENTES
+// ═══════════════════════════════════════════════════════════════════════════════
 
-var float[] zzPrice  = array.new<float>()   // precio del pivote
-var int[]   zzBar    = array.new<int>()     // bar_index del pivote
-var bool[]  zzIsHigh = array.new<bool>()    // true = máximo, false = mínimo
+var array<Pivot> pvMaj = array.new<Pivot>()      // pivotes del grado principal
+var array<Pivot> pvMin = array.new<Pivot>()      // pivotes del grado inferior
 
-var label[] waveLabels = array.new<label>()
-var line[]  zzLines    = array.new<line>()
-var line[]  fibLines   = array.new<line>()
-var label[] fibLabels  = array.new<label>()
-var box[]   fibBoxes   = array.new<box>()
+var array<label> lblWave = array.new<label>()
+var array<label> lblSub  = array.new<label>()
+var array<label> lblFib  = array.new<label>()
+var array<line>  lnZig   = array.new<line>()
+var array<line>  lnFib   = array.new<line>()
+var array<line>  lnChan  = array.new<line>()
+var array<box>   bxFib   = array.new<box>()
 
-var int drawSig   = -1                      // firma del último dibujo (evita redibujar en cada tick)
-var int prevCount = 0                       // conteo de ondas de la evaluación anterior
+// Estado del conteo vigente (se mantiene entre barras para alertas y paneles)
+var int    stWaves   = 0
+var int    stDir     = 0
+var float  stScore   = 0.0
+var string stPattern = "—"
+var string stExt     = "—"
+var bool   stTrunc   = false
+var bool   stAlt     = false
+var bool   stChan    = false
+var bool   stDiag    = false
+var float  stR2      = na
+var float  stR3      = na
+var float  stR4      = na
+var float  stR5      = na
+var float  stInvalid = na
+var bool   stInvUp   = false        // la invalidación se rompe al alza
+var float  stT1      = na
+var float  stT2      = na
+var float  stT3      = na
+var string stT1L     = ""
+var string stT2L     = ""
+var string stT3L     = ""
+var string stAltTxt  = "—"
+var int    stPrevW   = 0
+var int    drawSig   = -1
 
-int MAX_PIVOTS = 40
+int MAX_PIVOTS = 60
 
-// ══════════════════════════════════════════════════════════════════════════════
-// ██ [3] FUNCIONES CORE
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██ [4] HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
 
 atr = ta.atr(14)
 
@@ -77,310 +162,788 @@ f_size(string s) =>
         "Large" => size.large
         =>         size.normal
 
-f_dashPos(string s) =>
+f_pos(string s) =>
     switch s
         "Top Left"     => position.top_left
         "Bottom Right" => position.bottom_right
         "Bottom Left"  => position.bottom_left
         =>                position.top_right
 
-// Precio normalizado: en un impulso bajista se invierte el signo, así las mismas
-// reglas alcistas de Elliott sirven para las dos direcciones.
-f_np(int i, int dir) =>
-    dir * array.get(zzPrice, i)
+// Grado automático según el timeframe del gráfico
+f_autoDegree() =>
+    float mins = timeframe.in_seconds() / 60.0
+    mins >= 10080 ? "Cycle" : mins >= 1440 ? "Primary" : mins >= 240 ? "Intermediate" : mins >= 30 ? "Minor" : mins >= 5 ? "Minute" : "Minuette"
 
-// ══════════════════════════════════════════════════════════════════════════════
-// ██ [4] CONSTRUCCIÓN DEL ZIGZAG (pivotes confirmados)
-// ══════════════════════════════════════════════════════════════════════════════
+f_lowerDegree(string d) =>
+    switch d
+        "Cycle"        => "Primary"
+        "Primary"      => "Intermediate"
+        "Intermediate" => "Minor"
+        "Minor"        => "Minute"
+        =>                "Minuette"
 
-ph = ta.pivothigh(high, swingLen, swingLen)
-pl = ta.pivotlow(low, swingLen, swingLen)
-
-bool newPivot = false
-
-// — Nuevo máximo —
-if not na(ph)
-    float pxH = ph
-    int   bxH = bar_index - swingLen
-    int   nH  = array.size(zzPrice)
-    if nH == 0
-        array.push(zzPrice, pxH)
-        array.push(zzBar, bxH)
-        array.push(zzIsHigh, true)
-        newPivot := true
-    else if array.get(zzIsHigh, nH - 1)
-        // Dos máximos seguidos: nos quedamos con el más alto
-        if pxH >= array.get(zzPrice, nH - 1)
-            array.set(zzPrice, nH - 1, pxH)
-            array.set(zzBar, nH - 1, bxH)
-            newPivot := true
-    else if pxH - array.get(zzPrice, nH - 1) >= atr * minAtrMult
-        array.push(zzPrice, pxH)
-        array.push(zzBar, bxH)
-        array.push(zzIsHigh, true)
-        newPivot := true
-
-// — Nuevo mínimo —
-if not na(pl)
-    float pxL = pl
-    int   bxL = bar_index - swingLen
-    int   nL  = array.size(zzPrice)
-    if nL == 0
-        array.push(zzPrice, pxL)
-        array.push(zzBar, bxL)
-        array.push(zzIsHigh, false)
-        newPivot := true
-    else if not array.get(zzIsHigh, nL - 1)
-        // Dos mínimos seguidos: nos quedamos con el más bajo
-        if pxL <= array.get(zzPrice, nL - 1)
-            array.set(zzPrice, nL - 1, pxL)
-            array.set(zzBar, nL - 1, bxL)
-            newPivot := true
-    else if array.get(zzPrice, nL - 1) - pxL >= atr * minAtrMult
-        array.push(zzPrice, pxL)
-        array.push(zzBar, bxL)
-        array.push(zzIsHigh, false)
-        newPivot := true
-
-// Control del tamaño del historial
-while array.size(zzPrice) > MAX_PIVOTS
-    array.shift(zzPrice)
-    array.shift(zzBar)
-    array.shift(zzIsHigh)
-
-// ══════════════════════════════════════════════════════════════════════════════
-// ██ [5] CONTEO DE ONDAS (reglas de Elliott)
-// ══════════════════════════════════════════════════════════════════════════════
-//   Regla 1 → La onda 2 nunca retrocede más allá del origen de la onda 1.
-//   Regla 2 → La onda 3 nunca es la más corta entre las ondas 1, 3 y 5.
-//   Regla 3 → La onda 4 no invade el territorio de precio de la onda 1.
-//   Corrección → A contra el impulso, B sin superar el extremo de la 5, C más allá de A.
-//
-// Devuelve cuántas ondas consecutivas son válidas partiendo del pivote `si`
-// en la dirección `dir` (1 = impulso alcista, -1 = impulso bajista). Máx. 8 (1-5 + A-B-C).
-f_count(int si, int dir) =>
-    int nP    = array.size(zzPrice)
-    int avail = nP - 1 - si
-    int c     = 0
-    // El origen debe ser un mínimo en el impulso alcista y un máximo en el bajista
-    bool okOrigin = array.get(zzIsHigh, si) == (dir == -1)
-    if okOrigin and avail >= 1
-        bool broken = false
-        int maxK = avail < 8 ? avail : 8
-        for k = 1 to maxK
-            if not broken
-                float pk  = f_np(si + k, dir)
-                float pk1 = f_np(si + k - 1, dir)
-                bool ok = switch k
-                    1 => pk > pk1                                                       // onda 1: impulso inicial
-                    2 => pk > f_np(si, dir) and pk < pk1                                 // regla 1
-                    3 => pk > f_np(si + 1, dir)                                          // la onda 3 supera el final de la 1
-                    4 => pk > f_np(si + 1, dir) and pk < pk1                             // regla 3 (sin solapamiento)
-                    5 => pk > pk1 and (f_np(si + 3, dir) - f_np(si + 2, dir)) >= math.min(f_np(si + 1, dir) - f_np(si, dir), pk - pk1)   // regla 2
-                    6 => pk < pk1                                                        // onda A
-                    7 => pk > pk1 and pk < f_np(si + 5, dir)                             // onda B
-                    8 => pk < f_np(si + 6, dir)                                          // onda C
-                    =>   false
-                if ok
-                    c := k
-                else
-                    broken := true
-    c
-
-// — Búsqueda del mejor conteo entre los pivotes recientes —
-int bestSi  = -1
-int bestCnt = 0
-int bestDir = 0
-
-if newPivot or barstate.islast
-    int nn = array.size(zzPrice)
-    if nn >= 3
-        int startI = nn - maxLookback > 0 ? nn - maxLookback : 0
-        for si = startI to nn - 2
-            for d = 0 to 1
-                int dir = d == 0 ? 1 : -1
-                int c = f_count(si, dir)
-                // Preferimos el conteo más largo; a igualdad, el origen más reciente
-                if c > bestCnt or (c > 0 and c == bestCnt and si > bestSi)
-                    bestCnt := c
-                    bestSi  := si
-                    bestDir := dir
-
-bool hasCount = bestCnt >= minWaves and bestSi >= 0
-
-// ══════════════════════════════════════════════════════════════════════════════
-// ██ [6] TRAMO ACTIVO Y NIVELES DE FIBONACCI
-// ══════════════════════════════════════════════════════════════════════════════
-// El tramo activo es la última onda completada: sus retrocesos proyectan dónde
-// es probable que termine la onda en curso, y sus extensiones el objetivo del
-// siguiente impulso.
-
-float legFrom  = na
-float legTo    = na
-int   legBarTo = na
-float fib236   = na
-float fib382   = na
-float fib500   = na
-float fib618   = na
-float fib786   = na
-float ext1272  = na
-float ext1618  = na
-
-if hasCount
-    legFrom  := array.get(zzPrice, bestSi + bestCnt - 1)
-    legTo    := array.get(zzPrice, bestSi + bestCnt)
-    legBarTo := array.get(zzBar, bestSi + bestCnt)
-    float rng = legTo - legFrom
-    fib236  := legTo - rng * 0.236
-    fib382  := legTo - rng * 0.382
-    fib500  := legTo - rng * 0.500
-    fib618  := legTo - rng * 0.618
-    fib786  := legTo - rng * 0.786
-    ext1272 := legFrom + rng * 1.272
-    ext1618 := legFrom + rng * 1.618
-
-// ══════════════════════════════════════════════════════════════════════════════
-// ██ [7] DIBUJO (se rehace solo cuando cambia el conteo)
-// ══════════════════════════════════════════════════════════════════════════════
-
-f_clear() =>
-    if array.size(waveLabels) > 0
-        for i = 0 to array.size(waveLabels) - 1
-            label.delete(array.get(waveLabels, i))
-        array.clear(waveLabels)
-    if array.size(zzLines) > 0
-        for i = 0 to array.size(zzLines) - 1
-            line.delete(array.get(zzLines, i))
-        array.clear(zzLines)
-    if array.size(fibLines) > 0
-        for i = 0 to array.size(fibLines) - 1
-            line.delete(array.get(fibLines, i))
-        array.clear(fibLines)
-    if array.size(fibLabels) > 0
-        for i = 0 to array.size(fibLabels) - 1
-            label.delete(array.get(fibLabels, i))
-        array.clear(fibLabels)
-    if array.size(fibBoxes) > 0
-        for i = 0 to array.size(fibBoxes) - 1
-            box.delete(array.get(fibBoxes, i))
-        array.clear(fibBoxes)
-    true
-
-f_fibLine(int x1, int x2, float lvl, string txt, color col, int transp, int w) =>
-    array.push(fibLines, line.new(x1, lvl, x2, lvl, color=color.new(col, transp), width=w, style=line.style_dashed))
-    array.push(fibLabels, label.new(x2, lvl, txt + "  " + str.tostring(lvl, format.mintick), style=label.style_label_left, color=color.new(col, 90), textcolor=col, size=size.tiny))
-    true
-
-f_waveName(int k) =>
-    switch k
+// Notación estándar de Elliott por grado
+f_wname(int k, string deg) =>
+    bool corr = k >= 6
+    string arab = switch k
         1 => "1"
         2 => "2"
         3 => "3"
         4 => "4"
         5 => "5"
+        =>   "0"
+    string romU = switch k
+        1 => "I"
+        2 => "II"
+        3 => "III"
+        4 => "IV"
+        5 => "V"
+        =>   "0"
+    string romL = switch k
+        1 => "i"
+        2 => "ii"
+        3 => "iii"
+        4 => "iv"
+        5 => "v"
+        =>   "0"
+    string corU = switch k
         6 => "A"
         7 => "B"
         8 => "C"
-        =>   "—"
+        =>   "0"
+    string corL = switch k
+        6 => "a"
+        7 => "b"
+        8 => "c"
+        =>   "0"
+    string res = switch deg
+        "Cycle"        => corr ? corU : romU
+        "Primary"      => "((" + (corr ? corU : arab) + "))"
+        "Intermediate" => "(" + (corr ? corU : arab) + ")"
+        "Minor"        => corr ? corU : arab
+        "Minute"       => "(" + (corr ? corL : romL) + ")"
+        =>                corr ? corL : romL
+    k == 0 ? "0" : res
 
-// Firma del estado: si no cambia, no se redibuja nada
-int sig = hasCount ? bestSi * 100000 + bestCnt * 1000 + (bestDir + 1) * 100 + array.size(zzPrice) : -1
+f_pct(float v) =>
+    na(v) ? "—" : str.tostring(v * 100, "#.#") + "%"
 
-if (newPivot or barstate.islast) and sig != drawSig
+f_rat(float v) =>
+    na(v) ? "—" : str.tostring(v, "#.##") + "×"
+
+f_px(float v) =>
+    na(v) ? "—" : str.tostring(v, format.mintick)
+
+// Puntuación de una proporción frente a su objetivo ideal
+f_near(float v, float target, float tol) =>
+    not na(v) and math.abs(v - target) <= tol
+
+string DEG    = degMode == "Auto por timeframe" ? f_autoDegree() : degMode
+string DEGSUB = f_lowerDegree(DEG)
+bool   vFull  = viewMode == "COMPLETO"
+bool   vClean = viewMode != "SOLO ETIQUETAS"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██ [5] CONSTRUCCIÓN DE PIVOTES (dos grados)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Inserta un pivote respetando la alternancia máximo/mínimo. Dos pivotes del mismo
+// tipo se fusionan quedándose con el extremo, que es lo que exige el conteo de ondas.
+f_pushPivot(array<Pivot> pv, float px, int bx, bool isHi, float minMove) =>
+    bool changed = false
+    int  n = array.size(pv)
+    if n == 0
+        array.push(pv, Pivot.new(bx, px, isHi))
+        changed := true
+    else
+        Pivot last = array.get(pv, n - 1)
+        if last.isHigh == isHi
+            if (isHi and px >= last.price) or (not isHi and px <= last.price)
+                array.set(pv, n - 1, Pivot.new(bx, px, isHi))
+                changed := true
+        else
+            float move = isHi ? px - last.price : last.price - px
+            if move >= minMove
+                array.push(pv, Pivot.new(bx, px, isHi))
+                changed := true
+    if array.size(pv) > MAX_PIVOTS
+        array.shift(pv)
+    changed
+
+// Acceso a pivotes con índice acotado: ninguna lectura puede salirse del array
+f_at(array<Pivot> pv, int i) =>
+    int last = array.size(pv) - 1
+    array.get(pv, math.min(math.max(i, 0), math.max(last, 0)))
+
+int subLen = math.max(2, int(swingLen / subDivisor))
+
+phMaj = ta.pivothigh(high, swingLen, swingLen)
+plMaj = ta.pivotlow(low, swingLen, swingLen)
+phMin = ta.pivothigh(high, subLen, subLen)
+plMin = ta.pivotlow(low, subLen, subLen)
+
+float minMove = atr * minAtrMult
+
+bool newPivot = false
+if not na(phMaj)
+    newPivot := f_pushPivot(pvMaj, phMaj, bar_index - swingLen, true, minMove) or newPivot
+if not na(plMaj)
+    newPivot := f_pushPivot(pvMaj, plMaj, bar_index - swingLen, false, minMove) or newPivot
+
+if showSub and not na(phMin)
+    f_pushPivot(pvMin, phMin, bar_index - subLen, true, minMove * 0.35)
+if showSub and not na(plMin)
+    f_pushPivot(pvMin, plMin, bar_index - subLen, false, minMove * 0.35)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██ [6] MOTOR DE ANÁLISIS · REGLAS Y GUÍAS DE ELLIOTT
+// ═══════════════════════════════════════════════════════════════════════════════
+// Valida ondas de forma secuencial desde el pivote `si` en la dirección `dir`
+// (1 = impulso alcista, -1 = impulso bajista). Los precios se normalizan por el
+// signo de `dir`, de modo que las reglas alcistas sirven para las dos direcciones.
+
+f_analyze(array<Pivot> pv, int si, int dir) =>
+    Count c = Count.new()
+    int n     = array.size(pv)
+    int avail = n - 1 - si
+    // El punto 0 debe ser un mínimo en un impulso alcista y un máximo en uno bajista
+    bool okOrigin = f_at(pv, si).isHigh == (dir == -1)
+
+    if okOrigin and avail >= 1
+        int kmax = avail < 8 ? avail : 8
+
+        float p0 = dir * f_at(pv, si).price
+        float p1 = kmax >= 1 ? dir * f_at(pv, si + 1).price : na
+        float p2 = kmax >= 2 ? dir * f_at(pv, si + 2).price : na
+        float p3 = kmax >= 3 ? dir * f_at(pv, si + 3).price : na
+        float p4 = kmax >= 4 ? dir * f_at(pv, si + 4).price : na
+        float p5 = kmax >= 5 ? dir * f_at(pv, si + 5).price : na
+        float p6 = kmax >= 6 ? dir * f_at(pv, si + 6).price : na
+        float p7 = kmax >= 7 ? dir * f_at(pv, si + 7).price : na
+        float p8 = kmax >= 8 ? dir * f_at(pv, si + 8).price : na
+
+        int b0 = f_at(pv, si).bar
+        int b1 = kmax >= 1 ? f_at(pv, si + 1).bar : 0
+        int b2 = kmax >= 2 ? f_at(pv, si + 2).bar : 0
+        int b3 = kmax >= 3 ? f_at(pv, si + 3).bar : 0
+        int b4 = kmax >= 4 ? f_at(pv, si + 4).bar : 0
+        int b5 = kmax >= 5 ? f_at(pv, si + 5).bar : 0
+
+        int    w      = 0
+        bool   diag   = false
+        bool   trunc  = false
+        bool   altOK  = false
+        bool   chanOK = false
+        string ext    = "—"
+        string cpat   = "—"
+        float  r2     = na
+        float  r3     = na
+        float  r4     = na
+        float  r5     = na
+        float  retrB  = na
+        float  ratC   = na
+        float  pts    = 0.0
+        float  pmax   = 0.0
+
+        // ── Onda 1 ─────────────────────────────────────────────────────────────
+        if not na(p1) and p1 > p0
+            w := 1
+
+        // ── Onda 2 · REGLA 1: no retrocede el 100 % de la onda 1 ───────────────
+        if w == 1 and not na(p2) and p2 > p0 and p2 < p1
+            w := 2
+
+        // ── Onda 3: obligatoriamente supera el extremo de la onda 1 ────────────
+        if w == 2 and not na(p3) and p3 > p1
+            w := 3
+
+        // ── Onda 4 · REGLA 3: sin solape con la onda 1 (salvo diagonal) ────────
+        if w == 3 and not na(p4) and p4 < p3
+            if p4 > p1
+                w := 4
+            else if allowDiag and p4 > p2 and (p3 - p2) < (p1 - p0)
+                // Solape permitido sólo si las patas convergen → diagonal
+                w    := 4
+                diag := true
+
+        // ── Onda 5 · REGLA 2: la onda 3 nunca es la más corta ──────────────────
+        if w == 4 and not na(p5) and p5 > p4
+            float l1 = p1 - p0
+            float l3 = p3 - p2
+            float l5 = p5 - p4
+            bool ruleTwo = not (l3 < l1 and l3 < l5)
+            bool diagOK  = not diag or l5 < l3
+            if (ruleTwo or not strictR2) and diagOK
+                w     := 5
+                trunc := p5 < p3                       // quinta truncada (failure)
+                ext := l3 > l1 * 1.618 and l3 > l5 * 1.618 ? "3" : l5 > l1 * 1.618 and l5 > l3 * 1.618 ? "5" : l1 > l3 * 1.618 and l1 > l5 * 1.618 ? "1" : "—"
+
+        // ── Corrección A-B-C posterior al impulso ──────────────────────────────
+        if w == 5 and not na(p6) and p6 < p5
+            w := 6
+        if w == 6 and not na(p7) and p7 > p6 and (p7 - p6) <= (p5 - p6) * 1.382
+            w := 7
+        if w == 7 and not na(p8) and p8 < p7 and (p7 - p8) >= (p5 - p6) * 0.5
+            w := 8
+
+        if w >= 7
+            retrB := (p7 - p6) / math.max(p5 - p6, syminfo.mintick)
+        if w >= 8
+            ratC := (p7 - p8) / math.max(p5 - p6, syminfo.mintick)
+            cpat := retrB > 1.05 and p8 < p6 ? "PLANA EXPANDIDA" : retrB > 1.05 ? "PLANA CORRIDA" : retrB >= 0.9 ? "PLANA REGULAR" : ratC >= 0.618 ? "ZIGZAG" : "CORRECCIÓN SIMPLE"
+
+        // ── Puntuación frente a las guías ──────────────────────────────────────
+        if w >= 2
+            r2   := (p1 - p2) / math.max(p1 - p0, syminfo.mintick)
+            pmax += 20
+            pts  += (r2 >= 0.5 and r2 <= 0.618 ? 20 : r2 >= 0.382 and r2 <= 0.786 ? 14 : r2 >= 0.236 and r2 <= 0.886 ? 7 : 0)
+
+        if w >= 3
+            r3   := (p3 - p2) / math.max(p1 - p0, syminfo.mintick)
+            pmax += 20
+            pts  += (r3 >= 1.5 and r3 <= 1.75 ? 20 : r3 >= 2.5 and r3 <= 2.75 ? 18 : r3 >= 4.0 and r3 <= 4.5 ? 15 : r3 > 1.0 ? 12 : 5)
+
+        if w >= 4
+            r4   := (p3 - p4) / math.max(p3 - p2, syminfo.mintick)
+            pmax += 15
+            pts  += (r4 >= 0.236 and r4 <= 0.382 ? 15 : r4 > 0.382 and r4 <= 0.5 ? 11 : r4 > 0.5 and r4 <= 0.618 ? 6 : 3)
+            // Guía de alternancia: la onda 4 alterna en profundidad y/o en tiempo con la 2
+            int  t2       = b2 - b1
+            int  t4       = b4 - b3
+            bool altDepth = (r2 >= 0.5) != (r4 >= 0.382)
+            bool altTime  = t2 > 0 and t4 > 0 and math.max(t2, t4) >= 1.5 * math.min(t2, t4)
+            altOK := altDepth or altTime
+            pmax  += 15
+            pts   += (altDepth and altTime ? 15 : altDepth or altTime ? 9 : 0)
+
+        if w >= 5
+            r5   := (p5 - p4) / math.max(p1 - p0, syminfo.mintick)
+            pmax += 15
+            pts  += (r5 >= 0.85 and r5 <= 1.15 ? 15 : r5 >= 0.5 and r5 <= 0.75 ? 13 : r5 >= 1.5 and r5 <= 1.75 ? 12 : r5 >= 0.382 and r5 <= 2.618 ? 8 : 3)
+            // Canalización: la onda 5 debería morir sobre la paralela al canal 2-4 trazada desde la 3
+            float slope = (p4 - p2) / math.max(b4 - b2, 1)
+            float proj  = p3 + slope * (b5 - b3)
+            float tol   = math.max((p3 - p2) * 0.25, syminfo.mintick)
+            chanOK := math.abs(p5 - proj) <= tol
+            pmax   += 10
+            pts    += (chanOK ? 10 : math.abs(p5 - proj) <= tol * 2 ? 5 : 0)
+            // Proporción temporal entre las ondas 1 y 3
+            int   t1 = b1 - b0
+            int   t3 = b3 - b2
+            float tr = t1 > 0 ? float(t3) / float(t1) : na
+            pmax += 5
+            pts  += (f_near(tr, 1.618, 0.35) or f_near(tr, 2.618, 0.5) or f_near(tr, 1.0, 0.2) ? 5 : 0)
+
+        if w >= 7
+            pmax += 10
+            pts  += ((retrB >= 0.382 and retrB <= 0.786) or (retrB >= 0.9 and retrB <= 1.382) ? 10 : 4)
+
+        if w >= 8
+            pmax += 10
+            pts  += ((ratC >= 0.9 and ratC <= 1.1) or (ratC >= 1.5 and ratC <= 1.75) ? 10 : 4)
+
+        c.si        := si
+        c.dir       := dir
+        c.n         := w
+        c.score     := pmax > 0 ? 100.0 * pts / pmax : 0.0
+        c.pattern   := w == 0 ? "—" : diag ? "DIAGONAL" : "IMPULSO"
+        c.corrPat   := cpat
+        c.extended  := ext
+        c.truncated := trunc
+        c.altOK     := altOK
+        c.chanOK    := chanOK
+        c.isDiag    := diag
+        c.r2        := r2
+        c.r3        := r3
+        c.r4        := r4
+        c.r5        := r5
+    c
+
+// Mejor conteo entre los pivotes recientes. `exSi`/`exDir` permiten excluir un
+// origen ya usado para obtener el escenario alternativo.
+f_best(array<Pivot> pv, int lookback, int exSi, int exDir, float minSc) =>
+    Count best = Count.new()
+    int n = array.size(pv)
+    if n >= 3
+        int startI = n - lookback > 0 ? n - lookback : 0
+        for si = startI to n - 2
+            for d = 0 to 1
+                int dir = d == 0 ? 1 : -1
+                if not (si == exSi and dir == exDir)
+                    Count cand = f_analyze(pv, si, dir)
+                    // El filtro de calidad se aplica aquí: un conteo largo pero pobre
+                    // no debe desplazar a uno más corto que sí respeta las guías.
+                    bool okScore = cand.score >= minSc or cand.n <= 1
+                    float rankC = cand.n * 1000.0 + cand.score
+                    float rankB = best.n * 1000.0 + best.score
+                    if cand.n > 0 and okScore and rankC > rankB
+                        best := cand
+    best
+
+// Triángulo contractivo A-B-C-D-E sobre los últimos seis pivotes
+f_triangle(array<Pivot> pv) =>
+    int res = -1
+    int n = array.size(pv)
+    if n >= 6
+        int s = n - 6
+        float q0 = array.get(pv, s).price
+        float q1 = array.get(pv, s + 1).price
+        float q2 = array.get(pv, s + 2).price
+        float q3 = array.get(pv, s + 3).price
+        float q4 = array.get(pv, s + 4).price
+        float q5 = array.get(pv, s + 5).price
+        bool startHigh = array.get(pv, s).isHigh
+        bool contract = startHigh ? (q0 > q2 and q2 > q4 and q1 < q3 and q3 < q5) : (q0 < q2 and q2 < q4 and q1 > q3 and q3 > q5)
+        if contract
+            res := s
+    res
+
+// Objetivos Fibonacci de la onda en curso y nivel de invalidación del conteo
+f_targets(array<Pivot> pv, Count c) =>
+    float t1 = na
+    float t2 = na
+    float t3 = na
+    string s1 = ""
+    string s2 = ""
+    string s3 = ""
+    float inv = na
+    bool  invUp = false
+
+    if c.n > 0 and c.si >= 0
+        int dir = c.dir
+        float p0 = dir * f_at(pv, c.si).price
+        float p1 = c.n >= 1 ? dir * f_at(pv, c.si + 1).price : na
+        float p2 = c.n >= 2 ? dir * f_at(pv, c.si + 2).price : na
+        float p3 = c.n >= 3 ? dir * f_at(pv, c.si + 3).price : na
+        float p4 = c.n >= 4 ? dir * f_at(pv, c.si + 4).price : na
+        float p5 = c.n >= 5 ? dir * f_at(pv, c.si + 5).price : na
+        float p6 = c.n >= 6 ? dir * f_at(pv, c.si + 6).price : na
+        float p7 = c.n >= 7 ? dir * f_at(pv, c.si + 7).price : na
+        float p8 = c.n >= 8 ? dir * f_at(pv, c.si + 8).price : na
+        float len1 = p1 - p0
+        string nm = f_wname(c.n >= 8 ? 1 : c.n + 1, DEG)
+
+        if c.n == 1
+            t1 := p1 - len1 * 0.500
+            t2 := p1 - len1 * 0.618
+            t3 := p1 - len1 * 0.786
+            s1 := nm + " · 50%"
+            s2 := nm + " · 61.8%"
+            s3 := nm + " · 78.6%"
+            inv := p0
+        else if c.n == 2
+            t1 := p2 + len1 * 1.618
+            t2 := p2 + len1 * 2.618
+            t3 := p2 + len1 * 4.236
+            s1 := nm + " · 1.618"
+            s2 := nm + " · 2.618"
+            s3 := nm + " · 4.236"
+            inv := p2
+        else if c.n == 3
+            float len3 = p3 - p2
+            t1 := p3 - len3 * 0.236
+            t2 := p3 - len3 * 0.382
+            t3 := p3 - len3 * 0.500
+            s1 := nm + " · 23.6%"
+            s2 := nm + " · 38.2%"
+            s3 := nm + " · 50%"
+            inv := c.isDiag ? p2 : p1
+        else if c.n == 4
+            t1 := p4 + len1 * 0.618
+            t2 := p4 + len1 * 1.000
+            t3 := p4 + (p3 - p0) * 0.618
+            s1 := nm + " · 0.618×O1"
+            s2 := nm + " · igualdad O1"
+            s3 := nm + " · 0.618×(0-3)"
+            inv := p4
+        else if c.n == 5
+            float imp = p5 - p0
+            t1 := p5 - imp * 0.382
+            t2 := p5 - imp * 0.500
+            t3 := p5 - imp * 0.618
+            s1 := nm + " · 38.2%"
+            s2 := nm + " · 50%"
+            s3 := nm + " · 61.8%"
+            inv := p5
+        else if c.n == 6
+            float lenA = p5 - p6
+            t1 := p6 + lenA * 0.500
+            t2 := p6 + lenA * 0.618
+            t3 := p6 + lenA * 0.786
+            s1 := nm + " · 50%"
+            s2 := nm + " · 61.8%"
+            s3 := nm + " · 78.6%"
+            inv := p5
+        else if c.n == 7
+            float lenA = p5 - p6
+            t1 := p7 - lenA * 0.618
+            t2 := p7 - lenA * 1.000
+            t3 := p7 - lenA * 1.618
+            s1 := nm + " · 0.618×A"
+            s2 := nm + " · igualdad A"
+            s3 := nm + " · 1.618×A"
+            inv := p5
+        else
+            float imp = p5 - p0
+            t1 := p8 + imp * 0.382
+            t2 := p8 + imp * 0.618
+            t3 := p8 + imp * 1.000
+            s1 := nm + " · 38.2%"
+            s2 := nm + " · 61.8%"
+            s3 := nm + " · 100%"
+            inv := p8
+
+        t1  := dir * t1
+        t2  := dir * t2
+        t3  := dir * t3
+        inv := dir * inv
+        // En espacio normalizado la invalidación de las ondas 1-4 y del cierre de C
+        // se rompe a la baja; la del final del impulso, al alza.
+        bool breakDownNorm = c.n <= 4 or c.n == 8
+        invUp := breakDownNorm ? dir == -1 : dir == 1
+
+    [t1, t2, t3, s1, s2, s3, inv, invUp]
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██ [7] EJECUCIÓN DEL MOTOR
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var float stGold1 = na
+var float stGold2 = na
+var int   stLegBar = na
+var float stLegFrom = na
+var float stLegTo = na
+var int    stTriIdx = -1
+var string stCorr   = "—"
+
+Count best = Count.new()
+Count alt  = Count.new()
+bool  recompute = newPivot or barstate.islast
+
+if recompute
+    best := f_best(pvMaj, maxLookback, -1, 0, minScore)
+    if showAlt and best.n > 0
+        alt := f_best(pvMaj, maxLookback, best.si, best.dir, minScore)
+
+bool hasCount = best.n >= minWaves and best.si >= 0
+
+[tgt1, tgt2, tgt3, tlb1, tlb2, tlb3, invLvl, invUpper] = f_targets(pvMaj, best)
+
+if recompute
+    stTriIdx := f_triangle(pvMaj)
+    if hasCount
+        stWaves   := best.n
+        stDir     := best.dir
+        stScore   := best.score
+        stPattern := best.pattern
+        stCorr    := best.corrPat
+        stExt     := best.extended
+        stTrunc   := best.truncated
+        stAlt     := best.altOK
+        stChan    := best.chanOK
+        stDiag    := best.isDiag
+        stR2      := best.r2
+        stR3      := best.r3
+        stR4      := best.r4
+        stR5      := best.r5
+        stT1      := tgt1
+        stT2      := tgt2
+        stT3      := tgt3
+        stT1L     := tlb1
+        stT2L     := tlb2
+        stT3L     := tlb3
+        stInvalid := invLvl
+        stInvUp   := invUpper
+        stLegFrom := array.get(pvMaj, best.si + best.n - 1).price
+        stLegTo   := array.get(pvMaj, best.si + best.n).price
+        stLegBar  := array.get(pvMaj, best.si + best.n).bar
+        stGold1   := stLegTo - (stLegTo - stLegFrom) * 0.500
+        stGold2   := stLegTo - (stLegTo - stLegFrom) * 0.618
+        stAltTxt  := alt.n > 0 ? alt.pattern + " " + (alt.dir == 1 ? "▲" : "▼") + " · onda " + f_wname(alt.n, DEG) + " · " + str.tostring(alt.score, "#") + "%" : "—"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██ [8] DIBUJO
+// ═══════════════════════════════════════════════════════════════════════════════
+
+f_clear() =>
+    if array.size(lblWave) > 0
+        for i = 0 to array.size(lblWave) - 1
+            label.delete(array.get(lblWave, i))
+        array.clear(lblWave)
+    if array.size(lblSub) > 0
+        for i = 0 to array.size(lblSub) - 1
+            label.delete(array.get(lblSub, i))
+        array.clear(lblSub)
+    if array.size(lblFib) > 0
+        for i = 0 to array.size(lblFib) - 1
+            label.delete(array.get(lblFib, i))
+        array.clear(lblFib)
+    if array.size(lnZig) > 0
+        for i = 0 to array.size(lnZig) - 1
+            line.delete(array.get(lnZig, i))
+        array.clear(lnZig)
+    if array.size(lnFib) > 0
+        for i = 0 to array.size(lnFib) - 1
+            line.delete(array.get(lnFib, i))
+        array.clear(lnFib)
+    if array.size(lnChan) > 0
+        for i = 0 to array.size(lnChan) - 1
+            line.delete(array.get(lnChan, i))
+        array.clear(lnChan)
+    if array.size(bxFib) > 0
+        for i = 0 to array.size(bxFib) - 1
+            box.delete(array.get(bxFib, i))
+        array.clear(bxFib)
+    true
+
+f_level(int x1, int x2, float lvl, string txt, color col, int transp, int w, string style) =>
+    array.push(lnFib, line.new(x1, lvl, x2, lvl, color=color.new(col, transp), width=w, style=style))
+    array.push(lblFib, label.new(x2, lvl, txt + "  " + f_px(lvl), style=label.style_label_left, color=color.new(col, 92), textcolor=col, size=size.tiny))
+    true
+
+int sig = hasCount ? best.si * 100000 + best.n * 1000 + (best.dir + 1) * 300 + array.size(pvMaj) * 3 + int(best.score) + (barstate.islast ? bar_index : 0) : (barstate.islast ? -bar_index : -1)
+
+if recompute and sig != drawSig
     drawSig := sig
     f_clear()
+    int xr = bar_index + fibExtend
 
-    // ── ZigZag ──
-    if showZigZag and array.size(zzPrice) >= 2
-        int fromI = array.size(zzPrice) - maxLookback > 1 ? array.size(zzPrice) - maxLookback : 1
-        for i = fromI to array.size(zzPrice) - 1
-            array.push(zzLines, line.new(array.get(zzBar, i - 1), array.get(zzPrice, i - 1), array.get(zzBar, i), array.get(zzPrice, i), color=color.new(colZigZag, 30), width=1))
+    // ── ZigZag estructural ───────────────────────────────────────────────────
+    if showZigZag and vClean and array.size(pvMaj) >= 2
+        int fromI = array.size(pvMaj) - maxLookback > 1 ? array.size(pvMaj) - maxLookback : 1
+        for i = fromI to array.size(pvMaj) - 1
+            Pivot a = array.get(pvMaj, i - 1)
+            Pivot b = array.get(pvMaj, i)
+            array.push(lnZig, line.new(a.bar, a.price, b.bar, b.price, color=color.new(colZigZag, 45), width=1))
 
     if hasCount
-        // ── Etiquetas de onda ──
-        if showLabels
-            bool origIsHigh = array.get(zzIsHigh, bestSi)
-            array.push(waveLabels, label.new(array.get(zzBar, bestSi), array.get(zzPrice, bestSi), "0", style=origIsHigh ? label.style_label_down : label.style_label_up, color=color.new(color.gray, 20), textcolor=color.white, size=f_size(labelSize)))
-            for k = 1 to bestCnt
-                int   pbar   = array.get(zzBar, bestSi + k)
-                float pprice = array.get(zzPrice, bestSi + k)
-                bool  isHi   = array.get(zzIsHigh, bestSi + k)
-                color col    = k <= 5 ? colImpulse : colCorrect
-                array.push(waveLabels, label.new(pbar, pprice, f_waveName(k), style=isHi ? label.style_label_down : label.style_label_up, color=color.new(col, 10), textcolor=color.white, size=f_size(labelSize)))
+        // ── Etiquetas del conteo ─────────────────────────────────────────────
+        Pivot orig = array.get(pvMaj, best.si)
+        array.push(lblWave, label.new(orig.bar, orig.price, f_wname(0, DEG), style=orig.isHigh ? label.style_label_down : label.style_label_up, color=color.new(color.gray, 25), textcolor=color.white, size=f_size(labelSize), tooltip="Origen del conteo · grado " + DEG))
 
-        // ── Fibonacci del tramo activo ──
-        if showFib
-            int x1 = legBarTo
-            int x2 = bar_index + fibExtend
-            f_fibLine(x1, x2, fib236, "0.236", colFib, 40, 1)
-            f_fibLine(x1, x2, fib382, "0.382", colFib, 40, 1)
-            f_fibLine(x1, x2, fib500, "0.500", colFib, 20, 2)
-            f_fibLine(x1, x2, fib618, "0.618", colFib, 20, 2)
-            f_fibLine(x1, x2, fib786, "0.786", colFib, 40, 1)
+        for k = 1 to best.n
+            Pivot pk = array.get(pvMaj, best.si + k)
+            color cl = k <= 5 ? colImpulse : colCorrect
+            string tip = switch k
+                1 => "Onda 1 · impulso inicial"
+                2 => "Onda 2 · retroceso " + f_pct(best.r2) + " de la onda 1"
+                3 => "Onda 3 · extensión " + f_rat(best.r3) + " de la onda 1"
+                4 => "Onda 4 · retroceso " + f_pct(best.r4) + " de la onda 3"
+                5 => "Onda 5 · " + f_rat(best.r5) + " de la onda 1" + (best.truncated ? " · TRUNCADA" : "")
+                6 => "Onda A · inicio de la corrección"
+                7 => "Onda B · rebote correctivo"
+                =>   "Onda C · " + best.corrPat
+            array.push(lblWave, label.new(pk.bar, pk.price, f_wname(k, DEG), style=pk.isHigh ? label.style_label_down : label.style_label_up, color=color.new(cl, 12), textcolor=color.white, size=f_size(labelSize), tooltip=tip))
 
+        // ── Canal de Elliott ─────────────────────────────────────────────────
+        if showChannel and vFull
+            if best.n >= 4
+                Pivot q2 = array.get(pvMaj, best.si + 2)
+                Pivot q3 = array.get(pvMaj, best.si + 3)
+                Pivot q4 = array.get(pvMaj, best.si + 4)
+                float slope = (q4.price - q2.price) / math.max(q4.bar - q2.bar, 1)
+                array.push(lnChan, line.new(q2.bar, q2.price, xr, q2.price + slope * (xr - q2.bar), color=color.new(colChannel, 35), width=1, style=line.style_solid))
+                array.push(lnChan, line.new(q3.bar, q3.price, xr, q3.price + slope * (xr - q3.bar), color=color.new(colChannel, 35), width=1, style=line.style_dashed))
+            else if best.n >= 2
+                Pivot q0 = array.get(pvMaj, best.si)
+                Pivot q1 = array.get(pvMaj, best.si + 1)
+                Pivot q2 = array.get(pvMaj, best.si + 2)
+                float slope = (q2.price - q0.price) / math.max(q2.bar - q0.bar, 1)
+                array.push(lnChan, line.new(q0.bar, q0.price, xr, q0.price + slope * (xr - q0.bar), color=color.new(colChannel, 45), width=1, style=line.style_solid))
+                array.push(lnChan, line.new(q1.bar, q1.price, xr, q1.price + slope * (xr - q1.bar), color=color.new(colChannel, 45), width=1, style=line.style_dashed))
+
+        // ── Retrocesos del tramo activo ──────────────────────────────────────
+        if showFib and vClean
+            float rng = stLegTo - stLegFrom
+            f_level(stLegBar, xr, stLegTo - rng * 0.236, "0.236", colFib, 55, 1, line.style_dotted)
+            f_level(stLegBar, xr, stLegTo - rng * 0.382, "0.382", colFib, 45, 1, line.style_dashed)
+            f_level(stLegBar, xr, stLegTo - rng * 0.500, "0.500", colFib, 25, 2, line.style_dashed)
+            f_level(stLegBar, xr, stLegTo - rng * 0.618, "0.618", colFib, 25, 2, line.style_dashed)
+            f_level(stLegBar, xr, stLegTo - rng * 0.786, "0.786", colFib, 45, 1, line.style_dotted)
             if showGolden
-                array.push(fibBoxes, box.new(x1, math.max(fib500, fib618), x2, math.min(fib500, fib618), border_color=color.new(colGolden, 60), bgcolor=color.new(colGolden, 88), text="ZONA ÁUREA 0.5 – 0.618", text_color=color.new(colGolden, 20), text_size=size.tiny, text_halign=text.align_left, text_valign=text.align_center))
+                array.push(bxFib, box.new(stLegBar, math.max(stGold1, stGold2), xr, math.min(stGold1, stGold2), border_color=color.new(colFib, 70), bgcolor=color.new(colFib, 90), text="ZONA ÁUREA 0.5 – 0.618", text_color=color.new(colFib, 25), text_size=size.tiny, text_halign=text.align_left, text_valign=text.align_center))
 
-            if showExt
-                f_fibLine(x1, x2, ext1272, "1.272", colGolden, 50, 1)
-                f_fibLine(x1, x2, ext1618, "1.618", colGolden, 30, 2)
+        // ── Proyecciones de la onda en curso ─────────────────────────────────
+        if showTargets and vClean
+            f_level(bar_index, xr, stT1, stT1L, colTarget, 45, 1, line.style_dashed)
+            f_level(bar_index, xr, stT2, stT2L, colTarget, 25, 2, line.style_solid)
+            f_level(bar_index, xr, stT3, stT3L, colTarget, 45, 1, line.style_dashed)
 
-// ══════════════════════════════════════════════════════════════════════════════
-// ██ [8] DASHBOARD
-// ══════════════════════════════════════════════════════════════════════════════
+        // ── Nivel de invalidación del conteo ─────────────────────────────────
+        if showInvalid and vFull and not na(stInvalid)
+            array.push(lnFib, line.new(array.get(pvMaj, best.si).bar, stInvalid, xr, stInvalid, color=color.new(colInvalid, 20), width=2, style=line.style_dotted))
+            array.push(lblFib, label.new(xr, stInvalid, "INVALIDACIÓN  " + f_px(stInvalid), style=label.style_label_left, color=color.new(colInvalid, 85), textcolor=colInvalid, size=size.tiny, tooltip="El conteo deja de ser válido si el precio " + (stInvUp ? "supera" : "pierde") + " este nivel."))
 
-string curWave  = "—"
-string nextWave = "—"
-if hasCount
-    curWave := f_waveName(bestCnt)
-    nextWave := switch bestCnt
-        1 => "2 · retroceso"
-        2 => "3 · impulso"
-        3 => "4 · retroceso"
-        4 => "5 · impulso"
-        5 => "A · corrección"
-        6 => "B · rebote"
-        7 => "C · final"
-        =>   "Nuevo ciclo"
+        // ── Sub-ondas del grado inferior ─────────────────────────────────────
+        if showSub and vFull and array.size(pvMin) >= 3
+            Count sub = f_best(pvMin, maxLookback, -1, 0, minScore)
+            int startBar = array.get(pvMaj, best.si + best.n - 1).bar
+            if sub.n > 0 and sub.si >= 0
+                for k = 1 to sub.n
+                    Pivot sp = array.get(pvMin, sub.si + k)
+                    if sp.bar >= startBar
+                        array.push(lblSub, label.new(sp.bar, sp.price, f_wname(k, DEGSUB), style=sp.isHigh ? label.style_label_down : label.style_label_up, color=color.new(k <= 5 ? colImpulse : colCorrect, 55), textcolor=color.new(color.white, 15), size=size.tiny))
+
+    // ── Triángulo A-B-C-D-E cuando no hay conteo impulsivo válido ────────────
+    if not hasCount and stTriIdx >= 0 and vClean
+        for k = 1 to 5
+            Pivot tp = array.get(pvMaj, stTriIdx + k)
+            string nm = switch k
+                1 => "A"
+                2 => "B"
+                3 => "C"
+                4 => "D"
+                =>   "E"
+            array.push(lblWave, label.new(tp.bar, tp.price, nm, style=tp.isHigh ? label.style_label_down : label.style_label_up, color=color.new(colCorrect, 20), textcolor=color.white, size=f_size(labelSize), tooltip="Triángulo contractivo · corrección lateral"))
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██ [9] DASHBOARD DEL CONTEO
+// ═══════════════════════════════════════════════════════════════════════════════
+
+f_scoreTxt(float sc) =>
+    int filled = math.max(0, math.min(10, int(sc / 10)))
+    string bar = filled > 0 ? str.repeat("█", filled) : ""
+    string empty = filled < 10 ? str.repeat("░", 10 - filled) : ""
+    bar + empty + "  " + str.tostring(sc, "#") + "%"
+
+f_scoreCol(float sc) =>
+    sc >= 75 ? #00E676 : sc >= 55 ? #FFD54F : sc >= 35 ? #FFB300 : #FF5252
 
 if showDash and barstate.islast
-    var table dash = table.new(f_dashPos(dashPos), 2, 6, bgcolor=color.new(#1a1a2e, 10), border_width=1, border_color=color.new(color.gray, 70))
+    var table dash = table.new(f_pos(dashPos), 2, 11, bgcolor=color.new(#111827, 8), border_width=1, border_color=color.new(color.gray, 75))
     sz = f_size(dashSize)
+    color bgc = #111827
+    color lbc = color.new(color.gray, 20)
 
-    table.cell(dash, 0, 0, "🌊 ELLIOTT + FIB", bgcolor=#1a1a2e, text_color=#FFD700, text_size=sz)
-    table.cell(dash, 1, 0, syminfo.ticker + " " + timeframe.period, bgcolor=#1a1a2e, text_color=color.white, text_size=sz)
+    string curName  = stWaves > 0 ? f_wname(stWaves, DEG) : "—"
+    string nextName = stWaves > 0 ? f_wname(stWaves >= 8 ? 1 : stWaves + 1, DEG) : "—"
+    string nextDesc = switch stWaves
+        1 => "retroceso correctivo"
+        2 => "impulso extendido"
+        3 => "retroceso correctivo"
+        4 => "impulso final"
+        5 => "corrección A-B-C"
+        6 => "rebote correctivo"
+        7 => "tramo final de la corrección"
+        8 => "nuevo ciclo impulsivo"
+        =>   "—"
 
-    table.cell(dash, 0, 1, "Dirección", bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
-    table.cell(dash, 1, 1, not hasCount ? "SIN CONTEO ⚪" : bestDir == 1 ? "IMPULSO ALCISTA 🟢" : "IMPULSO BAJISTA 🔴", bgcolor=#1a1a2e, text_size=sz, text_color=not hasCount ? color.gray : bestDir == 1 ? #00E676 : #FF5252)
+    table.cell(dash, 0, 0, "🌊 ELLIOTT WAVE PRO", bgcolor=bgc, text_color=#FFD700, text_size=sz)
+    table.cell(dash, 1, 0, syminfo.ticker + " · " + timeframe.period, bgcolor=bgc, text_color=color.white, text_size=sz)
 
-    table.cell(dash, 0, 2, "Onda actual", bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
-    table.cell(dash, 1, 2, curWave, bgcolor=#1a1a2e, text_size=sz, text_color=bestCnt >= 6 ? colCorrect : colImpulse)
+    table.cell(dash, 0, 1, "Grado", bgcolor=bgc, text_color=lbc, text_size=sz)
+    table.cell(dash, 1, 1, DEG, bgcolor=bgc, text_color=color.white, text_size=sz)
 
-    table.cell(dash, 0, 3, "Próxima onda", bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
-    table.cell(dash, 1, 3, nextWave, bgcolor=#1a1a2e, text_color=color.white, text_size=sz)
+    table.cell(dash, 0, 2, "Patrón", bgcolor=bgc, text_color=lbc, text_size=sz)
+    table.cell(dash, 1, 2, not hasCount ? "SIN CONTEO VÁLIDO" : stPattern + (stWaves >= 8 ? " → " + stCorr : ""), bgcolor=bgc, text_color=hasCount ? color.white : color.gray, text_size=sz)
 
-    table.cell(dash, 0, 4, "Fib 0.618", bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
-    table.cell(dash, 1, 4, na(fib618) ? "—" : str.tostring(fib618, format.mintick), bgcolor=#1a1a2e, text_color=colFib, text_size=sz)
+    table.cell(dash, 0, 3, "Dirección", bgcolor=bgc, text_color=lbc, text_size=sz)
+    table.cell(dash, 1, 3, not hasCount ? "—" : stDir == 1 ? "ALCISTA 🟢" : "BAJISTA 🔴", bgcolor=bgc, text_size=sz, text_color=not hasCount ? color.gray : stDir == 1 ? #00E676 : #FF5252)
 
-    table.cell(dash, 0, 5, "Objetivo 1.618", bgcolor=#1a1a2e, text_color=color.gray, text_size=sz)
-    table.cell(dash, 1, 5, na(ext1618) ? "—" : str.tostring(ext1618, format.mintick), bgcolor=#1a1a2e, text_color=colGolden, text_size=sz)
+    table.cell(dash, 0, 4, "Onda completada", bgcolor=bgc, text_color=lbc, text_size=sz)
+    table.cell(dash, 1, 4, curName + (stTrunc ? "  ⚠️ truncada" : ""), bgcolor=bgc, text_size=sz, text_color=stWaves >= 6 ? colCorrect : colImpulse)
 
-// ══════════════════════════════════════════════════════════════════════════════
-// ██ [9] ALERTAS
-// ══════════════════════════════════════════════════════════════════════════════
+    table.cell(dash, 0, 5, "Onda en curso", bgcolor=bgc, text_color=lbc, text_size=sz)
+    table.cell(dash, 1, 5, nextName + " · " + nextDesc, bgcolor=bgc, text_color=color.white, text_size=sz)
 
-bool isNewCount   = hasCount and bestCnt != prevCount and barstate.isconfirmed
-bool countChanged = isNewCount
-bool wave5Done    = isNewCount and bestCnt == 5
-bool waveCDone    = isNewCount and bestCnt == 8
-bool inGoldenZone = false
-if hasCount and not na(fib500) and not na(fib618) and barstate.isconfirmed
-    inGoldenZone := close <= math.max(fib500, fib618) and close >= math.min(fib500, fib618)
+    table.cell(dash, 0, 6, "Confianza", bgcolor=bgc, text_color=lbc, text_size=sz)
+    table.cell(dash, 1, 6, hasCount ? f_scoreTxt(stScore) : "—", bgcolor=bgc, text_color=f_scoreCol(stScore), text_size=sz)
 
-if barstate.isconfirmed and hasCount
-    prevCount := bestCnt
+    table.cell(dash, 0, 7, "Objetivo principal", bgcolor=bgc, text_color=lbc, text_size=sz)
+    table.cell(dash, 1, 7, hasCount ? stT2L + "  " + f_px(stT2) : "—", bgcolor=bgc, text_color=colTarget, text_size=sz)
 
-alertcondition(countChanged, title="Nueva onda etiquetada", message="{{ticker}} {{interval}} — Nueva onda de Elliott confirmada @ {{close}}")
-alertcondition(wave5Done, title="Onda 5 completada", message="{{ticker}} {{interval}} — Onda 5 completada: posible corrección A-B-C @ {{close}}")
-alertcondition(waveCDone, title="Onda C completada", message="{{ticker}} {{interval}} — Corrección A-B-C completada: posible nuevo impulso @ {{close}}")
-alertcondition(inGoldenZone, title="Precio en zona áurea", message="{{ticker}} {{interval}} — Precio dentro de la zona áurea 0.5–0.618 @ {{close}}")
+    table.cell(dash, 0, 8, "Objetivos alt.", bgcolor=bgc, text_color=lbc, text_size=sz)
+    table.cell(dash, 1, 8, hasCount ? f_px(stT1) + "  ·  " + f_px(stT3) : "—", bgcolor=bgc, text_color=color.new(colTarget, 25), text_size=sz)
+
+    table.cell(dash, 0, 9, "Invalidación", bgcolor=bgc, text_color=lbc, text_size=sz)
+    table.cell(dash, 1, 9, hasCount ? (stInvUp ? "▲ " : "▼ ") + f_px(stInvalid) : "—", bgcolor=bgc, text_color=colInvalid, text_size=sz)
+
+    table.cell(dash, 0, 10, "Escenario alt.", bgcolor=bgc, text_color=lbc, text_size=sz)
+    table.cell(dash, 1, 10, showAlt ? stAltTxt : "—", bgcolor=bgc, text_color=color.new(color.white, 35), text_size=sz)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██ [10] PANEL DE REGLAS Y GUÍAS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+f_ok(bool reached, bool cond) =>
+    not reached ? "—" : cond ? "✅" : "❌"
+
+if showRules and barstate.islast
+    var table rules = table.new(f_pos(rulesPos), 3, 12, bgcolor=color.new(#111827, 8), border_width=1, border_color=color.new(color.gray, 75))
+    sz2 = f_size(dashSize)
+    color bg2 = #111827
+    color lb2 = color.new(color.gray, 20)
+
+    bool has2 = hasCount and stWaves >= 2
+    bool has3 = hasCount and stWaves >= 3
+    bool has4 = hasCount and stWaves >= 4
+    bool has5 = hasCount and stWaves >= 5
+
+    table.cell(rules, 0, 0, "📏 REGLAS", bgcolor=bg2, text_color=#FFD700, text_size=sz2)
+    table.cell(rules, 1, 0, "ESTADO", bgcolor=bg2, text_color=#FFD700, text_size=sz2)
+    table.cell(rules, 2, 0, "VALOR", bgcolor=bg2, text_color=#FFD700, text_size=sz2)
+
+    table.cell(rules, 0, 1, "R1 · Onda 2 < 100% de la 1", bgcolor=bg2, text_color=lb2, text_size=sz2)
+    table.cell(rules, 1, 1, f_ok(has2, true), bgcolor=bg2, text_color=color.white, text_size=sz2)
+    table.cell(rules, 2, 1, f_pct(stR2), bgcolor=bg2, text_color=color.white, text_size=sz2)
+
+    table.cell(rules, 0, 2, "R2 · Onda 3 no es la más corta", bgcolor=bg2, text_color=lb2, text_size=sz2)
+    table.cell(rules, 1, 2, f_ok(has5, true), bgcolor=bg2, text_color=color.white, text_size=sz2)
+    table.cell(rules, 2, 2, f_rat(stR3), bgcolor=bg2, text_color=color.white, text_size=sz2)
+
+    table.cell(rules, 0, 3, "R3 · Onda 4 sin solape con la 1", bgcolor=bg2, text_color=lb2, text_size=sz2)
+    table.cell(rules, 1, 3, not has4 ? "—" : stDiag ? "⚠️" : "✅", bgcolor=bg2, text_color=color.white, text_size=sz2)
+    table.cell(rules, 2, 3, not has4 ? "—" : stDiag ? "diagonal" : "limpio", bgcolor=bg2, text_color=color.white, text_size=sz2)
+
+    table.cell(rules, 0, 4, "G · Retroceso onda 2 (50–61.8%)", bgcolor=bg2, text_color=lb2, text_size=sz2)
+    table.cell(rules, 1, 4, f_ok(has2, stR2 >= 0.382 and stR2 <= 0.786), bgcolor=bg2, text_color=color.white, text_size=sz2)
+    table.cell(rules, 2, 4, f_pct(stR2), bgcolor=bg2, text_color=color.white, text_size=sz2)
+
+    table.cell(rules, 0, 5, "G · Extensión onda 3 (1.618)", bgcolor=bg2, text_color=lb2, text_size=sz2)
+    table.cell(rules, 1, 5, f_ok(has3, stR3 >= 1.5), bgcolor=bg2, text_color=color.white, text_size=sz2)
+    table.cell(rules, 2, 5, f_rat(stR3), bgcolor=bg2, text_color=color.white, text_size=sz2)
+
+    table.cell(rules, 0, 6, "G · Retroceso onda 4 (23.6–38.2%)", bgcolor=bg2, text_color=lb2, text_size=sz2)
+    table.cell(rules, 1, 6, f_ok(has4, stR4 >= 0.236 and stR4 <= 0.5), bgcolor=bg2, text_color=color.white, text_size=sz2)
+    table.cell(rules, 2, 6, f_pct(stR4), bgcolor=bg2, text_color=color.white, text_size=sz2)
+
+    table.cell(rules, 0, 7, "G · Onda 5 vs onda 1", bgcolor=bg2, text_color=lb2, text_size=sz2)
+    table.cell(rules, 1, 7, f_ok(has5, stR5 >= 0.5 and stR5 <= 1.75), bgcolor=bg2, text_color=color.white, text_size=sz2)
+    table.cell(rules, 2, 7, f_rat(stR5), bgcolor=bg2, text_color=color.white, text_size=sz2)
+
+    table.cell(rules, 0, 8, "G · Alternancia ondas 2 / 4", bgcolor=bg2, text_color=lb2, text_size=sz2)
+    table.cell(rules, 1, 8, f_ok(has4, stAlt), bgcolor=bg2, text_color=color.white, text_size=sz2)
+    table.cell(rules, 2, 8, not has4 ? "—" : stAlt ? "alterna" : "similar", bgcolor=bg2, text_color=color.white, text_size=sz2)
+
+    table.cell(rules, 0, 9, "G · Canalización 2-4", bgcolor=bg2, text_color=lb2, text_size=sz2)
+    table.cell(rules, 1, 9, f_ok(has5, stChan), bgcolor=bg2, text_color=color.white, text_size=sz2)
+    table.cell(rules, 2, 9, not has5 ? "—" : stChan ? "respetado" : "desviado", bgcolor=bg2, text_color=color.white, text_size=sz2)
+
+    table.cell(rules, 0, 10, "G · Onda extendida", bgcolor=bg2, text_color=lb2, text_size=sz2)
+    table.cell(rules, 1, 10, has5 and stExt != "—" ? "✅" : "—", bgcolor=bg2, text_color=color.white, text_size=sz2)
+    table.cell(rules, 2, 10, has5 ? stExt : "—", bgcolor=bg2, text_color=color.white, text_size=sz2)
+
+    table.cell(rules, 0, 11, "Estructura correctiva", bgcolor=bg2, text_color=lb2, text_size=sz2)
+    table.cell(rules, 1, 11, stWaves >= 8 ? "✅" : stTriIdx >= 0 ? "△" : "—", bgcolor=bg2, text_color=color.white, text_size=sz2)
+    table.cell(rules, 2, 11, stWaves >= 8 ? stCorr : stTriIdx >= 0 ? "TRIÁNGULO" : "—", bgcolor=bg2, text_color=color.white, text_size=sz2)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██ [11] ALERTAS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+bool newWave     = stWaves > 0 and stWaves != stPrevW and barstate.isconfirmed
+bool impulseEnd  = newWave and stWaves == 5
+bool corrEnd     = newWave and stWaves == 8
+bool inGolden    = barstate.isconfirmed and stWaves > 0 and not na(stGold1) and not na(stGold2) and close <= math.max(stGold1, stGold2) and close >= math.min(stGold1, stGold2)
+bool targetHit   = barstate.isconfirmed and stWaves > 0 and not na(stT2) and ta.cross(close, stT2)
+bool invalidated = barstate.isconfirmed and stWaves > 0 and not na(stInvalid) and (stInvUp ? close > stInvalid : close < stInvalid)
+
+if barstate.isconfirmed and stWaves > 0
+    stPrevW := stWaves
+
+alertcondition(newWave,     title="Cambio en el conteo",       message="{{ticker}} {{interval}} — El conteo de Elliott ha cambiado: nueva onda confirmada @ {{close}}")
+alertcondition(impulseEnd,  title="Impulso 1-5 completado",    message="{{ticker}} {{interval}} — Impulso de cinco ondas completado: se espera corrección A-B-C @ {{close}}")
+alertcondition(corrEnd,     title="Corrección A-B-C completa", message="{{ticker}} {{interval}} — Corrección A-B-C completada: posible nuevo impulso @ {{close}}")
+alertcondition(inGolden,    title="Precio en zona áurea",      message="{{ticker}} {{interval}} — Precio dentro de la zona áurea 0.5–0.618 del tramo activo @ {{close}}")
+alertcondition(targetHit,   title="Objetivo alcanzado",        message="{{ticker}} {{interval}} — Objetivo Fibonacci principal alcanzado @ {{close}}")
+alertcondition(invalidated, title="Conteo invalidado",         message="{{ticker}} {{interval}} — Nivel de invalidación roto: el conteo vigente deja de ser válido @ {{close}}")
