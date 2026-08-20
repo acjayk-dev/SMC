@@ -573,7 +573,9 @@ f_targets(array<Pivot> pv, Count c) =>
             s1 := nm + " · 50%"
             s2 := nm + " · 61.8%"
             s3 := nm + " · 78.6%"
-            inv := p5
+            // La onda B puede superar el extremo de la 5 en una plana expandida, así que
+            // la invalidación es el límite que el propio motor acepta para una B: 138.2 % de A.
+            inv := p6 + lenA * 1.382
         else if c.n == 7
             float lenA = p5 - p6
             t1 := p7 - lenA * 0.618
@@ -582,7 +584,8 @@ f_targets(array<Pivot> pv, Count c) =>
             s1 := nm + " · 0.618×A"
             s2 := nm + " · igualdad A"
             s3 := nm + " · 1.618×A"
-            inv := p5
+            // Con la B ya fijada, el conteo muere si el precio supera su extremo
+            inv := p7
         else
             float imp = p5 - p0
             t1 := p8 + imp * 0.382
@@ -618,9 +621,14 @@ var string stCorr   = "—"
 
 Count best = Count.new()
 Count alt  = Count.new()
-bool  recompute = newPivot or barstate.islast
+// Los pivotes sólo cambian con barras cerradas, así que recalcular en cada tick de la
+// barra viva sería trabajo tirado: basta la primera pasada y cada apertura de barra.
+var bool drewLast = false
+bool  recompute = newPivot or (barstate.islast and (barstate.isnew or not drewLast))
 
 if recompute
+    if barstate.islast
+        drewLast := true
     best := f_best(pvMaj, maxLookback, -1, 0, minScore)
     if showAlt and best.n > 0
         alt := f_best(pvMaj, maxLookback, best.si, best.dir, minScore)
@@ -654,12 +662,33 @@ if recompute
         stT3L     := tlb3
         stInvalid := invLvl
         stInvUp   := invUpper
-        stLegFrom := array.get(pvMaj, best.si + best.n - 1).price
-        stLegTo   := array.get(pvMaj, best.si + best.n).price
-        stLegBar  := array.get(pvMaj, best.si + best.n).bar
+        // Tras un impulso completo la corrección retrocede TODO el impulso (0→5), no
+        // sólo la onda 5; tras una A-B-C completa, el nuevo impulso parte de la corrección.
+        int legA = best.n == 5 ? best.si : best.n == 8 ? best.si + 5 : best.si + best.n - 1
+        int legB = best.si + best.n
+        stLegFrom := array.get(pvMaj, legA).price
+        stLegTo   := array.get(pvMaj, legB).price
+        stLegBar  := array.get(pvMaj, legB).bar
         stGold1   := stLegTo - (stLegTo - stLegFrom) * 0.500
         stGold2   := stLegTo - (stLegTo - stLegFrom) * 0.618
         stAltTxt  := alt.n > 0 ? alt.pattern + " " + (alt.dir == 1 ? "▲" : "▼") + " · onda " + f_wname(alt.n, DEG) + " · " + str.tostring(alt.score, "#") + "%" : "—"
+    else
+        // Sin conteo válido no se conservan niveles antiguos: dejarlos vivos haría que
+        // el panel y las alertas operasen sobre una estructura que ya no existe.
+        stWaves   := 0
+        stPrevW   := 0
+        stScore   := 0.0
+        stPattern := "—"
+        stCorr    := "—"
+        stExt     := "—"
+        stTrunc   := false
+        stT1      := na
+        stT2      := na
+        stT3      := na
+        stInvalid := na
+        stGold1   := na
+        stGold2   := na
+        stAltTxt  := "—"
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ██ [8] DIBUJO
