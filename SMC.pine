@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.18 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.19 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -116,8 +116,43 @@
 //          Virtual Trade Tracker, o sea sin alertas de SL/TP1/TP2/Trailing— a las señales que dependen del
 //          helper. El cálculo ahora es incondicional y _show solo gobierna el dibujo, en línea con la
 //          doctrina de v6.16/v6.17 [FIX-A8]: un toggle visual no puede alterar la lógica.
+// v6.19: Auditoría de los patrones de PRICE ACTION contra la lógica institucional SMC/ICT — 7 desalineaciones
+//        corregidas (etiquetadas [FIX-Pn] en el código). Cada patrón se contrastó con su definición de
+//        origen: ¿la condición codificada es realmente la que describe la metodología, o solo se le parece?
+//          [FIX-P1] Las dos señales "Sweep" (💧 EQL/EQH SWEEP y 💧Δ SWEEP+DIV) NUNCA verificaban la barrida.
+//                   Usaban math.abs(low − EQL) < 1.5×ATR — pura PROXIMIDAD: la señal se imprimía con el
+//                   precio 1.5 ATR POR ENCIMA del EQL, sin haberlo perforado jamás. El único "sweep" real
+//                   era isSweepLow (mínimo de 3 barras), sin relación con ningún pool de liquidez. Un
+//                   Turtle Soup / Judas Swing exige perforar el pool Y recuperarlo en el cierre — criterio
+//                   que el bloque Wyckoff Spring/UTAD ya aplicaba correctamente y que ahora se unifica.
+//          [FIX-P2] Silver Bullet: sbBullFVGPresent = bullFVGs.size() > 0. Bastaba con que EXISTIERA algún
+//                   FVG en el array (hasta 15, con vigencia de effFvgMaxAge barras, posiblemente de horas
+//                   antes y a cualquier distancia). El setup de ICT exige que el desplazamiento de la propia
+//                   ventana 10–11/14–15 NY deje el FVG y que la entrada sea en el retroceso DENTRO de él.
+//                   Ahora se exige FVG creado en la ventana vigente + precio tocándolo.
+//          [FIX-P3] engulfBull/Bear y momBull/Bear no exigían NINGUNA expansión de rango: el filtro de tamaño
+//                   (isSizeValid, rango > 0.5×ATR) solo se aplicaba al pin bar. Una vela de rango mínimo
+//                   obtenía el peso máximo de price action del score (+3.0) y alimentaba Wyckoff, Silver
+//                   Bullet, Sweep+Div, OTE y OR-Retest como si fuera desplazamiento institucional. Nuevo
+//                   toggle "Engulf/Momentum Require Range Expansion" (activado por defecto).
+//          [FIX-P4] Early Trend Shift reiniciaba lastBOSBar. v6.12 lo separó de structTrend para que un patrón
+//                   de velas discrecional no clasificara BOS-vs-CHoCH, pero seguía apagando el cooldown
+//                   estructural: un BOS/CHoCH genuino dentro de las effBosCooldown barras siguientes se
+//                   descartaba en silencio, y con él la creación del Order Block, el reset del leg de OTE y
+//                   la actualización de structTrend. El Early Shift ya no toca el cooldown.
+//          [FIX-P5] Wyckoff Spring/UTAD medía la vigencia del pool EQH/EQL con 50 barras cableadas, mientras
+//                   scoring, bonus POI y las señales de Sweep usan eqlAlive/eqhAlive = eqLookback × 2 (que sí
+//                   se adapta al input y al timeframe). Dos ventanas distintas para el MISMO nivel. Unificado.
+//          [FIX-P6] Unicorn (OB + FVG solapados) probaba SOLO el FVG más reciente del array: si el último
+//                   formado no solapaba el bloque, un FVG anterior que sí lo hacía quedaba invisible y el
+//                   Unicorn nunca se marcaba, degradando obStr de 4/2 a 3/1. Ahora se recorren todos.
+//          [FIX-P7] La proximidad a Order Block usaba math.abs(), ciega a la dirección: con el precio hasta
+//                   2 ATR POR DEBAJO del techo de una zona de DEMANDA — es decir, ya atravesada — el bloque
+//                   seguía puntuando como POI (+1.5) y habilitando 💎 DIAMOND BUY. A una zona de demanda solo
+//                   se llega desde arriba o desde dentro (y viceversa para la oferta). Aplicado también a la
+//                   alerta "Near OB".
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.18 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.18", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.19 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.19", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -327,6 +362,10 @@ eleAtrMult     = input.float(1.3, "Elephant Size (×ATR)", minval=0.5, step=0.1,
 eleVolMult     = input.float(1.2, "Elephant Volume (×Avg)", minval=0.5, step=0.1, group=grpPat)
 eleRequireClear= input.bool(true, "Elephant Requires Clearing 3 Opposite Bars", group=grpPat, tooltip="Metodología Velez: el 'institutional footprint' real exige que la vela limpie (cierre más allá del rango de) 3+ velas previas consecutivas del color opuesto, no solo tamaño/volumen.")
 useEleTrigger  = input.bool(true, "Elephant = Super-Signal", group=grpPat)
+// v6.19 [FIX-P3] el filtro de tamaño (isSizeValid, rango > 0.5×ATR) solo se aplicaba al pin bar. Engulfing
+// y momentum — que pesan más en el score y alimentan Wyckoff/Silver Bullet/Sweep/OTE/OR-Retest — no exigían
+// ninguna expansión de rango: una vela de rango mínimo calificaba como "desplazamiento" institucional.
+paRequireDisplacement = input.bool(true, "Engulf/Momentum Require Range Expansion (>0.5×ATR)", group=grpPat, tooltip="Criterio institucional: un engulfing o una vela de momentum solo son desplazamiento si el rango se expande. Sin esto, una vela de rango mínimo obtiene el peso máximo de price action en el score (+3.0).")
 showEQH        = input.bool(true,  "Show EQH (Equal Highs)", group=grpPat)
 showEQL        = input.bool(true,  "Show EQL (Equal Lows)",  group=grpPat)
 eqTolerance    = input.float(0.15, "EQL Tolerance (×ATR)", minval=0.05, step=0.05, group=grpPat)
@@ -680,10 +719,14 @@ bgcolor(showSilverBullet and showContext and isSilverBullet ? sbColor : na, titl
 
 var float sbWindowHigh = na
 var float sbWindowLow  = na
+// v6.19 [FIX-P2] se registra la barra de apertura de la ventana para poder exigir que el FVG del setup
+// Silver Bullet se haya FORMADO DENTRO de la ventana (ICT), no en cualquier momento anterior de la sesión.
+var int   sbWindowStartBar = -999
 bool sbJustStarted = isSilverBullet and not isSilverBullet[1]
 if sbJustStarted
     sbWindowHigh := high
     sbWindowLow  := low
+    sbWindowStartBar := bar_index
 else if isSilverBullet
     sbWindowHigh := math.max(nz(sbWindowHigh, high), high)
     sbWindowLow  := math.min(nz(sbWindowLow, low), low)
@@ -852,11 +895,13 @@ pBarDn = isSweepHigh and range_bar > 0 and (bodySize / range_bar) * 100 <= 30 an
 // v6.5: nombre heredado — no es un engulfing clásico (que solo exige encerrar el CUERPO previo). Acá exige
 // además barrer el low/high previo y CERRAR más allá del high/low previo, es decir sweep + reclaim + breakout
 // combinados. Se deja el nombre para no romper todas las referencias existentes, pero es un patrón más estricto.
-engulfBull = close > open and close > high[1] and low  < low[1]  and rel_pos(close) > 0.7
-engulfBear = close < open and close < low[1]  and high > high[1] and rel_pos(close) < 0.3
+// v6.19 [FIX-P3] se les aplica el mismo filtro de expansión de rango que ya tenía el pin bar (isSizeValid).
+bool paSizeOK = not paRequireDisplacement or isSizeValid
+engulfBull = close > open and close > high[1] and low  < low[1]  and rel_pos(close) > 0.7 and paSizeOK
+engulfBear = close < open and close < low[1]  and high > high[1] and rel_pos(close) < 0.3 and paSizeOK
 
-momBull = close > open and close > high[1] and rel_pos(close) > 0.8
-momBear = close < open and close < low[1]  and rel_pos(close) < 0.2
+momBull = close > open and close > high[1] and rel_pos(close) > 0.8 and paSizeOK
+momBear = close < open and close < low[1]  and rel_pos(close) < 0.2 and paSizeOK
 
 bool outsideSizeValid = (high - low) > atr * 0.8
 outsideBar      = high > high[1] and low < low[1] and outsideSizeValid
@@ -958,8 +1003,24 @@ float  pendSigSL    = na
 float  pendSigTP1   = na
 float  pendSigTP2   = na
 
-bool sbBullFVGPresent = bullFVGs.size() > 0 and isSilverBullet
-bool sbBearFVGPresent = bearFVGs.size() > 0 and isSilverBullet
+// v6.19 [FIX-P2] antes bastaba con que EXISTIERA cualquier FVG en el array (hasta 15 entradas, con vigencia
+// de effFvgMaxAge barras, posiblemente de horas antes y a cualquier distancia del precio). El Silver Bullet
+// de ICT exige que el desplazamiento de la propia ventana deje el FVG y que la entrada sea en el retroceso
+// DENTRO de ese FVG. Ahora se exige ambas cosas: FVG creado en la ventana vigente + precio tocándolo.
+bool sbBullFVGPresent = false
+bool sbBearFVGPresent = false
+if isSilverBullet and bullFVGs.size() > 0
+    for _sbi = bullFVGs.size() - 1 to 0
+        FVG _sbf = bullFVGs.get(_sbi)
+        if _sbf.index >= sbWindowStartBar and _sbf.bottom <= high and _sbf.top >= low
+            sbBullFVGPresent := true
+            break
+if isSilverBullet and bearFVGs.size() > 0
+    for _sbi = bearFVGs.size() - 1 to 0
+        FVG _sbf = bearFVGs.get(_sbi)
+        if _sbf.index >= sbWindowStartBar and _sbf.bottom <= high and _sbf.top >= low
+            sbBearFVGPresent := true
+            break
 sbPatternBull := isSilverBullet and sbSweepLowDone  and (pBarUp or engulfBull) and sbBullFVGPresent and volume > avgVol
 sbPatternBear := isSilverBullet and sbSweepHighDone and (pBarDn or engulfBear) and sbBearFVGPresent and volume > avgVol
 
@@ -1473,15 +1534,17 @@ if barstate.isconfirmed and not na(structureLow) and close < structureLow and cl
 bool earlyTrendShiftUp   = useEarlyTrendShift and trend == -1 and (bull180 or superEleBull) and volume > avgVol * 1.3 and barstate.isconfirmed
 bool earlyTrendShiftDown = useEarlyTrendShift and trend == 1  and (bear180 or superEleBear) and volume > avgVol * 1.3 and barstate.isconfirmed
 
+// v6.19 [FIX-P4] el Early Shift ya NO toca lastBOSBar. v6.12 lo separó de structTrend para que un patrón de
+// velas discrecional no clasificara BOS-vs-CHoCH, pero seguía reiniciando el cooldown estructural: un BOS/CHoCH
+// genuino dentro de las effBosCooldown barras siguientes se descartaba en silencio, y con él la creación del
+// Order Block, el reset del leg de OTE y la actualización de structTrend.
 if earlyTrendShiftUp
     trend := 1
-    lastBOSBar := bar_index
     if showBOS and showContext
         label.new(bar_index, low, "⚡ EARLY SHIFT ▲", color=#00E676, textcolor=color.black, style=label.style_label_up, size=size.tiny)
 
 if earlyTrendShiftDown
     trend := -1
-    lastBOSBar := bar_index
     if showBOS and showContext
         label.new(bar_index, high, "⚡ EARLY SHIFT ▼", color=#FF5252, textcolor=color.white, style=label.style_label_down, size=size.tiny)
 
@@ -1704,10 +1767,15 @@ float eqBonusL = lastEQLCount >= 4 ? 3.0 : lastEQLCount == 3 ? 2.0 : 1.0
 
 // v6.17 [FIX-A5] La proximidad se mide contra el nivel PERSISTIDO. Antes exigía que la confirmación del
 // swing, el barrido y el pin bar cayeran todos en la MISMA vela: las señales de Sweep casi nunca salían.
-bool paNearEQL_sw = eqlAlive and math.abs(low  - lastEQLLevel) < atr * 1.5
-bool paNearEQH_sw = eqhAlive and math.abs(high - lastEQHLevel) < atr * 1.5
-bool sweepBullSig = showSweepSignal and barstate.isconfirmed and isSweepLow  and paNearEQL_sw and pBarUp  and volume > avgVol and not isDeadZone
-bool sweepBearSig = showSweepSignal and barstate.isconfirmed and isSweepHigh and paNearEQH_sw and pBarDn  and volume > avgVol and not isDeadZone
+// v6.19 [FIX-P1] ...pero la proximidad NO es una barrida. Con math.abs() < 1.5×ATR, "💧 EQL SWEEP BUY" se
+// imprimía con el precio hasta 1.5 ATR POR ENCIMA del EQL, sin haberlo perforado nunca: el único "sweep"
+// verificado era isSweepLow (mínimo de 3 barras), que no tiene relación con ningún pool de liquidez. Un
+// Turtle Soup / Judas Swing exige perforar el pool Y recuperarlo en el cierre — exactamente el criterio que
+// el bloque de Wyckoff Spring/UTAD ya aplicaba bien. Se unifica aquí.
+bool eqlSweptReclaimed = eqlAlive and low  < lastEQLLevel and close > lastEQLLevel
+bool eqhSweptReclaimed = eqhAlive and high > lastEQHLevel and close < lastEQHLevel
+bool sweepBullSig = showSweepSignal and barstate.isconfirmed and isSweepLow  and eqlSweptReclaimed and pBarUp  and volume > avgVol and not isDeadZone
+bool sweepBearSig = showSweepSignal and barstate.isconfirmed and isSweepHigh and eqhSweptReclaimed and pBarDn  and volume > avgVol and not isDeadZone
 
 // v6.13: integrado al Signal Interlock (rango 3) y al Virtual Trade Tracker — antes dibujaba SL/TP pero
 // nunca quedaba registrado, así que sus salidas nunca disparaban alerta de SL/TP1/TP2/Trailing.
@@ -1754,10 +1822,11 @@ if sweepBearSig and maxSignalRankThisBar < 3 and sigDirThisBar <= 0
 // (absorción), seguido de una vela de reversión con volumen.
 // v6.13 fix: antes "barrida" solo exigía romper el extremo de las últimas 3 barras (isSweepLow/isSweepHigh)
 // sin relación con ningún pool de liquidez real — ahora exige además estar sobre un EQL/EQH genuino
-// (paNearEQL_sw/paNearEQH_sw), el mismo criterio que usa la señal "Sweep EQL/EQH" de arriba. También se
+// (eqlSweptReclaimed/eqhSweptReclaimed), el mismo criterio que usa la señal "Sweep EQL/EQH" de arriba. También se
 // integra al Signal Interlock (rango 3) y al Virtual Trade Tracker.
-bool sweepDivBull = showSweepDivSignal and isSweepLow  and paNearEQL_sw and cumDeltaDivBull and (pBarUp or engulfBull) and volume > avgVol and not isDeadZone
-bool sweepDivBear = showSweepDivSignal and isSweepHigh and paNearEQH_sw and cumDeltaDivBear and (pBarDn or engulfBear) and volume > avgVol and not isDeadZone
+// v6.19 [FIX-P1] mismo criterio que su señal hermana: perforación real del pool + reclaim en el cierre.
+bool sweepDivBull = showSweepDivSignal and isSweepLow  and eqlSweptReclaimed and cumDeltaDivBull and (pBarUp or engulfBull) and volume > avgVol and not isDeadZone
+bool sweepDivBear = showSweepDivSignal and isSweepHigh and eqhSweptReclaimed and cumDeltaDivBear and (pBarDn or engulfBear) and volume > avgVol and not isDeadZone
 
 var int lastSweepDivBuyBar  = -999
 var int lastSweepDivSellBar = -999
@@ -1948,13 +2017,13 @@ bool wyckRangingCtx = _adxVal < paAdxMin
 
 bool wyckSpring = false
 bool wyckUTAD   = false
-bool eqlStillValid = not na(lastEQLLevel) and (bar_index - lastEQLBar) < 50
-bool eqhStillValid = not na(lastEQHLevel) and (bar_index - lastEQHBar) < 50
-
-if eqlStillValid and wyckRangingCtx
+// v6.19 [FIX-P5] la vigencia del pool estaba cableada a 50 barras, mientras el resto del script (scoring,
+// bonus POI y señales de Sweep) usa eqlAlive/eqhAlive = eqLookback × 2, que sí se adapta al input. Dos
+// ventanas distintas para el MISMO nivel. Se unifica con el criterio auto-calibrado.
+if eqlAlive and wyckRangingCtx
     if low < lastEQLLevel and close > lastEQLLevel and (pBarUp or engulfBull) and volume > avgVol
         wyckSpring := true
-if eqhStillValid and wyckRangingCtx
+if eqhAlive and wyckRangingCtx
     if high > lastEQHLevel and close < lastEQHLevel and (pBarDn or engulfBear) and volume > avgVol
         wyckUTAD := true
 
@@ -2194,10 +2263,15 @@ if bosUp or chochUp
     int lowestIndex = f_lastOppositeCandle(true, effSwingLen * 2 + 1, -1 * obLbVal)
     // v6.17 [FIX-A4] Unicorn = el FVG SOLAPA el Order Block. La prueba anterior (fvg.bottom >= ob.low) la
     // cumplía cualquier FVG situado por encima del OB, por lejos que estuviera. Ahora es intersección real.
+    // v6.19 [FIX-P6] solo se probaba el FVG MÁS RECIENTE del array: si el último formado no solapaba el OB,
+    // un FVG anterior que sí lo hacía quedaba invisible y el Unicorn nunca se marcaba. Se recorren todos.
     bool hasUni = false
     if bullFVGs.size() > 0
-        FVG _uf = bullFVGs.get(bullFVGs.size() - 1)
-        hasUni := _uf.bottom <= high[lowestIndex] and _uf.top >= low[lowestIndex]
+        for _ui = bullFVGs.size() - 1 to 0
+            FVG _uf = bullFVGs.get(_ui)
+            if _uf.bottom <= high[lowestIndex] and _uf.top >= low[lowestIndex]
+                hasUni := true
+                break
     bool isWeakB = bosWeakUp
     int  obStr   = (hasUni and mtfBullCongruence) ? 4 : mtfBullCongruence ? 3 : hasUni ? 2 : 1
     float bHigh  = math.max(open[lowestIndex], close[lowestIndex])
@@ -2218,10 +2292,14 @@ if bosUp or chochUp
 if bosDown or chochDown
     int highestIndex = f_lastOppositeCandle(false, effSwingLen * 2 + 1, -1 * obHbVal)
     // v6.17 [FIX-A4] Solapamiento real FVG ↔ OB (ver nota en el bloque alcista).
+    // v6.19 [FIX-P6] ver nota en el bloque alcista.
     bool hasUni = false
     if bearFVGs.size() > 0
-        FVG _uf = bearFVGs.get(bearFVGs.size() - 1)
-        hasUni := _uf.bottom <= high[highestIndex] and _uf.top >= low[highestIndex]
+        for _ui = bearFVGs.size() - 1 to 0
+            FVG _uf = bearFVGs.get(_ui)
+            if _uf.bottom <= high[highestIndex] and _uf.top >= low[highestIndex]
+                hasUni := true
+                break
     bool isWeakB = bosWeakDown
     int  obStr   = (hasUni and mtfBearCongruence) ? 4 : mtfBearCongruence ? 3 : hasUni ? 2 : 1
     float bHigh  = math.max(open[highestIndex], close[highestIndex])
@@ -2313,7 +2391,12 @@ if bullOBs.size() > 0
     for i = bullOBs.size() - 1 to 0
         OrderBlock _ob = bullOBs.get(i)
         if not _ob.mitigated and not _ob.isBreaker
-            if math.abs(close - _ob.top) < atr * 2.0 or (close >= _ob.bottom and close <= _ob.top)
+            // v6.19 [FIX-P7] math.abs() era ciego a la dirección: con el precio hasta 2 ATR POR DEBAJO del
+            // techo de una zona de DEMANDA — es decir, ya atravesada — el bloque seguía puntuando como POI
+            // (+1.5) y habilitando 💎 DIAMOND BUY. A una zona de demanda solo se llega desde arriba o desde
+            // dentro. (La mitigación del OB se evalúa más abajo en el script, así que en la propia vela de
+            // ruptura este bucle todavía lo ve como no mitigado.)
+            if close >= _ob.bottom and close <= _ob.top + atr * 2.0
                 paNearBullOB   := true
                 paBullOBBottom := _ob.bottom
                 break
@@ -2322,7 +2405,9 @@ if bearOBs.size() > 0
     for i = bearOBs.size() - 1 to 0
         OrderBlock _ob = bearOBs.get(i)
         if not _ob.mitigated and not _ob.isBreaker
-            if math.abs(close - _ob.bottom) < atr * 2.0 or (close >= _ob.bottom and close <= _ob.top)
+            // v6.19 [FIX-P7] ver nota en el bloque alcista — a una zona de OFERTA solo se llega desde abajo
+            // o desde dentro.
+            if close <= _ob.top and close >= _ob.bottom - atr * 2.0
                 paNearBearOB := true
                 paBearOBTop  := _ob.top
                 break
@@ -2726,13 +2811,14 @@ bool nearBearOBAlert = false
 if bullOBs.size() > 0
     for i = bullOBs.size() - 1 to 0
         OrderBlock _ob = bullOBs.get(i)
-        if not _ob.mitigated and not _ob.isBreaker and math.abs(close - _ob.top) < atr * obProximityDist
+        // v6.19 [FIX-P7] proximidad direccional, igual que en el bonus POI.
+        if not _ob.mitigated and not _ob.isBreaker and close >= _ob.bottom and close <= _ob.top + atr * obProximityDist
             nearBullOBAlert := true
             break
 if bearOBs.size() > 0
     for i = bearOBs.size() - 1 to 0
         OrderBlock _ob = bearOBs.get(i)
-        if not _ob.mitigated and not _ob.isBreaker and math.abs(close - _ob.bottom) < atr * obProximityDist
+        if not _ob.mitigated and not _ob.isBreaker and close <= _ob.top and close >= _ob.bottom - atr * obProximityDist
             nearBearOBAlert := true
             break
 
