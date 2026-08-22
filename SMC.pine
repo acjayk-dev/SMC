@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.20 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.21 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -159,8 +159,18 @@
 //        Nuevos eqhRunBull/eqlRunBear sobre los mismos pools EQH/EQL que usa el Sweep, con detección de
 //        flanco y el mismo listón de expansión que el script exige a un movimiento estructural. Es CONTEXTO:
 //        etiqueta + alerta, sin señal de entrada con SL/TP y sin tocar el scoring.
+// v6.21: implementado DRAW ON LIQUIDITY. Si el Sweep dice que un pool rechazó al precio y el Run (v6.20)
+//        que lo atravesó, el DOL responde la pregunta anterior a ambas: HACIA DÓNDE va el precio. El script
+//        no tenía nada de esto — los TP eran _rk * _rr, un R-múltiplo ciego a dónde estaba la liquidez.
+//        Nuevos dolBull/dolBear = pool sin barrer más cercano por encima/por debajo, entre PDH/PDL, PWH/PWL,
+//        PMH/PML y el rango de apertura. Los EQH/EQL quedan fuera a propósito: son el pool LOCAL que se
+//        barre (alimentan Sweep y Run), no el imán mayor de sesión al que el precio se desplaza.
+//        Con "Use DOL as TP2 target" (OFF por defecto) el TP2 de TODAS las señales pasa del R-múltiplo al
+//        pool objetivo, siempre que supere al TP1 y esté a más de dolMinAtr×ATR. TP1 sigue siendo el parcial
+//        de 0.5R. El override se aplica dentro de f_sl_tp Y en las 6 señales que calculan su TP2 a mano,
+//        para que la línea dibujada, el Virtual Trade Tracker y el payload JSON no puedan divergir.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.20 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.20", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.21 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.21", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -231,7 +241,7 @@ f_ma(src, len, type) =>
 // v6.18 fix: el CÁLCULO estaba dentro de `if _show`, así que "Show SL/TP Lines" (toggle puramente visual)
 // devolvía [na, na, na] y anulaba tanto el registro en el Virtual Trade Tracker como el payload JSON de las
 // señales que dependen de este helper. Se separa: los niveles se calculan siempre; _show solo dibuja.
-f_sl_tp(isBuy, slLevel, tpRef, _atr, _rr, _show, _showTP2) =>
+f_sl_tp(isBuy, slLevel, tpRef, _atr, _rr, _show, _showTP2, _tp2Override) =>
     float _sl  = na
     float _tp1 = na
     float _tp2 = na
@@ -243,12 +253,28 @@ f_sl_tp(isBuy, slLevel, tpRef, _atr, _rr, _show, _showTP2) =>
             _rk := _atr * 2.0
         _tp1 := isBuy ? tpRef + _rk * _rr * 0.5 : tpRef - _rk * _rr * 0.5
         _tp2 := isBuy ? tpRef + _rk * _rr       : tpRef - _rk * _rr
+        // v6.21 Draw on Liquidity: el TP2 pasa a ser el pool objetivo en vez del R-múltiplo. Se exige que
+        // supere al TP1 — si no, TP2 quedaría por delante de TP1 y el tracker cerraría el trade en TP2 sin
+        // registrar nunca el parcial.
+        if not na(_tp2Override) and (isBuy ? _tp2Override > _tp1 : _tp2Override < _tp1)
+            _tp2 := _tp2Override
         if _show
             line.new(bar_index, _sl, bar_index + 8, _sl, color=color.new(#FF5252, 20), style=line.style_dashed, width=2)
             if _showTP2
                 line.new(bar_index, _tp1, bar_index + 8, _tp1, color=color.new(#00E676, 50), width=1, style=line.style_dashed)
             line.new(bar_index, _tp2, bar_index + 8, _tp2, color=color.new(#00E676, 20), width=2)
     [_sl, _tp1, _tp2]
+
+// v6.21 Draw on Liquidity — resuelve el objetivo en la dirección del trade. Devuelve na (→ el llamador
+// conserva su R-múltiplo) si el DOL está desactivado, no hay pool vivo en esa dirección, o el pool está
+// demasiado pegado al precio para ser un objetivo útil.
+f_dol_target(_isBuy, _entry, _dolUp, _dolDn, _use, _atr, _minAtr) =>
+    float _t = na
+    if _use
+        float _lvl = _isBuy ? _dolUp : _dolDn
+        if not na(_lvl) and math.abs(_lvl - _entry) >= _atr * _minAtr
+            _t := _lvl
+    _t
 
 f_calc_contracts(accountBal, riskPct, entryPrice, slPrice) =>
     float dist = math.abs(entryPrice - slPrice)
@@ -423,6 +449,9 @@ showWyckoffSignal  = input.bool(true, "Señal Wyckoff Spring/UTAD",  group=grpAl
 showSBSignal       = input.bool(true, "Señal Silver Bullet Pattern", group=grpAlerts, tooltip="Kill Zone + sweep + FVG presente + confirmación PA — requiere 'Show Silver Bullet Windows' activo.")
 showSweepDivSignal = input.bool(true, "Señal Sweep + Delta Divergence", group=grpAlerts, tooltip="Barrida de liquidez no confirmada por el Delta Acumulado (absorción) + vela de rechazo.")
 showLiqRun         = input.bool(true, "Show Liquidity Run (EQH/EQL)", group=grpAlerts, tooltip="Contrapartida del Sweep: el precio perfora el pool de liquidez y CIERRA MÁS ALLÁ en vez de recuperarlo — la liquidez no lo rechaza, lo alimenta. Evento de continuación, no de reversión. Solo contexto: no dispara señal de entrada con SL/TP.")
+showDOL            = input.bool(true,  "Show Draw on Liquidity (DOL)", group=grpAlerts, tooltip="Dibuja el pool de liquidez sin barrer más cercano por encima y por debajo del precio — el imán hacia el que el mercado se está desplazando. Solo visual.")
+useDOLTarget       = input.bool(false, "  Use DOL as TP2 target", group=grpAlerts, tooltip="OFF por defecto: cambia el TP2 de TODAS las señales. Con ON, el TP2 deja de ser un R-múltiplo ciego y pasa a ser el DOL en la dirección del trade. TP1 sigue siendo el parcial de 0.5R. Si el DOL está más cerca que dolMinAtr o no supera al TP1, se mantiene el R-múltiplo.")
+dolMinAtr          = input.float(1.0, "  DOL Min Distance (×ATR)", minval=0.2, step=0.1, group=grpAlerts, tooltip="Distancia mínima al DOL para admitirlo como objetivo. Evita que un pool pegado al precio degrade el TP2 a nada.")
 paRequireNoChop= input.bool(true,  "Filter Choppy Market (ADX)",   group=grpSignal)
 paAdxLen       = input.int(14,     "  ADX Length", minval=5,        group=grpSignal)
 // v6.17 [FIX-N5] El suavizado del ADX estaba cableado al mismo valor que la longitud de DI —
@@ -885,6 +914,72 @@ bool nearPWH = not na(_pwh) and math.abs(close - _pwh) < atr * 2.0
 bool nearPWL = not na(_pwl) and math.abs(close - _pwl) < atr * 2.0
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ██ DRAW ON LIQUIDITY (v6.21)
+// ══════════════════════════════════════════════════════════════════════════════
+// Si el Sweep dice que un pool rechazó al precio y el Run dice que lo atravesó, el DOL responde la pregunta
+// anterior a las dos: ¿HACIA DÓNDE va el precio? En la lectura institucional el mercado se desplaza de pool
+// en pool, así que el objetivo natural de un trade no es un R-múltiplo abstracto sino la siguiente liquidez
+// sin barrer. Eso es lo que el script no tenía: los TP eran _rk * _rr, ciegos a dónde estaba la liquidez.
+//
+// Pools considerados: PDH/PDL, PWH/PWL, PMH/PML y el rango de apertura. Se dejan FUERA los EQH/EQL a
+// propósito, y no por comodidad: el EQH/EQL es el pool local que se barre (es el que alimenta Sweep y Run),
+// mientras que el draw es el imán mayor de sesión/periodo. Mezclarlos haría que el objetivo saltara a
+// cualquier igualdad intradía. (Nota técnica: además lastEQHLevel se calcula más abajo que este bloque, así
+// que incluirlo obligaría a reordenar el script.)
+//
+// "Sin barrer" se resuelve por posición relativa: un nivel POR ENCIMA del precio no ha sido consumido desde
+// aquí, y es candidato a draw alcista. De todos los candidatos gana el MÁS CERCANO — el precio va a por el
+// primero que encuentra, no por el más lejano.
+f_dol_up(_cur, _cand, _ref) =>
+    float _r = _cur
+    if not na(_cand) and _cand > _ref and (na(_r) or _cand < _r)
+        _r := _cand
+    _r
+
+f_dol_dn(_cur, _cand, _ref) =>
+    float _r = _cur
+    if not na(_cand) and _cand < _ref and (na(_r) or _cand > _r)
+        _r := _cand
+    _r
+
+float dolBull = na
+dolBull := f_dol_up(dolBull, _pdh,   close)
+dolBull := f_dol_up(dolBull, _pwh,   close)
+dolBull := f_dol_up(dolBull, _pmh,   close)
+dolBull := f_dol_up(dolBull, orHigh, close)
+
+float dolBear = na
+dolBear := f_dol_dn(dolBear, _pdl,   close)
+dolBear := f_dol_dn(dolBear, _pwl,   close)
+dolBear := f_dol_dn(dolBear, _pml,   close)
+dolBear := f_dol_dn(dolBear, orLow,  close)
+
+// Objetivo resuelto una sola vez por barra: todas las señales entran en `close`, así que el TP2 basado en
+// DOL es el mismo para cualquier señal alcista de la vela (idem bajista).
+float dolTpBull = f_dol_target(true,  close, dolBull, dolBear, useDOLTarget, atr, dolMinAtr)
+float dolTpBear = f_dol_target(false, close, dolBull, dolBear, useDOLTarget, atr, dolMinAtr)
+
+bool dolBullReached = not na(dolBull[1]) and high >= dolBull[1] and barstate.isconfirmed
+bool dolBearReached = not na(dolBear[1]) and low  <= dolBear[1] and barstate.isconfirmed
+
+var line  dolUpLine = na
+var line  dolDnLine = na
+var label dolUpLbl  = na
+var label dolDnLbl  = na
+
+if showDOL and showContext and barstate.islast
+    line.delete(dolUpLine)
+    line.delete(dolDnLine)
+    label.delete(dolUpLbl)
+    label.delete(dolDnLbl)
+    if not na(dolBull)
+        dolUpLine := line.new(bar_index - 15, dolBull, bar_index + 12, dolBull, color=color.new(#26C6DA, 0), width=2, style=line.style_solid)
+        dolUpLbl  := label.new(bar_index + 13, dolBull, "DOL ▲", color=na, textcolor=#26C6DA, style=label.style_none, size=size.tiny)
+    if not na(dolBear)
+        dolDnLine := line.new(bar_index - 15, dolBear, bar_index + 12, dolBear, color=color.new(#EC407A, 0), width=2, style=line.style_solid)
+        dolDnLbl  := label.new(bar_index + 13, dolBear, "DOL ▼", color=na, textcolor=#EC407A, style=label.style_none, size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════════════════════
 // ██ PATTERN DETECTION
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -1047,7 +1142,7 @@ if sbPatternBull
     if showSBSignal and barstate.isconfirmed and maxSignalRankThisBar < 3 and sigDirThisBar >= 0
         maxSignalRankThisBar := 3
         sigDirThisBar := 1
-        [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+        [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false, dolTpBull)
         pendSigName := "SILVER BULLET BUY"
         pendSigIsBuy := true
         pendSigEntry := close
@@ -1067,7 +1162,7 @@ if sbPatternBear
     if showSBSignal and barstate.isconfirmed and maxSignalRankThisBar < 3 and sigDirThisBar <= 0
         maxSignalRankThisBar := 3
         sigDirThisBar := -1
-        [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+        [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false, dolTpBear)
         pendSigName := "SILVER BULLET SELL"
         pendSigIsBuy := false
         pendSigEntry := close
@@ -1792,7 +1887,7 @@ if sweepBullSig and maxSignalRankThisBar < 3 and sigDirThisBar >= 0
     maxSignalRankThisBar := 3
     sigDirThisBar := 1
     label.new(bar_index, low, "💧 EQL SWEEP BUY", color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny)
-    [_swSl, _swTp1, _swTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+    [_swSl, _swTp1, _swTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false, dolTpBull)
     pendSigName := "SWEEP EQL BUY"
     pendSigIsBuy := true
     pendSigEntry := close
@@ -1811,7 +1906,7 @@ if sweepBearSig and maxSignalRankThisBar < 3 and sigDirThisBar <= 0
     maxSignalRankThisBar := 3
     sigDirThisBar := -1
     label.new(bar_index, high, "💧 EQH SWEEP SELL", color=#00E5FF, textcolor=color.black, style=label.style_label_down, size=size.tiny)
-    [_swSl, _swTp1, _swTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+    [_swSl, _swTp1, _swTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false, dolTpBear)
     pendSigName := "SWEEP EQH SELL"
     pendSigIsBuy := false
     pendSigEntry := close
@@ -1846,7 +1941,7 @@ if sweepDivBuySig and maxSignalRankThisBar < 3 and sigDirThisBar >= 0
     maxSignalRankThisBar := 3
     sigDirThisBar := 1
     label.new(bar_index, low, "💧Δ SWEEP+DIV BUY", color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny)
-    [_sdSl, _sdTp1, _sdTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+    [_sdSl, _sdTp1, _sdTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false, dolTpBull)
     pendSigName := "SWEEP+DIV BUY"
     pendSigIsBuy := true
     pendSigEntry := close
@@ -1866,7 +1961,7 @@ if sweepDivSellSig and maxSignalRankThisBar < 3 and sigDirThisBar <= 0
     maxSignalRankThisBar := 3
     sigDirThisBar := -1
     label.new(bar_index, high, "💧Δ SWEEP+DIV SELL", color=#00E5FF, textcolor=color.black, style=label.style_label_down, size=size.tiny)
-    [_sdSl, _sdTp1, _sdTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+    [_sdSl, _sdTp1, _sdTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false, dolTpBear)
     pendSigName := "SWEEP+DIV SELL"
     pendSigIsBuy := false
     pendSigEntry := close
@@ -2011,7 +2106,7 @@ if showOTESignals and barstate.isconfirmed
         sigDirThisBar := 1
         label.new(bar_index, low, "🎯 OTE BUY\n62-79% Fib", color=#FF6F00, textcolor=color.white, style=label.style_label_up, size=size.tiny)
         lastOTESignalBar := bar_index
-        [_oteSl, _oteTp1, _oteTp2] = f_sl_tp(true, oteSwingL - atr * 0.1, close, atr, riskReward, showSLTP, false)
+        [_oteSl, _oteTp1, _oteTp2] = f_sl_tp(true, oteSwingL - atr * 0.1, close, atr, riskReward, showSLTP, false, dolTpBull)
         pendSigName := "OTE BUY"
         pendSigIsBuy := true
         pendSigEntry := close
@@ -2030,7 +2125,7 @@ if showOTESignals and barstate.isconfirmed
         sigDirThisBar := -1
         label.new(bar_index, high, "🎯 OTE SELL\n62-79% Fib", color=#FF6F00, textcolor=color.white, style=label.style_label_down, size=size.tiny)
         lastOTESignalBar := bar_index
-        [_oteSl, _oteTp1, _oteTp2] = f_sl_tp(false, oteSwingH + atr * 0.1, close, atr, riskReward, showSLTP, false)
+        [_oteSl, _oteTp1, _oteTp2] = f_sl_tp(false, oteSwingH + atr * 0.1, close, atr, riskReward, showSLTP, false, dolTpBear)
         pendSigName := "OTE SELL"
         pendSigIsBuy := false
         pendSigEntry := close
@@ -2079,7 +2174,7 @@ if wyckSpring
     if showWyckoffSignal and barstate.isconfirmed and maxSignalRankThisBar < 3 and sigDirThisBar >= 0
         maxSignalRankThisBar := 3
         sigDirThisBar := 1
-        [_wSl, _wTp1, _wTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+        [_wSl, _wTp1, _wTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false, dolTpBull)
         pendSigName := "WYCKOFF SPRING BUY"
         pendSigIsBuy := true
         pendSigEntry := close
@@ -2099,7 +2194,7 @@ if wyckUTAD
     if showWyckoffSignal and barstate.isconfirmed and maxSignalRankThisBar < 3 and sigDirThisBar <= 0
         maxSignalRankThisBar := 3
         sigDirThisBar := -1
-        [_wSl, _wTp1, _wTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+        [_wSl, _wTp1, _wTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false, dolTpBear)
         pendSigName := "WYCKOFF UTAD SELL"
         pendSigIsBuy := false
         pendSigEntry := close
@@ -2601,8 +2696,12 @@ if isDiamondBuy and maxSignalRankThisBar < 6 and sigDirThisBar >= 0
     float _rkVal = math.max(close - paSlBuy, atr * 0.1)
     float _tp1Val = close + _rkVal * riskReward * 0.5
     float _tp2Val = close + _rkVal * riskReward
+    // v6.21 DOL: mismo objetivo que aplica f_sl_tp al dibujar, para que el Virtual Trade Tracker
+    // y el payload JSON no diverjan de la línea pintada en el gráfico.
+    if not na(dolTpBull) and dolTpBull > _tp1Val
+        _tp2Val := dolTpBull
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlBuy)
-    f_sl_tp(true, paSlBuy, close, atr, riskReward, showSLTP, showTP2)
+    f_sl_tp(true, paSlBuy, close, atr, riskReward, showSLTP, showTP2, dolTpBull)
     alert(f_signal_json("DIAMOND BUY", close, paSlBuy, _tp1Val, _tp2Val, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
     if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
         vtBullSL := paSlBuy
@@ -2619,8 +2718,12 @@ if isDiamondSell and maxSignalRankThisBar < 6 and sigDirThisBar <= 0
     float _rkVal = math.max(paSlSell - close, atr * 0.1)
     float _tp1Val = close - _rkVal * riskReward * 0.5
     float _tp2Val = close - _rkVal * riskReward
+    // v6.21 DOL: mismo objetivo que aplica f_sl_tp al dibujar, para que el Virtual Trade Tracker
+    // y el payload JSON no diverjan de la línea pintada en el gráfico.
+    if not na(dolTpBear) and dolTpBear < _tp1Val
+        _tp2Val := dolTpBear
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlSell)
-    f_sl_tp(false, paSlSell, close, atr, riskReward, showSLTP, showTP2)
+    f_sl_tp(false, paSlSell, close, atr, riskReward, showSLTP, showTP2, dolTpBear)
     alert(f_signal_json("DIAMOND SELL", close, paSlSell, _tp1Val, _tp2Val, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
     if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
         vtBearSL := paSlSell
@@ -2711,8 +2814,12 @@ if ofBuy and maxSignalRankThisBar < 2 and sigDirThisBar >= 0
     float _rkVal = math.max(close - _slVal, atr * 0.1)
     float _tp1Val = close + _rkVal * riskReward * 0.5
     float _tp2Val = close + _rkVal * riskReward
+    // v6.21 DOL: mismo objetivo que aplica f_sl_tp al dibujar, para que el Virtual Trade Tracker
+    // y el payload JSON no diverjan de la línea pintada en el gráfico.
+    if not na(dolTpBull) and dolTpBull > _tp1Val
+        _tp2Val := dolTpBull
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
-    f_sl_tp(true, _slVal, close, atr, riskReward, showSLTP, false)
+    f_sl_tp(true, _slVal, close, atr, riskReward, showSLTP, false, dolTpBull)
     alert(f_signal_json("OF BUY", close, _slVal, _tp1Val, _tp2Val, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
     if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
         vtBullSL := _slVal
@@ -2730,8 +2837,12 @@ if ofSell and maxSignalRankThisBar < 2 and sigDirThisBar <= 0
     float _rkVal = math.max(_slVal - close, atr * 0.1)
     float _tp1Val = close - _rkVal * riskReward * 0.5
     float _tp2Val = close - _rkVal * riskReward
+    // v6.21 DOL: mismo objetivo que aplica f_sl_tp al dibujar, para que el Virtual Trade Tracker
+    // y el payload JSON no diverjan de la línea pintada en el gráfico.
+    if not na(dolTpBear) and dolTpBear < _tp1Val
+        _tp2Val := dolTpBear
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
-    f_sl_tp(false, _slVal, close, atr, riskReward, showSLTP, false)
+    f_sl_tp(false, _slVal, close, atr, riskReward, showSLTP, false, dolTpBear)
     alert(f_signal_json("OF SELL", close, _slVal, _tp1Val, _tp2Val, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
     if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
         vtBearSL := _slVal
@@ -2818,8 +2929,12 @@ if signalBuy and barstate.isconfirmed and maxSignalRankThisBar < 4 and sigDirThi
     float _rkVal = math.max(close - _slVal, atr * 0.1)
     float _tp1Val = close + _rkVal * riskReward * 0.5
     float _tp2Val = close + _rkVal * riskReward
+    // v6.21 DOL: mismo objetivo que aplica f_sl_tp al dibujar, para que el Virtual Trade Tracker
+    // y el payload JSON no diverjan de la línea pintada en el gráfico.
+    if not na(dolTpBull) and dolTpBull > _tp1Val
+        _tp2Val := dolTpBull
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
-    f_sl_tp(true, _slVal, close, atr, riskReward, true, showTP2)
+    f_sl_tp(true, _slVal, close, atr, riskReward, true, showTP2, dolTpBull)
     alert(f_signal_json("INST BUY", close, _slVal, _tp1Val, _tp2Val, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
     if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
         vtBullSL := _slVal
@@ -2836,8 +2951,12 @@ if signalSell and barstate.isconfirmed and maxSignalRankThisBar < 4 and sigDirTh
     float _rkVal = math.max(_slVal - close, atr * 0.1)
     float _tp1Val = close - _rkVal * riskReward * 0.5
     float _tp2Val = close - _rkVal * riskReward
+    // v6.21 DOL: mismo objetivo que aplica f_sl_tp al dibujar, para que el Virtual Trade Tracker
+    // y el payload JSON no diverjan de la línea pintada en el gráfico.
+    if not na(dolTpBear) and dolTpBear < _tp1Val
+        _tp2Val := dolTpBear
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
-    f_sl_tp(false, _slVal, close, atr, riskReward, true, showTP2)
+    f_sl_tp(false, _slVal, close, atr, riskReward, true, showTP2, dolTpBear)
     alert(f_signal_json("INST SELL", close, _slVal, _tp1Val, _tp2Val, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
     if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
         vtBearSL := _slVal
@@ -3170,6 +3289,7 @@ alertcondition((cumDeltaDivBull or cumDeltaDivBear) and showCumDelta and barstat
 alertcondition(isSqueeze and showSqueeze and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 SQUEEZE", "🔄 Pre-Breakout Squeeze detected")
 alertcondition((lvBullGap or lvBearGap) and showLiqVoids and barstate.isconfirmed, "ℹ️ CONTEXTO: LV Gap", "🟥 Liquidity Void detected")
 alertcondition((eqhRunBull or eqlRunBear) and showLiqRun, "ℹ️ CONTEXTO: 🏃 LIQ RUN", "🏃 Liquidity Run — pool perforado y superado, continuación")
+alertcondition((dolBullReached or dolBearReached) and showDOL, "ℹ️ CONTEXTO: 🎯 DOL REACHED", "🎯 Draw on Liquidity alcanzado — el precio llegó al pool objetivo")
 alertcondition(nearKeyLevelEnter and showPDLevels, "ℹ️ CONTEXTO: NEAR KEY LEVEL", "📍 Precio entrando cerca de PDH/PDL/PWH/PWL")
 alertcondition(oteZoneEnter and showOTE, "ℹ️ CONTEXTO: OTE ZONE", "🎯 Precio entrando en zona OTE")
 
