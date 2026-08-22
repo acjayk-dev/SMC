@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.17 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.18 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -101,8 +101,23 @@
 //                   borraba el SL/TP de un trade vivo y sus alertas de salida no disparaban nunca.
 //          [FIX-N5] ta.dmi() duplicado (Wyckoff + filtro de chop) y suavizado del ADX cableado a la longitud
 //                   de DI. Unificado en un cálculo, con input de suavizado propio.
+// v6.18: se cierran los dos huecos del sistema de alertas detectados al inventariarlo:
+//          [A] La alerta "ℹ️ CONTEXTO: 🐘 ELEPHANT" era la única que no exigía su toggle — el fix v6.15,
+//              que hizo que cada alerta de contexto respetara su interruptor, la pasó por alto. Apagar
+//              "Show Elephant Bars" limpiaba el gráfico pero la alerta seguía notificando.
+//          [B] Solo 3 de las 8 señales de entrada (DIAMOND, OF, INST) emitían payload alert() JSON; las
+//              otras 5 (Sweep EQL/EQH, OTE, Wyckoff Spring/UTAD, Silver Bullet, Sweep+Delta Div) solo
+//              existían como alertcondition(), o sea no eran ejecutables por webhook: el receptor no
+//              recibía entry/sl/tp1/tp2/contracts/score. Ahora las 8 comparten un único constructor de
+//              payload (f_signal_json) con schema idéntico. Como esas 5 se evalúan antes de que exista
+//              finalScoreBull/Bear, su disparo se difiere vía el buffer pendSig* hasta el bloque ALERTS.
+//          Colateral necesario para [B]: f_sl_tp() calculaba los niveles DENTRO de `if _show`, así que con
+//          "Show SL/TP Lines" apagado devolvía [na, na, na]. Eso dejaba sin payload —y sin registro en el
+//          Virtual Trade Tracker, o sea sin alertas de SL/TP1/TP2/Trailing— a las señales que dependen del
+//          helper. El cálculo ahora es incondicional y _show solo gobierna el dibujo, en línea con la
+//          doctrina de v6.16/v6.17 [FIX-A8]: un toggle visual no puede alterar la lógica.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.17 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.17", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.18 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.18", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -167,14 +182,17 @@ f_ma(src, len, type) =>
         "VWMA" => ta.vwma(src, len)
         =>        ta.ema(src, len)
 
-// Helper SL/TP unificado — v6.13: ahora retorna [sl, tp1, tp2] (na si no dibujó nada) para que las señales
+// Helper SL/TP unificado — v6.13: ahora retorna [sl, tp1, tp2] (na solo si slLevel venía na) para que las señales
 // que no tenían su propio cálculo local (Wyckoff, Silver Bullet, Sweep EQL/EQH, Sweep+Div, OTE) puedan
 // registrar el mismo nivel exacto que se dibuja en el chart en el Virtual Trade Tracker.
+// v6.18 fix: el CÁLCULO estaba dentro de `if _show`, así que "Show SL/TP Lines" (toggle puramente visual)
+// devolvía [na, na, na] y anulaba tanto el registro en el Virtual Trade Tracker como el payload JSON de las
+// señales que dependen de este helper. Se separa: los niveles se calculan siempre; _show solo dibuja.
 f_sl_tp(isBuy, slLevel, tpRef, _atr, _rr, _show, _showTP2) =>
     float _sl  = na
     float _tp1 = na
     float _tp2 = na
-    if _show and not na(slLevel)
+    if not na(slLevel)
         _sl := slLevel
         float _rk = math.max(isBuy ? tpRef - _sl : _sl - tpRef, _atr * 0.1)
         if _rk > _atr * 3.5
@@ -182,10 +200,11 @@ f_sl_tp(isBuy, slLevel, tpRef, _atr, _rr, _show, _showTP2) =>
             _rk := _atr * 2.0
         _tp1 := isBuy ? tpRef + _rk * _rr * 0.5 : tpRef - _rk * _rr * 0.5
         _tp2 := isBuy ? tpRef + _rk * _rr       : tpRef - _rk * _rr
-        line.new(bar_index, _sl, bar_index + 8, _sl, color=color.new(#FF5252, 20), style=line.style_dashed, width=2)
-        if _showTP2
-            line.new(bar_index, _tp1, bar_index + 8, _tp1, color=color.new(#00E676, 50), width=1, style=line.style_dashed)
-        line.new(bar_index, _tp2, bar_index + 8, _tp2, color=color.new(#00E676, 20), width=2)
+        if _show
+            line.new(bar_index, _sl, bar_index + 8, _sl, color=color.new(#FF5252, 20), style=line.style_dashed, width=2)
+            if _showTP2
+                line.new(bar_index, _tp1, bar_index + 8, _tp1, color=color.new(#00E676, 50), width=1, style=line.style_dashed)
+            line.new(bar_index, _tp2, bar_index + 8, _tp2, color=color.new(#00E676, 20), width=2)
     [_sl, _tp1, _tp2]
 
 f_calc_contracts(accountBal, riskPct, entryPrice, slPrice) =>
@@ -193,6 +212,12 @@ f_calc_contracts(accountBal, riskPct, entryPrice, slPrice) =>
     float riskVal = accountBal * (riskPct / 100)
     int contracts = dist > 0 ? math.max(1, math.round(riskVal / (dist * syminfo.pointvalue))) : 1
     contracts
+
+// v6.18: constructor único del payload JSON de una señal de ENTRADA. Antes cada señal repetía la misma
+// concatenación a mano, lo que dejó a 5 de las 8 señales sin payload (solo alertcondition, inutilizables
+// por webhook) y abría la puerta a que el schema divergiera entre las que sí lo tenían.
+f_signal_json(_name, _entry, _sl, _tp1, _tp2, _contracts, _score) =>
+    '{"signal": "' + _name + '", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(_entry) + ', "sl": ' + str.tostring(_sl) + ', "tp1": ' + str.tostring(_tp1) + ', "tp2": ' + str.tostring(_tp2) + ', "contracts": ' + str.tostring(_contracts) + ', "score": ' + str.tostring(_score, "#.1") + '}'
 
 // v6.5 fix: definición institucional de Order Block = ÚLTIMA vela de color OPUESTO al impulso antes del
 // BOS/CHoCH (no el extremo del swing). Busca hacia atrás desde el origen del impulso; si no encuentra ninguna
@@ -920,6 +945,19 @@ if showOR and showContext and barstate.isconfirmed
     if orRetestBear
         label.new(bar_index, high, "🔄 OR RETEST SELL", color=#00BCD4, textcolor=color.white, style=label.style_label_down, size=size.tiny)
 
+// ── v6.18: buffer de payload JSON diferido ──────────────────────────────────
+// Las 5 señales de rango 3 (Silver Bullet, Sweep EQL/EQH, Sweep+Delta Div, OTE, Wyckoff Spring/UTAD) se
+// evalúan mucho antes de que exista finalScoreBull/Bear, así que no pueden emitir su alert() JSON in situ
+// sin romper el schema compartido con DIAMOND/OF/INST. Se deja la señal en este buffer y se dispara al
+// final del script. Una sola ranura basta: el Signal Interlock ya impide que dos señales de rango 3
+// pasen en la misma vela.
+string pendSigName  = ""
+bool   pendSigIsBuy = true
+float  pendSigEntry = na
+float  pendSigSL    = na
+float  pendSigTP1   = na
+float  pendSigTP2   = na
+
 bool sbBullFVGPresent = bullFVGs.size() > 0 and isSilverBullet
 bool sbBearFVGPresent = bearFVGs.size() > 0 and isSilverBullet
 sbPatternBull := isSilverBullet and sbSweepLowDone  and (pBarUp or engulfBull) and sbBullFVGPresent and volume > avgVol
@@ -940,6 +978,12 @@ if sbPatternBull
         maxSignalRankThisBar := 3
         sigDirThisBar := 1
         [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+        pendSigName := "SILVER BULLET BUY"
+        pendSigIsBuy := true
+        pendSigEntry := close
+        pendSigSL := _sbSl
+        pendSigTP1 := _sbTp1
+        pendSigTP2 := _sbTp2
         if not na(_sbSl)
             if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
                 vtBullSL := _sbSl
@@ -954,6 +998,12 @@ if sbPatternBear
         maxSignalRankThisBar := 3
         sigDirThisBar := -1
         [_sbSl, _sbTp1, _sbTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+        pendSigName := "SILVER BULLET SELL"
+        pendSigIsBuy := false
+        pendSigEntry := close
+        pendSigSL := _sbSl
+        pendSigTP1 := _sbTp1
+        pendSigTP2 := _sbTp2
         if not na(_sbSl)
             if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
                 vtBearSL := _sbSl
@@ -1666,6 +1716,12 @@ if sweepBullSig and maxSignalRankThisBar < 3 and sigDirThisBar >= 0
     sigDirThisBar := 1
     label.new(bar_index, low, "💧 EQL SWEEP BUY", color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny)
     [_swSl, _swTp1, _swTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+    pendSigName := "SWEEP EQL BUY"
+    pendSigIsBuy := true
+    pendSigEntry := close
+    pendSigSL := _swSl
+    pendSigTP1 := _swTp1
+    pendSigTP2 := _swTp2
     if not na(_swSl)
         if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
             vtBullSL := _swSl
@@ -1679,6 +1735,12 @@ if sweepBearSig and maxSignalRankThisBar < 3 and sigDirThisBar <= 0
     sigDirThisBar := -1
     label.new(bar_index, high, "💧 EQH SWEEP SELL", color=#00E5FF, textcolor=color.black, style=label.style_label_down, size=size.tiny)
     [_swSl, _swTp1, _swTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+    pendSigName := "SWEEP EQH SELL"
+    pendSigIsBuy := false
+    pendSigEntry := close
+    pendSigSL := _swSl
+    pendSigTP1 := _swTp1
+    pendSigTP2 := _swTp2
     if not na(_swSl)
         if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
             vtBearSL := _swSl
@@ -1707,6 +1769,12 @@ if sweepDivBuySig and maxSignalRankThisBar < 3 and sigDirThisBar >= 0
     sigDirThisBar := 1
     label.new(bar_index, low, "💧Δ SWEEP+DIV BUY", color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny)
     [_sdSl, _sdTp1, _sdTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+    pendSigName := "SWEEP+DIV BUY"
+    pendSigIsBuy := true
+    pendSigEntry := close
+    pendSigSL := _sdSl
+    pendSigTP1 := _sdTp1
+    pendSigTP2 := _sdTp2
     lastSweepDivBuyBar := bar_index
     if not na(_sdSl)
         if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
@@ -1721,6 +1789,12 @@ if sweepDivSellSig and maxSignalRankThisBar < 3 and sigDirThisBar <= 0
     sigDirThisBar := -1
     label.new(bar_index, high, "💧Δ SWEEP+DIV SELL", color=#00E5FF, textcolor=color.black, style=label.style_label_down, size=size.tiny)
     [_sdSl, _sdTp1, _sdTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+    pendSigName := "SWEEP+DIV SELL"
+    pendSigIsBuy := false
+    pendSigEntry := close
+    pendSigSL := _sdSl
+    pendSigTP1 := _sdTp1
+    pendSigTP2 := _sdTp2
     lastSweepDivSellBar := bar_index
     if not na(_sdSl)
         if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
@@ -1829,6 +1903,12 @@ if showOTESignals and barstate.isconfirmed
         label.new(bar_index, low, "🎯 OTE BUY\n62-79% Fib", color=#FF6F00, textcolor=color.white, style=label.style_label_up, size=size.tiny)
         lastOTESignalBar := bar_index
         [_oteSl, _oteTp1, _oteTp2] = f_sl_tp(true, oteSwingL - atr * 0.1, close, atr, riskReward, showSLTP, false)
+        pendSigName := "OTE BUY"
+        pendSigIsBuy := true
+        pendSigEntry := close
+        pendSigSL := _oteSl
+        pendSigTP1 := _oteTp1
+        pendSigTP2 := _oteTp2
         if not na(_oteSl)
             if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
                 vtBullSL := _oteSl
@@ -1842,6 +1922,12 @@ if showOTESignals and barstate.isconfirmed
         label.new(bar_index, high, "🎯 OTE SELL\n62-79% Fib", color=#FF6F00, textcolor=color.white, style=label.style_label_down, size=size.tiny)
         lastOTESignalBar := bar_index
         [_oteSl, _oteTp1, _oteTp2] = f_sl_tp(false, oteSwingH + atr * 0.1, close, atr, riskReward, showSLTP, false)
+        pendSigName := "OTE SELL"
+        pendSigIsBuy := false
+        pendSigEntry := close
+        pendSigSL := _oteSl
+        pendSigTP1 := _oteTp1
+        pendSigTP2 := _oteTp2
         if not na(_oteSl)
             if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
                 vtBearSL := _oteSl
@@ -1885,6 +1971,12 @@ if wyckSpring
         maxSignalRankThisBar := 3
         sigDirThisBar := 1
         [_wSl, _wTp1, _wTp2] = f_sl_tp(true, low - atr * 0.15, close, atr, riskReward, showSLTP, false)
+        pendSigName := "WYCKOFF SPRING BUY"
+        pendSigIsBuy := true
+        pendSigEntry := close
+        pendSigSL := _wSl
+        pendSigTP1 := _wTp1
+        pendSigTP2 := _wTp2
         if not na(_wSl)
             if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
                 vtBullSL := _wSl
@@ -1899,6 +1991,12 @@ if wyckUTAD
         maxSignalRankThisBar := 3
         sigDirThisBar := -1
         [_wSl, _wTp1, _wTp2] = f_sl_tp(false, high + atr * 0.15, close, atr, riskReward, showSLTP, false)
+        pendSigName := "WYCKOFF UTAD SELL"
+        pendSigIsBuy := false
+        pendSigEntry := close
+        pendSigSL := _wSl
+        pendSigTP1 := _wTp1
+        pendSigTP2 := _wTp2
         if not na(_wSl)
             if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
                 vtBearSL := _wSl
@@ -2380,7 +2478,7 @@ if isDiamondBuy and maxSignalRankThisBar < 6 and sigDirThisBar >= 0
     float _tp2Val = close + _rkVal * riskReward
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlBuy)
     f_sl_tp(true, paSlBuy, close, atr, riskReward, showSLTP, showTP2)
-    alert('{"signal": "DIAMOND BUY", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(paSlBuy) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBull, "#.1") + '}', alert.freq_once_per_bar_close)
+    alert(f_signal_json("DIAMOND BUY", close, paSlBuy, _tp1Val, _tp2Val, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
     if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
         vtBullSL := paSlBuy
         vtBullTP1 := _tp1Val
@@ -2398,7 +2496,7 @@ if isDiamondSell and maxSignalRankThisBar < 6 and sigDirThisBar <= 0
     float _tp2Val = close - _rkVal * riskReward
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlSell)
     f_sl_tp(false, paSlSell, close, atr, riskReward, showSLTP, showTP2)
-    alert('{"signal": "DIAMOND SELL", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(paSlSell) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBear, "#.1") + '}', alert.freq_once_per_bar_close)
+    alert(f_signal_json("DIAMOND SELL", close, paSlSell, _tp1Val, _tp2Val, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
     if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
         vtBearSL := paSlSell
         vtBearTP1 := _tp1Val
@@ -2490,7 +2588,7 @@ if ofBuy and maxSignalRankThisBar < 2 and sigDirThisBar >= 0
     float _tp2Val = close + _rkVal * riskReward
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
     f_sl_tp(true, _slVal, close, atr, riskReward, showSLTP, false)
-    alert('{"signal": "OF BUY", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(_slVal) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBull, "#.1") + '}', alert.freq_once_per_bar_close)
+    alert(f_signal_json("OF BUY", close, _slVal, _tp1Val, _tp2Val, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
     if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
         vtBullSL := _slVal
         vtBullTP1 := _tp1Val
@@ -2509,7 +2607,7 @@ if ofSell and maxSignalRankThisBar < 2 and sigDirThisBar <= 0
     float _tp2Val = close - _rkVal * riskReward
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
     f_sl_tp(false, _slVal, close, atr, riskReward, showSLTP, false)
-    alert('{"signal": "OF SELL", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(_slVal) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBear, "#.1") + '}', alert.freq_once_per_bar_close)
+    alert(f_signal_json("OF SELL", close, _slVal, _tp1Val, _tp2Val, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
     if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
         vtBearSL := _slVal
         vtBearTP1 := _tp1Val
@@ -2597,7 +2695,7 @@ if signalBuy and barstate.isconfirmed and maxSignalRankThisBar < 4 and sigDirThi
     float _tp2Val = close + _rkVal * riskReward
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
     f_sl_tp(true, _slVal, close, atr, riskReward, true, showTP2)
-    alert('{"signal": "INST BUY", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(_slVal) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBull, "#.1") + '}', alert.freq_once_per_bar_close)
+    alert(f_signal_json("INST BUY", close, _slVal, _tp1Val, _tp2Val, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
     if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
         vtBullSL := _slVal
         vtBullTP1 := _tp1Val
@@ -2615,7 +2713,7 @@ if signalSell and barstate.isconfirmed and maxSignalRankThisBar < 4 and sigDirTh
     float _tp2Val = close - _rkVal * riskReward
     int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
     f_sl_tp(false, _slVal, close, atr, riskReward, true, showTP2)
-    alert('{"signal": "INST SELL", "ticker": "' + syminfo.ticker + '", "entry": ' + str.tostring(close) + ', "sl": ' + str.tostring(_slVal) + ', "tp1": ' + str.tostring(_tp1Val) + ', "tp2": ' + str.tostring(_tp2Val) + ', "contracts": ' + str.tostring(_optContracts) + ', "score": ' + str.tostring(finalScoreBear, "#.1") + '}', alert.freq_once_per_bar_close)
+    alert(f_signal_json("INST SELL", close, _slVal, _tp1Val, _tp2Val, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
     if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
         vtBearSL := _slVal
         vtBearTP1 := _tp1Val
@@ -2894,6 +2992,15 @@ bool nearKeyLevelEnter = nearKeyLevelCond and not nearKeyLevelCond[1]
 bool oteZoneCond       = inOTEBull or inOTEBear
 bool oteZoneEnter      = oteZoneCond and not oteZoneCond[1]
 
+// v6.18 fix: las 5 señales de rango 3 (Sweep EQL/EQH, OTE, Wyckoff Spring/UTAD, Silver Bullet, Sweep+Div)
+// solo existían como alertcondition(), así que no eran consumibles por webhook: no había forma de recibir
+// entry/sl/tp1/tp2/contracts. Ahora emiten el mismo payload JSON que DIAMOND/OF/INST. El disparo se hace
+// aquí y no en el bloque de cada señal porque finalScoreBull/Bear se calcula después de todas ellas.
+if not na(pendSigSL) and barstate.isconfirmed
+    int   _pendContracts = f_calc_contracts(accountBalance, riskPercentage, pendSigEntry, pendSigSL)
+    float _pendScore     = pendSigIsBuy ? finalScoreBull : finalScoreBear
+    alert(f_signal_json(pendSigName, pendSigEntry, pendSigSL, pendSigTP1, pendSigTP2, _pendContracts, _pendScore), alert.freq_once_per_bar_close)
+
 // ── 🎯 SEÑAL — entradas con riesgo definido, todas patrones con nombre en metodología institucional
 // (ICT/SMC: OB retest, Order Flow, Liquidity Sweep, OTE; Wyckoff: Spring/UTAD; ICT: Silver Bullet;
 // Order Flow: Sweep+Delta Divergence). v6.9: se eliminó el tier genérico BUY/ELITE BUY (pin bar/outside
@@ -2924,7 +3031,11 @@ alertcondition((chochWeakUp or chochWeakDown) and showBOS and barstate.isconfirm
 alertcondition((iBosUp or iBosDown) and showInternalStructure and barstate.isconfirmed, "ℹ️ CONTEXTO: iBOS Detected", "📊 Internal BOS (estructura menor)")
 alertcondition((iChochUp or iChochDown) and showInternalStructure and barstate.isconfirmed, "ℹ️ CONTEXTO: iCHoCH Signal", "🔄 Internal CHoCH (estructura menor)")
 
-alertcondition((superEleBull or superEleBear) and barstate.isconfirmed, "ℹ️ CONTEXTO: 🐘 ELEPHANT", "🐘 Elephant Bar detected")
+// v6.18 fix: era la única alerta de CONTEXTO que se quedó sin su toggle en el fix v6.15 — apagar
+// "Show Elephant Bars" quitaba la etiqueta del gráfico pero la alerta seguía disparando. El gate va solo
+// sobre la alerta: superEleBull/Bear sigue calculándose siempre porque alimenta el veto de INST BUY/SELL
+// y el scoring (v6.17 [FIX-A8]: un toggle visual no puede alterar la lógica).
+alertcondition((superEleBull or superEleBear) and showElephant and barstate.isconfirmed, "ℹ️ CONTEXTO: 🐘 ELEPHANT", "🐘 Elephant Bar detected")
 
 alertcondition(nearOBEnter, "ℹ️ CONTEXTO: NEAR OB", "📦 Precio entrando en zona cercana a OB")
 
