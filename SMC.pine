@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.19 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.20 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -151,8 +151,16 @@
 //                   seguía puntuando como POI (+1.5) y habilitando 💎 DIAMOND BUY. A una zona de demanda solo
 //                   se llega desde arriba o desde dentro (y viceversa para la oferta). Aplicado también a la
 //                   alerta "Near OB".
+// v6.20: implementado LIQUIDITY RUN, el concepto complementario del Liquidity Sweep que faltaba. El script
+//        cubría bien la barrida con rechazo (Sweep EQH/EQL, Sweep+Delta Div, Wyckoff Spring/UTAD, sweep del
+//        Silver Bullet, IDM), pero TODA condición anclada a un pool exigía el reclaim: no existía la rama
+//        complementaria "perforó y cerró MÁS ALLÁ", que es justo lo que define el run. BOS no lo cubría —
+//        rompe un swing estructural, no un pool, y nunca comprueba si ese nivel acumulaba stops.
+//        Nuevos eqhRunBull/eqlRunBear sobre los mismos pools EQH/EQL que usa el Sweep, con detección de
+//        flanco y el mismo listón de expansión que el script exige a un movimiento estructural. Es CONTEXTO:
+//        etiqueta + alerta, sin señal de entrada con SL/TP y sin tocar el scoring.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.19 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.19", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.20 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.20", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -414,6 +422,7 @@ showSweepSignal= input.bool(true,  "Señal Sweep EQH/EQL",          group=grpAle
 showWyckoffSignal  = input.bool(true, "Señal Wyckoff Spring/UTAD",  group=grpAlerts, tooltip="Reversión Wyckoff confirmada en Trading Range (ADX bajo) — requiere 'Show Wyckoff Phases' activo para dibujar la etiqueta.")
 showSBSignal       = input.bool(true, "Señal Silver Bullet Pattern", group=grpAlerts, tooltip="Kill Zone + sweep + FVG presente + confirmación PA — requiere 'Show Silver Bullet Windows' activo.")
 showSweepDivSignal = input.bool(true, "Señal Sweep + Delta Divergence", group=grpAlerts, tooltip="Barrida de liquidez no confirmada por el Delta Acumulado (absorción) + vela de rechazo.")
+showLiqRun         = input.bool(true, "Show Liquidity Run (EQH/EQL)", group=grpAlerts, tooltip="Contrapartida del Sweep: el precio perfora el pool de liquidez y CIERRA MÁS ALLÁ en vez de recuperarlo — la liquidez no lo rechaza, lo alimenta. Evento de continuación, no de reversión. Solo contexto: no dispara señal de entrada con SL/TP.")
 paRequireNoChop= input.bool(true,  "Filter Choppy Market (ADX)",   group=grpSignal)
 paAdxLen       = input.int(14,     "  ADX Length", minval=5,        group=grpSignal)
 // v6.17 [FIX-N5] El suavizado del ADX estaba cableado al mismo valor que la longitud de DI —
@@ -1873,6 +1882,37 @@ if sweepDivSellSig and maxSignalRankThisBar < 3 and sigDirThisBar <= 0
             vtBearTP1Done := false
             vtBearActive := true
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ LIQUIDITY RUN (v6.20)
+// ══════════════════════════════════════════════════════════════════════════════
+// Contrapartida exacta del Sweep sobre el MISMO pool, resuelto al revés:
+//   SWEEP → perfora el nivel y CIERRA DE VUELTA del lado de origen. La liquidez rechaza al precio.
+//           Es reversión (Turtle Soup / Judas Swing) y ya estaba implementado (eq*SweptReclaimed).
+//   RUN   → perfora el nivel y CIERRA MÁS ALLÁ. La liquidez no rechaza al precio: lo alimenta. Los stops
+//           acumulados en el pool son el combustible de la expansión hacia el siguiente draw.
+// Las dos son mutuamente excluyentes por construcción (close > nivel vs close < nivel), así que un run y un
+// sweep del mismo pool no pueden coexistir en la misma vela.
+//
+// Detección de flanco (close[1] del lado de origen): sin ella la condición seguiría siendo cierta en TODAS
+// las velas posteriores mientras el precio se mantuviera del otro lado, y el run se repetiría barra tras
+// barra. Solo se notifica la vela que efectivamente cruza — mismo criterio que usa el bloque BOS/CHoCH.
+//
+// El listón de expansión es el mismo que el script ya exige para dar por bueno un movimiento estructural
+// (strongBullMove/strongBearMove en el bloque BOS): cuerpo > effAtrMult×ATR con volumen > volMultStructural,
+// o un Displacement multi-barra ya confirmado. Un cruce de nivel sin expansión no es un run, es deriva.
+bool runExpansionBull = isDisplacementBull or (isBullC and bodySize > atr * effAtrMult)
+bool runExpansionBear = isDisplacementBear or (isBearC and bodySize > atr * effAtrMult)
+bool runVolumeOK      = volume > avgVol * volMultStructural
+
+bool eqhRunBull = eqhAlive and barstate.isconfirmed and high > lastEQHLevel and close > lastEQHLevel and close[1] <= lastEQHLevel and runExpansionBull and runVolumeOK and not isDeadZone
+bool eqlRunBear = eqlAlive and barstate.isconfirmed and low  < lastEQLLevel and close < lastEQLLevel and close[1] >= lastEQLLevel and runExpansionBear and runVolumeOK and not isDeadZone
+
+if showLiqRun and showContext
+    if eqhRunBull
+        label.new(bar_index, low,  "🏃 EQH RUN\nContinuación", color=#FFAB00, textcolor=color.black, style=label.style_label_up,   size=size.tiny)
+    if eqlRunBear
+        label.new(bar_index, high, "🏃 EQL RUN\nContinuación", color=#FFAB00, textcolor=color.black, style=label.style_label_down, size=size.tiny)
+
 // ── IDM ──
 float _idmHighRef = ta.highest(high, effSwingLen * 4 + 1)
 float _idmLowRef  = ta.lowest(low,  effSwingLen * 4 + 1)
@@ -3129,6 +3169,7 @@ alertcondition((isDisplacementBull or isDisplacementBear) and showDisplacement a
 alertcondition((cumDeltaDivBull or cumDeltaDivBear) and showCumDelta and barstate.isconfirmed, "ℹ️ CONTEXTO: Δ DELTA DIV", "Δ Cum. Delta Divergence")
 alertcondition(isSqueeze and showSqueeze and barstate.isconfirmed, "ℹ️ CONTEXTO: 🔄 SQUEEZE", "🔄 Pre-Breakout Squeeze detected")
 alertcondition((lvBullGap or lvBearGap) and showLiqVoids and barstate.isconfirmed, "ℹ️ CONTEXTO: LV Gap", "🟥 Liquidity Void detected")
+alertcondition((eqhRunBull or eqlRunBear) and showLiqRun, "ℹ️ CONTEXTO: 🏃 LIQ RUN", "🏃 Liquidity Run — pool perforado y superado, continuación")
 alertcondition(nearKeyLevelEnter and showPDLevels, "ℹ️ CONTEXTO: NEAR KEY LEVEL", "📍 Precio entrando cerca de PDH/PDL/PWH/PWL")
 alertcondition(oteZoneEnter and showOTE, "ℹ️ CONTEXTO: OTE ZONE", "🎯 Precio entrando en zona OTE")
 
