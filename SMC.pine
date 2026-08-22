@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Pro - Institutional v6.21 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
+// SMC Pro - Institutional v6.22 | Multi-Timeframe Auto-Calibrated para MES/MNQ Micro-Futures
 // v6.2: Auto-Calibración Dinámica por Timeframe (effSwingLen, effObMaxAge, effFvgMinSize, effFvgMaxAge, effAtrMult, effBosCooldown, effPdLookback)
 // v6.3: Session-Weighted Scoring, Volatility-Adaptive minScore, Squeeze Detection, Signal Interlock, Trailing Stop
 // v6.4: Order Flow realineado a criterios institucionales (Absorción con volumen+rango, Agotamiento AND en vez de OR,
@@ -169,8 +169,17 @@
 //        pool objetivo, siempre que supere al TP1 y esté a más de dolMinAtr×ATR. TP1 sigue siendo el parcial
 //        de 0.5R. El override se aplica dentro de f_sl_tp Y en las 6 señales que calculan su TP2 a mano,
 //        para que la línea dibujada, el Virtual Trade Tracker y el payload JSON no puedan divergir.
+// v6.22: [FIX-CLAMP] DIAMOND, OF e INST calculaban su SL/TP a mano (_rkVal) en vez de tomar el retorno de
+//        f_sl_tp, como sí hacen las señales de rango 3. El helper recorta el riesgo cuando supera 3.5×ATR
+//        y al recortarlo MUEVE también el stop a entry∓2×ATR — pero ese recorte solo se reflejaba en la
+//        línea dibujada. Con un stop ancho, las tres señales reportaban en el payload JSON un SL distinto
+//        del que veía el trader en el gráfico, dimensionaban la posición (f_calc_contracts) sobre ese SL
+//        crudo — o sea con MÁS contratos de los que corresponden al riesgo real — y registraban en el
+//        Virtual Trade Tracker un nivel que sus propias alertas de SL_HIT nunca iban a casar con la línea.
+//        Las seis ramas pasan a consumir [_eSl, _eTp1, _eTp2] de f_sl_tp: una sola fuente de verdad para
+//        gráfico, sizing, webhook y tracker. De paso, si el SL sale na ya no se emite un payload con NaN.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.21 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.21", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.22 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.22", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2693,44 +2702,36 @@ if isDiamondBuy and maxSignalRankThisBar < 6 and sigDirThisBar >= 0
     sigDirThisBar := 1
     label.new(bar_index, low, "💎 DIAMOND BUY\nScore: " + str.tostring(finalScoreBull, "#.1"), color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny, tooltip=bullTooltip)
     float paSlBuy = not na(paBullOBBottom) ? math.min(paBullOBBottom - atr * 0.1, localSwingLow - atr * 0.1) : localSwingLow - atr * 0.1
-    float _rkVal = math.max(close - paSlBuy, atr * 0.1)
-    float _tp1Val = close + _rkVal * riskReward * 0.5
-    float _tp2Val = close + _rkVal * riskReward
-    // v6.21 DOL: mismo objetivo que aplica f_sl_tp al dibujar, para que el Virtual Trade Tracker
-    // y el payload JSON no diverjan de la línea pintada en el gráfico.
-    if not na(dolTpBull) and dolTpBull > _tp1Val
-        _tp2Val := dolTpBull
-    int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlBuy)
-    f_sl_tp(true, paSlBuy, close, atr, riskReward, showSLTP, showTP2, dolTpBull)
-    alert(f_signal_json("DIAMOND BUY", close, paSlBuy, _tp1Val, _tp2Val, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
-    if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
-        vtBullSL := paSlBuy
-        vtBullTP1 := _tp1Val
-        vtBullTP2 := _tp2Val
-        vtBullTP1Done := false
-        vtBullActive := true
+    // v6.22 [FIX-CLAMP] SL/TP tomados del retorno de f_sl_tp, no recalculados a mano: el clamp de 3.5×ATR
+    // mueve el stop y antes solo se reflejaba en la línea dibujada, no en sizing/JSON/tracker.
+    [_eSl, _eTp1, _eTp2] = f_sl_tp(true, paSlBuy, close, atr, riskReward, showSLTP, showTP2, dolTpBull)
+    if not na(_eSl)
+        int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _eSl)
+        alert(f_signal_json("DIAMOND BUY", close, _eSl, _eTp1, _eTp2, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
+        if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
+            vtBullSL := _eSl
+            vtBullTP1 := _eTp1
+            vtBullTP2 := _eTp2
+            vtBullTP1Done := false
+            vtBullActive := true
 
 if isDiamondSell and maxSignalRankThisBar < 6 and sigDirThisBar <= 0
     maxSignalRankThisBar := 6
     sigDirThisBar := -1
     label.new(bar_index, high, "💎 DIAMOND SELL\nScore: " + str.tostring(finalScoreBear, "#.1"), color=#E91E63, textcolor=color.white, style=label.style_label_down, size=size.tiny, tooltip=bearTooltip)
     float paSlSell = not na(paBearOBTop) ? math.max(paBearOBTop + atr * 0.1, localSwingHigh + atr * 0.1) : localSwingHigh + atr * 0.1
-    float _rkVal = math.max(paSlSell - close, atr * 0.1)
-    float _tp1Val = close - _rkVal * riskReward * 0.5
-    float _tp2Val = close - _rkVal * riskReward
-    // v6.21 DOL: mismo objetivo que aplica f_sl_tp al dibujar, para que el Virtual Trade Tracker
-    // y el payload JSON no diverjan de la línea pintada en el gráfico.
-    if not na(dolTpBear) and dolTpBear < _tp1Val
-        _tp2Val := dolTpBear
-    int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, paSlSell)
-    f_sl_tp(false, paSlSell, close, atr, riskReward, showSLTP, showTP2, dolTpBear)
-    alert(f_signal_json("DIAMOND SELL", close, paSlSell, _tp1Val, _tp2Val, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
-    if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
-        vtBearSL := paSlSell
-        vtBearTP1 := _tp1Val
-        vtBearTP2 := _tp2Val
-        vtBearTP1Done := false
-        vtBearActive := true
+    // v6.22 [FIX-CLAMP] SL/TP tomados del retorno de f_sl_tp, no recalculados a mano: el clamp de 3.5×ATR
+    // mueve el stop y antes solo se reflejaba en la línea dibujada, no en sizing/JSON/tracker.
+    [_eSl, _eTp1, _eTp2] = f_sl_tp(false, paSlSell, close, atr, riskReward, showSLTP, showTP2, dolTpBear)
+    if not na(_eSl)
+        int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _eSl)
+        alert(f_signal_json("DIAMOND SELL", close, _eSl, _eTp1, _eTp2, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
+        if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
+            vtBearSL := _eSl
+            vtBearTP1 := _eTp1
+            vtBearTP2 := _eTp2
+            vtBearTP1Done := false
+            vtBearActive := true
 
 // v6.9 fix: se eliminó el tier genérico "BUY/ELITE BUY" (pin bar/outside bar + score ≥ umbral, sin
 // exigir cercanía a ningún POI institucional específico) como alerta de TRADE — no corresponde a ningún
@@ -2811,22 +2812,18 @@ if ofBuy and maxSignalRankThisBar < 2 and sigDirThisBar >= 0
     lastOFBuyBar := bar_index
     label.new(bar_index, low, "📊 OF BUY\nA+E+I", color=#00BFA5, textcolor=color.white, style=label.style_label_up, size=size.tiny, tooltip=bullTooltip)
     float _slVal = localSwingLow - atr * 0.15
-    float _rkVal = math.max(close - _slVal, atr * 0.1)
-    float _tp1Val = close + _rkVal * riskReward * 0.5
-    float _tp2Val = close + _rkVal * riskReward
-    // v6.21 DOL: mismo objetivo que aplica f_sl_tp al dibujar, para que el Virtual Trade Tracker
-    // y el payload JSON no diverjan de la línea pintada en el gráfico.
-    if not na(dolTpBull) and dolTpBull > _tp1Val
-        _tp2Val := dolTpBull
-    int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
-    f_sl_tp(true, _slVal, close, atr, riskReward, showSLTP, false, dolTpBull)
-    alert(f_signal_json("OF BUY", close, _slVal, _tp1Val, _tp2Val, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
-    if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
-        vtBullSL := _slVal
-        vtBullTP1 := _tp1Val
-        vtBullTP2 := _tp2Val
-        vtBullTP1Done := false
-        vtBullActive := true
+    // v6.22 [FIX-CLAMP] SL/TP tomados del retorno de f_sl_tp, no recalculados a mano: el clamp de 3.5×ATR
+    // mueve el stop y antes solo se reflejaba en la línea dibujada, no en sizing/JSON/tracker.
+    [_eSl, _eTp1, _eTp2] = f_sl_tp(true, _slVal, close, atr, riskReward, showSLTP, false, dolTpBull)
+    if not na(_eSl)
+        int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _eSl)
+        alert(f_signal_json("OF BUY", close, _eSl, _eTp1, _eTp2, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
+        if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
+            vtBullSL := _eSl
+            vtBullTP1 := _eTp1
+            vtBullTP2 := _eTp2
+            vtBullTP1Done := false
+            vtBullActive := true
 
 if ofSell and maxSignalRankThisBar < 2 and sigDirThisBar <= 0
     maxSignalRankThisBar := 2
@@ -2834,22 +2831,18 @@ if ofSell and maxSignalRankThisBar < 2 and sigDirThisBar <= 0
     lastOFSellBar := bar_index
     label.new(bar_index, high, "📊 OF SELL\nA+E+I", color=#D50000, textcolor=color.white, style=label.style_label_down, size=size.tiny, tooltip=bearTooltip)
     float _slVal = localSwingHigh + atr * 0.15
-    float _rkVal = math.max(_slVal - close, atr * 0.1)
-    float _tp1Val = close - _rkVal * riskReward * 0.5
-    float _tp2Val = close - _rkVal * riskReward
-    // v6.21 DOL: mismo objetivo que aplica f_sl_tp al dibujar, para que el Virtual Trade Tracker
-    // y el payload JSON no diverjan de la línea pintada en el gráfico.
-    if not na(dolTpBear) and dolTpBear < _tp1Val
-        _tp2Val := dolTpBear
-    int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
-    f_sl_tp(false, _slVal, close, atr, riskReward, showSLTP, false, dolTpBear)
-    alert(f_signal_json("OF SELL", close, _slVal, _tp1Val, _tp2Val, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
-    if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
-        vtBearSL := _slVal
-        vtBearTP1 := _tp1Val
-        vtBearTP2 := _tp2Val
-        vtBearTP1Done := false
-        vtBearActive := true
+    // v6.22 [FIX-CLAMP] SL/TP tomados del retorno de f_sl_tp, no recalculados a mano: el clamp de 3.5×ATR
+    // mueve el stop y antes solo se reflejaba en la línea dibujada, no en sizing/JSON/tracker.
+    [_eSl, _eTp1, _eTp2] = f_sl_tp(false, _slVal, close, atr, riskReward, showSLTP, false, dolTpBear)
+    if not na(_eSl)
+        int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _eSl)
+        alert(f_signal_json("OF SELL", close, _eSl, _eTp1, _eTp2, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
+        if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
+            vtBearSL := _eSl
+            vtBearTP1 := _eTp1
+            vtBearTP2 := _eTp2
+            vtBearTP1Done := false
+            vtBearActive := true
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ OB EXTEND, MITIGATION & INST SIGNAL
@@ -2926,44 +2919,36 @@ if signalBuy and barstate.isconfirmed and maxSignalRankThisBar < 4 and sigDirThi
     sigDirThisBar := 1
     label.new(bar_index, low, "🏦 INST BUY\nScore: " + str.tostring(finalScoreBull, "#.1"), color=#00E676, textcolor=color.black, style=label.style_label_up, size=size.tiny, tooltip=bullTooltip)
     float _slVal = obSlBuyVal - atr * 0.1
-    float _rkVal = math.max(close - _slVal, atr * 0.1)
-    float _tp1Val = close + _rkVal * riskReward * 0.5
-    float _tp2Val = close + _rkVal * riskReward
-    // v6.21 DOL: mismo objetivo que aplica f_sl_tp al dibujar, para que el Virtual Trade Tracker
-    // y el payload JSON no diverjan de la línea pintada en el gráfico.
-    if not na(dolTpBull) and dolTpBull > _tp1Val
-        _tp2Val := dolTpBull
-    int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
-    f_sl_tp(true, _slVal, close, atr, riskReward, true, showTP2, dolTpBull)
-    alert(f_signal_json("INST BUY", close, _slVal, _tp1Val, _tp2Val, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
-    if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
-        vtBullSL := _slVal
-        vtBullTP1 := _tp1Val
-        vtBullTP2 := _tp2Val
-        vtBullTP1Done := false
-        vtBullActive := true
+    // v6.22 [FIX-CLAMP] SL/TP tomados del retorno de f_sl_tp, no recalculados a mano: el clamp de 3.5×ATR
+    // mueve el stop y antes solo se reflejaba en la línea dibujada, no en sizing/JSON/tracker.
+    [_eSl, _eTp1, _eTp2] = f_sl_tp(true, _slVal, close, atr, riskReward, true, showTP2, dolTpBull)
+    if not na(_eSl)
+        int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _eSl)
+        alert(f_signal_json("INST BUY", close, _eSl, _eTp1, _eTp2, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
+        if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
+            vtBullSL := _eSl
+            vtBullTP1 := _eTp1
+            vtBullTP2 := _eTp2
+            vtBullTP1Done := false
+            vtBullActive := true
 
 if signalSell and barstate.isconfirmed and maxSignalRankThisBar < 4 and sigDirThisBar <= 0
     maxSignalRankThisBar := 4
     sigDirThisBar := -1
     label.new(bar_index, high, "🏦 INST SELL\nScore: " + str.tostring(finalScoreBear, "#.1"), color=#FF5252, textcolor=color.white, style=label.style_label_down, size=size.tiny, tooltip=bearTooltip)
     float _slVal = obSlSellVal + atr * 0.1
-    float _rkVal = math.max(_slVal - close, atr * 0.1)
-    float _tp1Val = close - _rkVal * riskReward * 0.5
-    float _tp2Val = close - _rkVal * riskReward
-    // v6.21 DOL: mismo objetivo que aplica f_sl_tp al dibujar, para que el Virtual Trade Tracker
-    // y el payload JSON no diverjan de la línea pintada en el gráfico.
-    if not na(dolTpBear) and dolTpBear < _tp1Val
-        _tp2Val := dolTpBear
-    int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _slVal)
-    f_sl_tp(false, _slVal, close, atr, riskReward, true, showTP2, dolTpBear)
-    alert(f_signal_json("INST SELL", close, _slVal, _tp1Val, _tp2Val, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
-    if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
-        vtBearSL := _slVal
-        vtBearTP1 := _tp1Val
-        vtBearTP2 := _tp2Val
-        vtBearTP1Done := false
-        vtBearActive := true
+    // v6.22 [FIX-CLAMP] SL/TP tomados del retorno de f_sl_tp, no recalculados a mano: el clamp de 3.5×ATR
+    // mueve el stop y antes solo se reflejaba en la línea dibujada, no en sizing/JSON/tracker.
+    [_eSl, _eTp1, _eTp2] = f_sl_tp(false, _slVal, close, atr, riskReward, true, showTP2, dolTpBear)
+    if not na(_eSl)
+        int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _eSl)
+        alert(f_signal_json("INST SELL", close, _eSl, _eTp1, _eTp2, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
+        if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
+            vtBearSL := _eSl
+            vtBearTP1 := _eTp1
+            vtBearTP2 := _eTp2
+            vtBearTP1Done := false
+            vtBearActive := true
 
 bool nearBullOBAlert = false
 bool nearBearOBAlert = false
