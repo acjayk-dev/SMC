@@ -1,0 +1,560 @@
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// INSTITUTIONAL TREND MASTER v2.0 | TF óptimo: 5m–4H | Activo: Índices/Futuros/Forex/Cripto
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Motor de tendencia de grado institucional. Seis analíticas independientes fusionadas en un
+// score normalizado [-100, +100] con máquina de estados e histéresis:
+//
+//   1. TRENDLINES ESTRUCTURALES  — swings confirmados (sin repaint), validación de "línea limpia",
+//                                  ruptura con buffer ATR + confirmación opcional por volumen.
+//   2. CANAL DE ERROR ESTÁNDAR   — regresión por mínimos cuadrados con bandas construidas sobre la
+//                                  desviación de los RESIDUOS (SE = σ_y·√(1−R²)·√(n/(n−2))),
+//                                  no sobre σ del precio. Es el canal estadísticamente correcto.
+//   3. CALIDAD DE TENDENCIA (R²) — coeficiente de determinación: pondera la pendiente por cuán bien
+//                                  el precio se ajusta realmente a una recta (filtro quant clásico).
+//   4. KAMA (Kaufman)            — media adaptativa por Efficiency Ratio; acelera en impulso,
+//                                  se aplana en ruido. Pendiente normalizada en unidades de ATR.
+//   5. ADX / DMI                 — régimen de tendencia vs. rango + dirección dominante.
+//   6. SESGO MULTI-TIMEFRAME     — 2 TF superiores, patrón NO-REPAINT (expr[1] + lookahead_on).
+//
+// v2.0 — Reescritura sobre v1.0. Correcciones de lógica documentadas en el bloque CHANGELOG.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// CHANGELOG v1.0 → v2.0 (fallos corregidos)
+//   [FIX-01] Canal de regresión usaba ta.stdev(close) = dispersión del PRECIO. En tendencia el
+//            canal salía 3-5× más ancho de lo real. Ahora usa la desviación de los residuos.
+//   [FIX-02] Detección de cambio de estado se hacía comparando strings contra una var actualizada
+//            en cada tick → en tiempo real el "estado previo" se igualaba al actual y las alertas
+//            de flip nunca disparaban. Ahora es un int con referencia histórica [1].
+//   [FIX-03] El sesgo por ruptura de trendline no decaía: una ruptura de hace 500 velas seguía
+//            aportando al score indefinidamente. Ahora decae linealmente en `breakMemory` velas.
+//   [FIX-04] Las trendlines nacían ya perforadas (el pivote se confirma con `pivotLen` velas de
+//            retraso) y disparaban una ruptura falsa en su propia vela de creación. Ahora se
+//            valida que la recta no haya sido violada por ningún cierre antes de instalarla.
+//   [FIX-05] Las líneas rotas nunca se eliminaban → saturación visual. Ahora hay cementerio FIFO.
+//   [FIX-06] División int/int truncaba a 0 en los factores de decaimiento/corrección.
+//   [FIX-07] KAMA recorría un loop O(len) por vela; sustituido por math.sum vectorizado.
+//   [FIX-08] request.security sin patrón anti-repaint y sin protección ante HTF < TF del gráfico.
+//   [FIX-09] Pendiente y KAMA sin umbral de ruido: 0.0001 contaba como tendencia plena. Ahora
+//            ambos se normalizan por ATR y exigen superar un umbral mínimo.
+//   [FIX-10] Clasificación sin histéresis: el estado oscilaba en cada cruce del umbral.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+indicator("Institutional Trend Master v2.0", shorttitle="ITM v2.0", overlay=true,
+     max_lines_count=500, max_labels_count=500)
+max_bars_back(close, 500)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ [2] TIPOS (UDT)
+// ══════════════════════════════════════════════════════════════════════════════
+
+type Pivot
+    int   bar
+    float price
+
+type TrendLine
+    line  ln
+    int   x1          // barra ancla
+    float y1          // precio ancla
+    float slope       // pendiente por barra
+    bool  isRes       // true = resistencia, false = soporte
+    bool  broken
+    int   bornAt
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ [3] MÉTODOS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Valor proyectado de la recta en una barra arbitraria
+method levelAt(TrendLine tl, int b) =>
+    tl.y1 + tl.slope * (b - tl.x1)
+
+// Marca visualmente una recta como perforada
+method paintBroken(TrendLine tl, color c) =>
+    line.set_color(tl.ln, color.new(c, 55))
+    line.set_style(tl.ln, line.style_dotted)
+    line.set_width(tl.ln, 1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ [4] INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+grpTL = "═══ 📐 TRENDLINES ESTRUCTURALES ═══"
+showTL        = input.bool(true,  "Activar módulo de trendlines", group=grpTL,
+     tooltip="Gobierna el módulo completo: dibujo, detección de rupturas y su aportación al score. Al desactivarlo, el peso de la ruptura se excluye también del denominador para que el score siga normalizado.")
+pivotLen      = input.int(12, "Longitud de swing (pivote)", minval=3, maxval=50, group=grpTL,
+     tooltip="Barras a cada lado para confirmar un swing. El pivote se confirma con este retraso — es el precio de no repintar.\nScalping 5-8 · Intradía 10-15 · Swing 20-35")
+maxPivots     = input.int(8,  "Pivotes en memoria", minval=2, maxval=30, group=grpTL)
+tlMode        = input.string("Reversión (R↘ / S↗)", "Tipo de recta admitida", options=["Reversión (R↘ / S↗)", "Todas las pendientes"], group=grpTL,
+     tooltip="Reversión: solo resistencias descendentes y soportes ascendentes — las rectas cuya ruptura es un cambio de régimen genuino.\nTodas: incluye también rectas de canal (resistencia ascendente / soporte descendente).")
+tlBufferAtr   = input.float(0.10, "Buffer de ruptura (× ATR)", minval=0.0, maxval=2.0, step=0.05, group=grpTL,
+     tooltip="El cierre debe superar la recta por este margen. Filtra perforaciones marginales de un tick.")
+breakByClose  = input.bool(true,  "Ruptura por cierre (no por mecha)", group=grpTL)
+useVolBreak   = input.bool(false, "Exigir volumen en la ruptura", group=grpTL,
+     tooltip="Requiere volumen > media × factor. Desactívalo en Forex spot y símbolos sin volumen real.")
+volFactor     = input.float(1.3,  "Factor de volumen", minval=1.0, maxval=5.0, step=0.1, group=grpTL)
+breakCooldown = input.int(5,  "Cooldown entre rupturas (velas)", minval=1, maxval=100, group=grpTL)
+maxScanBars   = input.int(200, "Máx. velas de validación de recta", minval=20, maxval=400, group=grpTL,
+     tooltip="Ventana máxima para verificar que la recta no fue violada antes de instalarla. Más alto = más estricto y más costoso.")
+maxRetired    = input.int(6,  "Líneas rotas conservadas en pantalla", minval=0, maxval=30, group=grpTL)
+showBreakLbl  = input.bool(true, "Etiquetas de ruptura", group=grpTL)
+
+grpReg = "═══ 📊 CANAL DE ERROR ESTÁNDAR (Regresión Lineal) ═══"
+showReg     = input.bool(true, "Mostrar canal", group=grpReg)
+regLen      = input.int(100, "Longitud de regresión", minval=20, maxval=300, group=grpReg,
+     tooltip="Ventana de mínimos cuadrados. Mayor = tendencia más estructural y menos reactiva.")
+regMult1    = input.float(1.0, "Banda interna (× SE)", minval=0.25, maxval=4.0, step=0.25, group=grpReg)
+regMult2    = input.float(2.0, "Banda externa (× SE)", minval=0.5,  maxval=5.0, step=0.25, group=grpReg)
+showOuter   = input.bool(true, "Mostrar banda externa", group=grpReg)
+slopeMinAtr = input.float(0.03, "Pendiente mínima (× ATR por vela)", minval=0.0, maxval=1.0, step=0.01, group=grpReg,
+     tooltip="Umbral de ruido: por debajo de esta pendiente normalizada la regresión se considera plana y no aporta dirección.")
+
+grpKama = "═══ ⚙️ KAMA ADAPTATIVO (Kaufman Efficiency Ratio) ═══"
+showKama     = input.bool(true, "Mostrar KAMA", group=grpKama)
+kamaErLen    = input.int(10, "Periodo Efficiency Ratio", minval=2, maxval=50, group=grpKama)
+kamaFast     = input.int(2,  "Constante rápida", minval=2,  maxval=10, group=grpKama)
+kamaSlow     = input.int(30, "Constante lenta",  minval=10, maxval=60, group=grpKama)
+kamaSlopeLen = input.int(3,  "Velas para medir pendiente KAMA", minval=1, maxval=20, group=grpKama)
+kamaMinAtr   = input.float(0.03, "Pendiente KAMA mínima (× ATR)", minval=0.0, maxval=1.0, step=0.01, group=grpKama)
+
+grpStr = "═══ 🧭 FUERZA DE TENDENCIA ═══"
+adxLen    = input.int(14, "Periodo DI", minval=2, maxval=50, group=grpStr)
+adxSmooth = input.int(14, "Suavizado ADX", minval=2, maxval=50, group=grpStr)
+adxMin    = input.float(20.0, "Umbral ADX", minval=5.0, maxval=50.0, step=0.5, group=grpStr,
+     tooltip="Estándar institucional: ADX > 20-25 confirma régimen direccional; por debajo, rango.")
+atrLen    = input.int(14, "Periodo ATR (normalización)", minval=2, maxval=100, group=grpStr)
+minR2     = input.float(0.35, "R² mínimo para 'tendencia de calidad'", minval=0.0, maxval=1.0, step=0.05, group=grpStr,
+     tooltip="Coeficiente de determinación de la regresión. R² alto = el precio avanza en línea recta (tendencia limpia); R² bajo = movimiento errático o lateral.")
+
+grpMTF = "═══ 🕐 SESGO MULTI-TIMEFRAME (no repinta) ═══"
+htf1TF = input.timeframe("60",  "Timeframe superior 1", group=grpMTF,
+     tooltip="Si es inferior al TF del gráfico se ignora automáticamente y se usa el TF del gráfico.")
+htf2TF = input.timeframe("240", "Timeframe superior 2", group=grpMTF)
+
+grpW = "═══ ⚖️ PESOS DEL SCORE ═══"
+wStruct = input.float(1.50, "Estructura HH/HL", minval=0.0, maxval=5.0, step=0.25, group=grpW)
+wKama   = input.float(1.00, "KAMA",             minval=0.0, maxval=5.0, step=0.25, group=grpW)
+wAdx    = input.float(1.00, "ADX / DMI",        minval=0.0, maxval=5.0, step=0.25, group=grpW)
+wSlope  = input.float(1.50, "Pendiente × R²",   minval=0.0, maxval=5.0, step=0.25, group=grpW)
+wHtf1   = input.float(1.00, "MTF 1",            minval=0.0, maxval=5.0, step=0.25, group=grpW)
+wHtf2   = input.float(1.25, "MTF 2",            minval=0.0, maxval=5.0, step=0.25, group=grpW)
+wBreak  = input.float(1.00, "Ruptura trendline", minval=0.0, maxval=5.0, step=0.25, group=grpW)
+breakMemory = input.int(30, "Memoria de la ruptura (velas)", minval=5, maxval=200, group=grpW,
+     tooltip="El impulso de una ruptura decae linealmente hasta anularse tras estas velas.")
+
+grpState = "═══ 🎚️ MÁQUINA DE ESTADOS (histéresis) ═══"
+enterTh  = input.float(45.0, "Score de entrada a tendencia (%)", minval=10.0, maxval=95.0, step=5.0, group=grpState,
+     tooltip="El estado pasa a BULL/BEAR al superar este score.")
+exitTh   = input.float(20.0, "Score de salida a neutral (%)",   minval=0.0,  maxval=90.0, step=5.0, group=grpState,
+     tooltip="El estado NO vuelve a neutral hasta caer por debajo de este valor. La brecha entre ambos umbrales es la histéresis que elimina el parpadeo.")
+strongTh = input.float(70.0, "Score de tendencia FUERTE (%)",   minval=20.0, maxval=100.0, step=5.0, group=grpState)
+
+grpVis = "═══ 🎨 VISUAL ═══"
+bullColor = input.color(#00E676, "Alcista", group=grpVis)
+bearColor = input.color(#FF5252, "Bajista", group=grpVis)
+neutColor = input.color(#9E9E9E, "Neutral", group=grpVis)
+regColor  = input.color(#FFB300, "Canal de regresión", group=grpVis)
+tlWidth   = input.int(2, "Grosor de trendlines", minval=1, maxval=4, group=grpVis)
+showBg    = input.bool(true,  "Fondo por tendencia fuerte", group=grpVis)
+showBars  = input.bool(false, "Colorear velas por estado", group=grpVis)
+
+grpDash = "═══ 📋 DASHBOARD ═══"
+showDash = input.bool(true, "Mostrar dashboard", group=grpDash)
+dashPos  = input.string(position.top_right, "Posición",
+     options=[position.top_right, position.top_left, position.bottom_right, position.bottom_left, position.middle_right], group=grpDash)
+dashSize = input.string("Small", "Tamaño de texto", options=["Tiny", "Small", "Normal"], group=grpDash)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ [5] FUNCIONES HELPER
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Añade un pivote al frente del array y recorta la cola (FIFO acotado)
+f_addPivot(arr, b, p, cap) =>
+    array.unshift(arr, Pivot.new(b, p))
+    if array.size(arr) > cap
+        array.pop(arr)
+
+// Cementerio FIFO de líneas rotas: conserva las N más recientes, borra el resto
+f_bury(store, ln, keep) =>
+    if not na(ln)
+        array.push(store, ln)
+        while array.size(store) > keep
+            line.delete(array.shift(store))
+
+// [FIX-04] Valida que una recta candidata no haya sido violada por ningún cierre entre su ancla
+// y la vela actual. Sin esto, la recta nace ya perforada (el pivote llega con `pivotLen` velas de
+// retraso) y dispara una ruptura falsa en su propia vela de creación.
+f_lineClean(x1, y1, slope, isRes, buf, cap) =>
+    int span = math.min(bar_index - x1, cap)
+    bool ok  = true
+    if span > 0
+        for i = 0 to span - 1
+            float lvl = y1 + slope * ((bar_index - i) - x1)
+            float c   = close[i]
+            if isRes ? c > lvl + buf : c < lvl - buf
+                ok := false
+                break
+    ok
+
+// [FIX-07] KAMA vectorizado — el Efficiency Ratio ya no necesita un loop O(len) por vela.
+f_kama(src, erLen, fastLen, slowLen) =>
+    float direction = math.abs(src - src[erLen])
+    float noise     = math.sum(math.abs(nz(ta.change(src))), erLen)
+    float er        = noise > 0 ? direction / noise : 0.0
+    float fastSC    = 2.0 / (fastLen + 1)
+    float slowSC    = 2.0 / (slowLen + 1)
+    float sc        = math.pow(er * (fastSC - slowSC) + slowSC, 2)
+    var float k = na
+    k := na(k) ? src : k + sc * (src - k)
+    k
+
+// Sesgo direccional por apilamiento de EMAs. El desplazamiento [1] es lo que, junto a
+// lookahead_on en request.security, produce el patrón NO-REPAINT documentado por TradingView:
+// se lee siempre la última vela CERRADA del TF superior, nunca la que está en formación.
+f_htfBias() =>
+    float e9  = ta.ema(close, 9)
+    float e21 = ta.ema(close, 21)
+    float e50 = ta.ema(close, 50)
+    int raw = e9 > e21 and e21 > e50 ? 1 : e9 < e21 and e21 < e50 ? -1 : 0
+    raw[1]
+
+// [FIX-08] Un TF superior menor que el del gráfico devuelve datos engañosos (mezcla granularidades).
+// Se degrada al TF del gráfico.
+f_resolveTF(tf) =>
+    timeframe.in_seconds(tf) < timeframe.in_seconds(timeframe.period) ? timeframe.period : tf
+
+// Medidor textual de 10 segmentos para el dashboard
+f_meter(pct) =>
+    int filled = math.round(math.min(math.abs(pct), 100.0) / 10.0)
+    string s = ""
+    for i = 1 to 10
+        s := s + (i <= filled ? "█" : "░")
+    s
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ [6] CÁLCULOS CORE
+// ══════════════════════════════════════════════════════════════════════════════
+
+float atrVal = ta.atr(atrLen)
+float avgVol = ta.sma(nz(volume), 20)
+float tlBuf  = tlBufferAtr * atrVal
+
+// ── Canal de Error Estándar ──────────────────────────────────────────────────
+// [FIX-01] v1.0 usaba ta.stdev(close) = dispersión del PRECIO alrededor de su media, que en una
+// tendencia está dominada por la propia deriva y produce un canal 3-5× más ancho de lo real.
+// El canal correcto se construye sobre la dispersión de los RESIDUOS respecto a la recta:
+//     SS_res = SS_tot · (1 − R²)   ⇒   σ_res = σ_y · √(1 − R²)
+// con la corrección de grados de libertad √(n/(n−2)) propia del error estándar de una regresión.
+float regEnd   = ta.linreg(close, regLen, 0)
+float regPrev  = ta.linreg(close, regLen, 1)
+float regSlope = regEnd - regPrev                       // pendiente exacta por vela
+float rCorr    = nz(ta.correlation(close, bar_index, regLen))
+float rSq      = math.min(math.max(rCorr * rCorr, 0.0), 1.0)
+float sdClose  = ta.stdev(close, regLen)
+float dofAdj   = math.sqrt(regLen * 1.0 / math.max(regLen - 2, 1))   // [FIX-06] int/int truncaría a 1
+float stdErr   = sdClose * math.sqrt(math.max(1.0 - rSq, 0.0)) * dofAdj
+
+float regU1 = regEnd + stdErr * regMult1
+float regL1 = regEnd - stdErr * regMult1
+float regU2 = regEnd + stdErr * regMult2
+float regL2 = regEnd - stdErr * regMult2
+
+// [FIX-09] Pendiente normalizada en unidades de ATR por vela, con umbral de ruido.
+float slopeAtr = atrVal > 0 ? regSlope / atrVal : 0.0
+int   slopeDir = slopeAtr >  slopeMinAtr ?  1 : slopeAtr < -slopeMinAtr ? -1 : 0
+
+// ── KAMA ─────────────────────────────────────────────────────────────────────
+float kama      = f_kama(close, kamaErLen, kamaFast, kamaSlow)
+float kamaSlope = atrVal > 0 ? (kama - kama[kamaSlopeLen]) / atrVal : 0.0
+int   kamaDir   = kamaSlope > kamaMinAtr ? 1 : kamaSlope < -kamaMinAtr ? -1 : 0
+
+// ── ADX / DMI ────────────────────────────────────────────────────────────────
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxSmooth)
+bool adxStrong = adxVal > adxMin
+int  adxDir    = adxStrong ? (diPlus > diMinus ? 1 : -1) : 0
+
+// ── Multi-Timeframe (no repinta) ─────────────────────────────────────────────
+tf1 = f_resolveTF(htf1TF)
+tf2 = f_resolveTF(htf2TF)
+htf1Bias = request.security(syminfo.tickerid, tf1, f_htfBias(), lookahead=barmerge.lookahead_on)
+htf2Bias = request.security(syminfo.tickerid, tf2, f_htfBias(), lookahead=barmerge.lookahead_on)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ [7] ESTRUCTURA DE SWINGS
+// ══════════════════════════════════════════════════════════════════════════════
+
+var array<Pivot> pivHighs = array.new<Pivot>()
+var array<Pivot> pivLows  = array.new<Pivot>()
+
+float ph = ta.pivothigh(pivotLen, pivotLen)
+float pl = ta.pivotlow(pivotLen, pivotLen)
+
+if not na(ph)
+    f_addPivot(pivHighs, bar_index - pivotLen, ph, maxPivots)
+if not na(pl)
+    f_addPivot(pivLows, bar_index - pivotLen, pl, maxPivots)
+
+bool hasStruct = array.size(pivHighs) >= 2 and array.size(pivLows) >= 2
+bool structUp   = hasStruct and array.get(pivHighs, 0).price > array.get(pivHighs, 1).price and array.get(pivLows, 0).price > array.get(pivLows, 1).price
+bool structDown = hasStruct and array.get(pivHighs, 0).price < array.get(pivHighs, 1).price and array.get(pivLows, 0).price < array.get(pivLows, 1).price
+int  structDir  = structUp ? 1 : structDown ? -1 : 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ [8] TRENDLINES DINÁMICAS
+// ══════════════════════════════════════════════════════════════════════════════
+
+var TrendLine   resTL     = na
+var TrendLine   supTL     = na
+var array<line> graveyard = array.new<line>()
+var int lastBreakBar = na
+var int lastBreakDir = 0
+var int lastResBrk   = -999999
+var int lastSupBrk   = -999999
+
+bool onlyReversal = tlMode == "Reversión (R↘ / S↗)"
+
+// ── Instalación de la resistencia ────────────────────────────────────────────
+// Regla: solo se sustituye la recta activa por una candidata VÁLIDA (pendiente admitida y no
+// violada). Si la candidata no es válida se conserva la recta anterior — nunca se degrada el
+// estado del gráfico por un swing que no produce una recta operable.
+if showTL and not na(ph) and array.size(pivHighs) >= 2
+    Pivot a = array.get(pivHighs, 0)      // pivote más reciente
+    Pivot b = array.get(pivHighs, 1)      // pivote anterior
+    if a.bar > b.bar
+        float sl = (a.price - b.price) / (a.bar - b.bar)
+        if not onlyReversal or sl <= 0
+            if f_lineClean(b.bar, b.price, sl, true, tlBuf, maxScanBars)
+                if not na(resTL)
+                    if resTL.broken
+                        f_bury(graveyard, resTL.ln, maxRetired)   // ya rota: pasa al cementerio
+                    else
+                        line.delete(resTL.ln)                     // aún viva: se descarta en silencio
+                line newLn = line.new(b.bar, b.price, a.bar, a.price, extend=extend.right,
+                     color=bearColor, width=tlWidth, style=line.style_solid)
+                resTL := TrendLine.new(newLn, b.bar, b.price, sl, true, false, bar_index)
+
+// ── Instalación del soporte ──────────────────────────────────────────────────
+if showTL and not na(pl) and array.size(pivLows) >= 2
+    Pivot a = array.get(pivLows, 0)
+    Pivot b = array.get(pivLows, 1)
+    if a.bar > b.bar
+        float sl = (a.price - b.price) / (a.bar - b.bar)
+        if not onlyReversal or sl >= 0
+            if f_lineClean(b.bar, b.price, sl, false, tlBuf, maxScanBars)
+                if not na(supTL)
+                    if supTL.broken
+                        f_bury(graveyard, supTL.ln, maxRetired)
+                    else
+                        line.delete(supTL.ln)
+                line newLn = line.new(b.bar, b.price, a.bar, a.price, extend=extend.right,
+                     color=bullColor, width=tlWidth, style=line.style_solid)
+                supTL := TrendLine.new(newLn, b.bar, b.price, sl, false, false, bar_index)
+
+// ── Detección de ruptura (solo en vela cerrada — anti-repaint) ───────────────
+bool volOK = not useVolBreak or (avgVol > 0 and nz(volume) > avgVol * volFactor)
+bool resBreak = false
+bool supBreak = false
+
+if not na(resTL) and not resTL.broken and barstate.isconfirmed
+    float lvl = resTL.levelAt(bar_index)
+    if (breakByClose ? close > lvl + tlBuf : high > lvl + tlBuf) and volOK
+        resTL.broken := true
+        resTL.paintBroken(neutColor)
+        if bar_index - lastResBrk >= breakCooldown
+            resBreak     := true
+            lastResBrk   := bar_index
+            lastBreakBar := bar_index
+            lastBreakDir := 1
+
+if not na(supTL) and not supTL.broken and barstate.isconfirmed
+    float lvl = supTL.levelAt(bar_index)
+    if (breakByClose ? close < lvl - tlBuf : low < lvl - tlBuf) and volOK
+        supTL.broken := true
+        supTL.paintBroken(neutColor)
+        if bar_index - lastSupBrk >= breakCooldown
+            supBreak     := true
+            lastSupBrk   := bar_index
+            lastBreakBar := bar_index
+            lastBreakDir := -1
+
+if showBreakLbl and resBreak
+    label.new(bar_index, high, "▲ BREAK", style=label.style_label_down, color=bullColor,
+         textcolor=color.white, size=size.small)
+if showBreakLbl and supBreak
+    label.new(bar_index, low, "▼ BREAK", style=label.style_label_up, color=bearColor,
+         textcolor=color.white, size=size.small)
+
+// [FIX-03] El impulso de una ruptura decae linealmente y se anula tras `breakMemory` velas.
+// En v1.0 el sesgo era permanente: una ruptura de hace 500 velas seguía puntuando.
+float cBreak = 0.0
+if not na(lastBreakBar) and lastBreakDir != 0
+    int age = bar_index - lastBreakBar
+    if age <= breakMemory
+        cBreak := lastBreakDir * math.max(0.0, 1.0 - (age * 1.0) / math.max(breakMemory, 1))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ [9] SCORE COMPUESTO NORMALIZADO  [-100, +100]
+// ══════════════════════════════════════════════════════════════════════════════
+// Cada componente vive en [-1, +1] y se pondera. La pendiente se multiplica por R²: una
+// pendiente pronunciada sobre un precio errático (R² bajo) aporta poco; una pendiente moderada
+// sobre un avance limpio (R² alto) aporta casi todo su peso. Es el criterio quant de calidad
+// de tendencia, no solo de dirección.
+
+float cStruct = structDir
+float cKama   = kamaDir
+float cAdx    = adxDir
+float cSlope  = slopeDir * rSq
+float cHtf1   = htf1Bias
+float cHtf2   = htf2Bias
+
+// Con el módulo de trendlines desactivado, cBreak es constantemente 0. Su peso debe salir TAMBIÉN
+// del denominador, o el score quedaría sistemáticamente deflactado (~12% con los pesos por defecto).
+float wBreakEff = showTL ? wBreak : 0.0
+
+float rawScore = wStruct * cStruct + wKama * cKama + wAdx * cAdx + wSlope * cSlope +
+     wHtf1 * cHtf1 + wHtf2 * cHtf2 + wBreakEff * cBreak
+float maxScore = wStruct + wKama + wAdx + wSlope + wHtf1 + wHtf2 + wBreakEff
+float scorePct = maxScore > 0 ? 100.0 * rawScore / maxScore : 0.0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ [10] MÁQUINA DE ESTADOS CON HISTÉRESIS
+// ══════════════════════════════════════════════════════════════════════════════
+// [FIX-10] Entrar exige superar `enterTh`; salir exige caer por debajo de `exitTh`. La brecha
+// entre ambos es la banda muerta que impide el parpadeo del estado en cada cruce del umbral.
+
+var int trendState = 0                                  // 1 = alcista · -1 = bajista · 0 = neutral
+float effExit = math.min(exitTh, enterTh)               // saneo: exit nunca por encima de enter
+
+if scorePct >= enterTh
+    trendState := 1
+else if scorePct <= -enterTh
+    trendState := -1
+else if trendState == 1 and scorePct < effExit
+    trendState := 0
+else if trendState == -1 and scorePct > -effExit
+    trendState := 0
+
+bool isStrong  = math.abs(scorePct) >= strongTh and adxStrong and rSq >= minR2
+bool isQuality = rSq >= minR2
+
+color stateColor = trendState == 1 ? bullColor : trendState == -1 ? bearColor : neutColor
+string stateTxt  = trendState == 1 ? (isStrong ? "ALCISTA FUERTE 🟢🟢" : "ALCISTA 🟢") :
+     trendState == -1 ? (isStrong ? "BAJISTA FUERTE 🔴🔴" : "BAJISTA 🔴") : "NEUTRAL / RANGO ⚪"
+
+// [FIX-02] trendState es un int persistente: trendState[1] devuelve el valor CERRADO de la vela
+// anterior, así que el flip se detecta correctamente también en tiempo real. En v1.0 se comparaban
+// strings contra una var reasignada en cada tick, lo que anulaba la detección intrabar.
+bool flipBull = trendState == 1  and trendState[1] != 1
+bool flipBear = trendState == -1 and trendState[1] != -1
+bool toNeutral = trendState == 0 and trendState[1] != 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ [11] VISUALIZACIÓN
+// ══════════════════════════════════════════════════════════════════════════════
+
+p_basis = plot(showReg ? regEnd : na, "Regresión (media)", color=color.new(regColor, 10), linewidth=2)
+p_u1    = plot(showReg ? regU1 : na, "SE +1", color=color.new(regColor, 55))
+p_l1    = plot(showReg ? regL1 : na, "SE -1", color=color.new(regColor, 55))
+p_u2    = plot(showReg and showOuter ? regU2 : na, "SE +2", color=color.new(regColor, 75))
+p_l2    = plot(showReg and showOuter ? regL2 : na, "SE -2", color=color.new(regColor, 75))
+fill(p_u1, p_l1, color=color.new(regColor, 93), title="Zona ±1 SE")
+fill(p_u2, p_u1, color=color.new(regColor, 96), title="Zona superior")
+fill(p_l1, p_l2, color=color.new(regColor, 96), title="Zona inferior")
+
+color kamaColor = kamaDir == 1 ? bullColor : kamaDir == -1 ? bearColor : neutColor
+plot(showKama ? kama : na, "KAMA", color=kamaColor, linewidth=3)
+
+bgcolor(showBg and isStrong ? color.new(stateColor, 92) : na, title="Fondo tendencia fuerte")
+barcolor(showBars ? stateColor : na, title="Velas por estado")
+
+// Series expuestas para alertas, screeners y otros scripts (solo en la ventana de datos)
+plot(scorePct,   "Score de Tendencia %", display=display.data_window)
+plot(trendState, "Estado (-1/0/1)",      display=display.data_window)
+plot(rSq,        "R² Calidad",           display=display.data_window)
+plot(slopeAtr,   "Pendiente (ATR/vela)", display=display.data_window)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ [12] DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+if showDash and barstate.islast
+    var table dash = table.new(dashPos, 2, 11, bgcolor=color.new(#141828, 8),
+         border_width=1, border_color=color.new(color.gray, 75))
+    sz = switch dashSize
+        "Tiny"  => size.tiny
+        "Small" => size.small
+        =>         size.normal
+    color bgc = #141828
+    color lbl = #8892b0
+
+    table.cell(dash, 0, 0, "📈 TREND MASTER", bgcolor=bgc, text_color=#FFD700, text_size=sz)
+    table.cell(dash, 1, 0, syminfo.ticker + " · " + timeframe.period, bgcolor=bgc, text_color=color.white, text_size=sz)
+
+    table.cell(dash, 0, 1, "ESTADO", bgcolor=bgc, text_color=lbl, text_size=sz)
+    table.cell(dash, 1, 1, stateTxt, bgcolor=bgc, text_color=stateColor, text_size=sz)
+
+    table.cell(dash, 0, 2, "Score", bgcolor=bgc, text_color=lbl, text_size=sz)
+    table.cell(dash, 1, 2, f_meter(scorePct) + "  " + str.tostring(scorePct, "#") + "%",
+         bgcolor=bgc, text_color=stateColor, text_size=sz)
+
+    table.cell(dash, 0, 3, "Estructura", bgcolor=bgc, text_color=lbl, text_size=sz)
+    table.cell(dash, 1, 3, structUp ? "HH / HL ▲" : structDown ? "LH / LL ▼" : "Mixta ▬",
+         bgcolor=bgc, text_color=structUp ? bullColor : structDown ? bearColor : neutColor, text_size=sz)
+
+    table.cell(dash, 0, 4, "Calidad R²", bgcolor=bgc, text_color=lbl, text_size=sz)
+    table.cell(dash, 1, 4, str.tostring(rSq, "0.00") + (rSq >= 0.7 ? " Alta" : isQuality ? " Media" : " Baja"),
+         bgcolor=bgc, text_color=rSq >= 0.7 ? bullColor : isQuality ? #FFB300 : neutColor, text_size=sz)
+
+    table.cell(dash, 0, 5, "Pendiente", bgcolor=bgc, text_color=lbl, text_size=sz)
+    table.cell(dash, 1, 5, str.tostring(slopeAtr, "0.000") + " ATR/vela",
+         bgcolor=bgc, text_color=slopeDir == 1 ? bullColor : slopeDir == -1 ? bearColor : neutColor, text_size=sz)
+
+    table.cell(dash, 0, 6, "ADX (" + str.tostring(adxLen) + ")", bgcolor=bgc, text_color=lbl, text_size=sz)
+    table.cell(dash, 1, 6, str.tostring(adxVal, "0.0") + (adxStrong ? " Direccional" : " Rango"),
+         bgcolor=bgc, text_color=adxStrong ? (adxDir == 1 ? bullColor : bearColor) : neutColor, text_size=sz)
+
+    table.cell(dash, 0, 7, "KAMA", bgcolor=bgc, text_color=lbl, text_size=sz)
+    table.cell(dash, 1, 7, kamaDir == 1 ? "Alcista ▲" : kamaDir == -1 ? "Bajista ▼" : "Plano ▬",
+         bgcolor=bgc, text_color=kamaColor, text_size=sz)
+
+    table.cell(dash, 0, 8, "MTF " + tf1, bgcolor=bgc, text_color=lbl, text_size=sz)
+    table.cell(dash, 1, 8, htf1Bias == 1 ? "Alcista 🟢" : htf1Bias == -1 ? "Bajista 🔴" : "Neutral ⚪",
+         bgcolor=bgc, text_color=htf1Bias == 1 ? bullColor : htf1Bias == -1 ? bearColor : neutColor, text_size=sz)
+
+    table.cell(dash, 0, 9, "MTF " + tf2, bgcolor=bgc, text_color=lbl, text_size=sz)
+    table.cell(dash, 1, 9, htf2Bias == 1 ? "Alcista 🟢" : htf2Bias == -1 ? "Bajista 🔴" : "Neutral ⚪",
+         bgcolor=bgc, text_color=htf2Bias == 1 ? bullColor : htf2Bias == -1 ? bearColor : neutColor, text_size=sz)
+
+    // Distancia a la recta activa, expresada en ATR — cuán cerca está el precio del gatillo
+    string tlTxt = "—"
+    color  tlCol = neutColor
+    if not na(resTL) and not resTL.broken and atrVal > 0
+        tlTxt := "R a " + str.tostring((resTL.levelAt(bar_index) - close) / atrVal, "0.0") + " ATR"
+        tlCol := bearColor
+    if not na(supTL) and not supTL.broken and atrVal > 0
+        string sTxt = "S a " + str.tostring((close - supTL.levelAt(bar_index)) / atrVal, "0.0") + " ATR"
+        tlTxt := tlTxt == "—" ? sTxt : tlTxt + " | " + sTxt
+        tlCol := tlCol == neutColor ? bullColor : color.white
+    table.cell(dash, 0, 10, "Trendlines", bgcolor=bgc, text_color=lbl, text_size=sz)
+    table.cell(dash, 1, 10, tlTxt, bgcolor=bgc, text_color=tlCol, text_size=sz)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ [13] ALERTAS
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(resBreak, title="Ruptura alcista de trendline",
+     message="{{ticker}} {{interval}} — Ruptura ALCISTA de línea de tendencia @ {{close}}")
+alertcondition(supBreak, title="Ruptura bajista de trendline",
+     message="{{ticker}} {{interval}} — Ruptura BAJISTA de línea de tendencia @ {{close}}")
+alertcondition(flipBull, title="Cambio a tendencia alcista",
+     message="{{ticker}} {{interval}} — Estado ALCISTA confirmado @ {{close}}")
+alertcondition(flipBear, title="Cambio a tendencia bajista",
+     message="{{ticker}} {{interval}} — Estado BAJISTA confirmado @ {{close}}")
+alertcondition(toNeutral, title="Pérdida de tendencia (neutral)",
+     message="{{ticker}} {{interval}} — Tendencia agotada, estado NEUTRAL @ {{close}}")
+
+// Alerta dinámica con el detalle completo del score (una sola alerta configurable)
+if barstate.isconfirmed and (flipBull or flipBear)
+    alert(syminfo.ticker + " " + timeframe.period + " — " + stateTxt +
+         " | Score " + str.tostring(scorePct, "#") + "%" +
+         " | R² " + str.tostring(rSq, "0.00") +
+         " | ADX " + str.tostring(adxVal, "0.0"), alert.freq_once_per_bar_close)
