@@ -81,6 +81,21 @@ showSLTP     = input.bool(true, "Dibujar SL / TP", group=grpSig)
 accountBal   = input.float(10000.0, "Balance de cuenta ($)", minval=100.0, group=grpSig)
 riskPct      = input.float(1.0, "Riesgo por trade (%)", minval=0.1, maxval=10.0, step=0.1, group=grpSig)
 
+grpVelez  = "═══ 🐘 OLIVER VELEZ ═══"
+useVelez        = input.bool(true, "Usar patrones Velez como confluencia", group=grpVelez, tooltip="Suma peso al score cuando aparece 180 Reversal, Elephant Bar, RBI/GBI o VBS/VSS a favor del trade.")
+showVelez       = input.bool(true, "Mostrar etiquetas Velez", group=grpVelez)
+velezWeight     = input.float(1.5, "Peso confluencia Velez", minval=0.0, maxval=5.0, step=0.5, group=grpVelez)
+showVelezSMA    = input.bool(true, "Mostrar SMA 20 (línea Velez)", group=grpVelez)
+eleBodyPct      = input.int(75, "Elephant Min Body %", minval=50, maxval=95, group=grpVelez)
+eleAtrMult      = input.float(1.3, "Elephant Size (×ATR)", minval=0.5, step=0.1, group=grpVelez)
+eleVolMult      = input.float(1.2, "Elephant Volume (×Avg)", minval=0.5, step=0.1, group=grpVelez)
+eleRequireClear = input.bool(true, "Elephant limpia 3 velas opuestas", group=grpVelez, tooltip="Metodología Velez: el 'institutional footprint' real (~87% follow-through) exige que la vela limpie el rango de 3+ velas previas del color opuesto, no solo tamaño/volumen.")
+useExhaustPenalty = input.bool(true, "Regla 3-5-8: penalizar sobreextensión", group=grpVelez, tooltip="Resta score al comprar/vender dentro de la 5ª (aviso) u 8ª (agotamiento) vela consecutiva del mismo color — no se persigue un movimiento exhausto.")
+
+grpStamp  = "═══ ⭐ SEÑAL NOVEL · STAMPEDE ═══"
+useStampede = input.bool(true, "Activar señal STAMPEDE (Velez × SMC)", group=grpStamp, tooltip="Fusión propietaria: barrida de liquidez con reclaim (SMC) que ADEMÁS es una Elephant Bar (Velez) en la misma vela, en zona correcta y Kill Zone. La institución caza stops Y deja huella visible al mismo tiempo — el setup de mayor convicción del script. Ignora el score mínimo por ser inherentemente de alta confluencia.")
+stampColor  = input.color(#FFD700, "STAMPEDE Color", group=grpStamp)
+
 grpVis    = "═══ 🎨 VISUAL & DASHBOARD ═══"
 showEMAs  = input.bool(true, "Mostrar EMAs (9/21)", group=grpVis)
 showDash  = input.bool(true, "Mostrar Dashboard", group=grpVis)
@@ -92,8 +107,16 @@ atr      = ta.atr(14)
 avgVol   = ta.sma(volume, 20)
 ema9     = ta.ema(close, 9)
 ema21    = ta.ema(close, 21)
+ema8     = ta.ema(close, 8)    // "lightning line" de Velez
+sma20    = ta.sma(close, 20)   // línea lenta de Velez (VBS/VSS)
 hasVol   = volume > avgVol * 1.2
 displace = (high - low) > atr * atrMult   // vela con desplazamiento real
+
+// ── Anatomía de vela (base para patrones Velez) ──
+isBullC  = close > open
+isBearC  = close < open
+bodySize = math.abs(close - open)
+rng      = high - low
 
 // ── HTF Bias (draw on liquidity direccional) — wrapper seguro sin lookahead ──
 f_htfTrend() =>
@@ -275,6 +298,52 @@ atBullFVG = f_inFVG(true)
 atBearFVG = f_inFVG(false)
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ██ PATRONES OLIVER VELEZ (portados del indicador SMC Pro grande)
+// ══════════════════════════════════════════════════════════════════════════════
+// Conteo de velas consecutivas del mismo color (Regla 3-5-8)
+var int consGreen = 0
+var int consRed   = 0
+consGreen := isBullC ? consGreen + 1 : 0
+consRed   := isBearC ? consRed + 1 : 0
+
+// ── Elephant Bar: cuerpo dominante + tamaño + volumen + LIMPIA 3 velas opuestas ──
+bodyPctV  = rng > 0 ? bodySize / rng * 100 : 0.0
+isBigBull = isBullC and bodyPctV >= eleBodyPct and bodySize >= atr * eleAtrMult
+isBigBear = isBearC and bodyPctV >= eleBodyPct and bodySize >= atr * eleAtrMult
+eleHi3    = ta.highest(high[1], 3)
+eleLo3    = ta.lowest(low[1], 3)
+eleClearsBull = not eleRequireClear or (isBearC[1] and isBearC[2] and isBearC[3] and close > eleHi3)
+eleClearsBear = not eleRequireClear or (isBullC[1] and isBullC[2] and isBullC[3] and close < eleLo3)
+elephantUp = isBigBull and close > ema8 and volume > avgVol * eleVolMult and eleClearsBull
+elephantDn = isBigBear and close < ema8 and volume > avgVol * eleVolMult and eleClearsBear
+
+// ── 180 Reversal: vela opuesta que engulle el cierre previo y rompe el extremo ──
+prevRed   = close[1] < open[1]
+prevGreen = close[1] > open[1]
+bull180 = prevRed   and isBullC and close > high[1] and open <= close[1] and bodySize > atr * 0.5
+bear180 = prevGreen and isBearC and close < low[1]  and open >= close[1] and bodySize > atr * 0.5
+
+// ── RBI / GBI (Red/Green Bar Ignored): continuación tras una vela pequeña opuesta ──
+smallRed   = isBearC[1] and math.abs(close[1] - open[1]) < atr * 0.5
+smallGreen = isBullC[1] and math.abs(close[1] - open[1]) < atr * 0.5
+rbiSignal = smallRed   and isBullC and close > high[1] and structTrend == 1  and volume > avgVol * 0.8
+gbiSignal = smallGreen and isBearC and close < low[1]  and structTrend == -1 and volume > avgVol * 0.8
+
+// ── VBS / VSS (Velez Buy/Sell Setup): pullback de 3+ velas hacia la SMA20 y giro ──
+vbsSignal = nz(consRed[1])   >= 3 and isBullC and close > high[1] and low  <= sma20 + atr * 0.3 and structTrend == 1
+vssSignal = nz(consGreen[1]) >= 3 and isBearC and close < low[1]  and high >= sma20 - atr * 0.3 and structTrend == -1
+
+// ── Regla 3-5-8: agotamiento por sobreextensión ──
+exhaust5Bull = consGreen == 5
+exhaust8Bull = consGreen == 8
+exhaust5Bear = consRed == 5
+exhaust8Bear = consRed == 8
+
+// Confluencia Velez agregada por dirección
+velezBull = useVelez and (elephantUp or bull180 or rbiSignal or vbsSignal)
+velezBear = useVelez and (elephantDn or bear180 or gbiSignal or vssSignal)
+
+// ══════════════════════════════════════════════════════════════════════════════
 // ██ SCORING DE CONFLUENCIA
 // ══════════════════════════════════════════════════════════════════════════════
 f_scoreLong() =>
@@ -287,6 +356,8 @@ f_scoreLong() =>
     s += inDiscount ? 1.5 : 0.0
     s += inKZ ? 1.0 : 0.0
     s += (hasVol and displace) ? 1.0 : 0.0
+    s += velezBull ? velezWeight : 0.0
+    s -= (useExhaustPenalty and exhaust8Bull) ? 2.0 : (useExhaustPenalty and exhaust5Bull) ? 1.0 : 0.0
     s
 
 f_scoreShort() =>
@@ -299,6 +370,8 @@ f_scoreShort() =>
     s += inPremium ? 1.5 : 0.0
     s += inKZ ? 1.0 : 0.0
     s += (hasVol and displace) ? 1.0 : 0.0
+    s += velezBear ? velezWeight : 0.0
+    s -= (useExhaustPenalty and exhaust8Bear) ? 2.0 : (useExhaustPenalty and exhaust5Bear) ? 1.0 : 0.0
     s
 
 scoreLong  = f_scoreLong()
@@ -313,6 +386,17 @@ cooldownOK = (bar_index - lastSignalBar) >= cooldownBars
 
 longSignal  = gateLong  and scoreLong  >= minScore and cooldownOK and barstate.isconfirmed and scoreLong >= scoreShort
 shortSignal = gateShort and scoreShort >= minScore and cooldownOK and barstate.isconfirmed and scoreShort >  scoreLong
+
+// ── ⭐ SEÑAL NOVEL: STAMPEDE (Velez × SMC) ──────────────────────────────────────
+// Barrida de liquidez CON reclaim (SMC) que en la MISMA vela es una Elephant Bar
+// (Velez) — la institución caza stops y estampa su huella a la vez. Ignora minScore
+// por ser inherentemente de máxima confluencia, pero conserva sesgo HTF / zona / KZ.
+stampedeBull = useStampede and sweepBull and elephantUp and cooldownOK and barstate.isconfirmed and (not useHtfBias or htfBias == 1)  and (not requireZone or inDiscount) and (not useKZ or inKZ)
+stampedeBear = useStampede and sweepBear and elephantDn and cooldownOK and barstate.isconfirmed and (not useHtfBias or htfBias == -1) and (not requireZone or inPremium)  and (not useKZ or inKZ)
+
+// Señales finales: STAMPEDE tiene prioridad; candado direccional (long gana empates)
+finalLong  = stampedeBull or longSignal
+finalShort = (stampedeBear or shortSignal) and not finalLong
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ GESTIÓN DE RIESGO (SL/TP + sizing) — Draw on Liquidity como objetivo
@@ -340,26 +424,32 @@ var float  lastTP1 = na
 var float  lastTP2 = na
 var int    lastQty = 0
 
-if longSignal
+if finalLong
     float sl = math.min(low, low[1]) - atr * 0.2
     [tp1, tp2, qty] = f_drawTrade(true, close, sl)
-    label.new(bar_index, low, "▲ LONG " + str.tostring(scoreLong, "#.#"),
-         yloc=yloc.belowbar, color=#00E676, textcolor=color.white, style=label.style_label_up, size=size.small)
+    string txt = stampedeBull ? "⭐🐘 STAMPEDE LONG" : "▲ LONG " + str.tostring(scoreLong, "#.#")
+    label.new(bar_index, low, txt, yloc=yloc.belowbar,
+         color=stampedeBull ? stampColor : #00E676,
+         textcolor=stampedeBull ? color.black : color.white,
+         style=label.style_label_up, size=stampedeBull ? size.normal : size.small)
     lastSignalBar := bar_index
-    lastDir := "LONG"
+    lastDir := stampedeBull ? "STAMPEDE-L" : "LONG"
     lastEntry := close
     lastSL := sl
     lastTP1 := tp1
     lastTP2 := tp2
     lastQty := qty
 
-if shortSignal
+if finalShort
     float sl = math.max(high, high[1]) + atr * 0.2
     [tp1, tp2, qty] = f_drawTrade(false, close, sl)
-    label.new(bar_index, high, "▼ SHORT " + str.tostring(scoreShort, "#.#"),
-         yloc=yloc.abovebar, color=#FF5252, textcolor=color.white, style=label.style_label_down, size=size.small)
+    string txt = stampedeBear ? "⭐🐘 STAMPEDE SHORT" : "▼ SHORT " + str.tostring(scoreShort, "#.#")
+    label.new(bar_index, high, txt, yloc=yloc.abovebar,
+         color=stampedeBear ? stampColor : #FF5252,
+         textcolor=stampedeBear ? color.black : color.white,
+         style=label.style_label_down, size=stampedeBear ? size.normal : size.small)
     lastSignalBar := bar_index
-    lastDir := "SHORT"
+    lastDir := stampedeBear ? "STAMPEDE-S" : "SHORT"
     lastEntry := close
     lastSL := sl
     lastTP1 := tp1
@@ -371,6 +461,7 @@ if shortSignal
 // ══════════════════════════════════════════════════════════════════════════════
 plot(showEMAs ? ema9 : na, "EMA 9", color=color.new(#2196F3, 0), linewidth=1)
 plot(showEMAs ? ema21 : na, "EMA 21", color=color.new(#FF9800, 0), linewidth=1)
+plot(showVelezSMA ? sma20 : na, "SMA 20 (Velez)", color=color.new(#E91E63, 0), linewidth=2)
 plot(showPD ? eqm : na, "Equilibrium 50%", color=color.new(#9E9E9E, 40), style=plot.style_stepline)
 
 bgcolor(showKZ and inKZ ? color.new(#FFD700, 92) : na, title="Kill Zone")
@@ -398,11 +489,46 @@ plotshape(showStr and chochBear, "CHoCH Bear", shape.diamond, location.abovebar,
 plotshape(showLiq and sweepBull, "Sweep Bull", shape.xcross, location.belowbar, color.new(#00E676, 0), size=size.tiny, text="💧")
 plotshape(showLiq and sweepBear, "Sweep Bear", shape.xcross, location.abovebar, color.new(#FF5252, 0), size=size.tiny, text="💧")
 
+// Etiquetas de patrones Velez (label.new no consume presupuesto de plots)
+var int lastVelezBar = -999
+if showVelez and barstate.isconfirmed and (bar_index - lastVelezBar) >= 2
+    if elephantUp
+        label.new(bar_index, low, "🐘", yloc=yloc.belowbar, color=color.new(#00C853, 20), textcolor=color.white, style=label.style_label_up, size=size.small)
+        lastVelezBar := bar_index
+    else if elephantDn
+        label.new(bar_index, high, "🐘", yloc=yloc.abovebar, color=color.new(#D50000, 20), textcolor=color.white, style=label.style_label_down, size=size.small)
+        lastVelezBar := bar_index
+    else if bull180
+        label.new(bar_index, low, "🔄 180", yloc=yloc.belowbar, color=#00E676, textcolor=color.black, style=label.style_label_up, size=size.tiny)
+        lastVelezBar := bar_index
+    else if bear180
+        label.new(bar_index, high, "🔄 180", yloc=yloc.abovebar, color=#FF5252, textcolor=color.black, style=label.style_label_down, size=size.tiny)
+        lastVelezBar := bar_index
+    else if vbsSignal
+        label.new(bar_index, low, "📊 VBS", yloc=yloc.belowbar, color=#26A69A, textcolor=color.black, style=label.style_label_up, size=size.tiny)
+        lastVelezBar := bar_index
+    else if vssSignal
+        label.new(bar_index, high, "📊 VSS", yloc=yloc.abovebar, color=#EF5350, textcolor=color.black, style=label.style_label_down, size=size.tiny)
+        lastVelezBar := bar_index
+    else if rbiSignal
+        label.new(bar_index, low, "🚦 RBI", yloc=yloc.belowbar, color=color.new(#00E676, 30), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+        lastVelezBar := bar_index
+    else if gbiSignal
+        label.new(bar_index, high, "🚦 GBI", yloc=yloc.abovebar, color=color.new(#FF5252, 30), textcolor=color.black, style=label.style_label_down, size=size.tiny)
+        lastVelezBar := bar_index
+
+// Aviso de agotamiento 3-5-8 (independiente del cooldown Velez)
+if showVelez and barstate.isconfirmed
+    if exhaust8Bull
+        label.new(bar_index, high, "🛑 8ª", yloc=yloc.abovebar, color=#D50000, textcolor=color.white, style=label.style_label_down, size=size.tiny)
+    else if exhaust8Bear
+        label.new(bar_index, low, "🛑 8ª", yloc=yloc.belowbar, color=#D50000, textcolor=color.white, style=label.style_label_up, size=size.tiny)
+
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ DASHBOARD
 // ══════════════════════════════════════════════════════════════════════════════
 if showDash and barstate.islast
-    var table dash = table.new(position.top_right, 2, 8, bgcolor=color.new(#131722, 10),
+    var table dash = table.new(position.top_right, 2, 9, bgcolor=color.new(#131722, 10),
          border_width=1, border_color=color.new(color.gray, 70))
     c_bg = #131722
     table.cell(dash, 0, 0, "SMC LITE", bgcolor=c_bg, text_color=#FFD700, text_size=size.small)
@@ -425,9 +551,13 @@ if showDash and barstate.islast
     table.cell(dash, 0, 6, "OB / FVG", bgcolor=c_bg, text_color=color.gray, text_size=size.small)
     table.cell(dash, 1, 6, str.tostring(array.size(obs)) + " / " + str.tostring(array.size(fvgs)), bgcolor=c_bg,
          text_color=color.white, text_size=size.small)
-    table.cell(dash, 0, 7, "Último trade", bgcolor=c_bg, text_color=color.gray, text_size=size.small)
-    table.cell(dash, 1, 7, lastDir == "" ? "—" : lastDir + " x" + str.tostring(lastQty), bgcolor=c_bg,
-         text_color=lastDir == "LONG" ? #00E676 : lastDir == "SHORT" ? #FF5252 : color.gray, text_size=size.small)
+    table.cell(dash, 0, 7, "Velez", bgcolor=c_bg, text_color=color.gray, text_size=size.small)
+    string velezTxt = elephantUp ? "🐘 BULL" : elephantDn ? "🐘 BEAR" : bull180 ? "🔄 180 BULL" : bear180 ? "🔄 180 BEAR" : (exhaust8Bull or exhaust8Bear) ? "🛑 8ª EXH" : velezBull ? "🟢 setup" : velezBear ? "🔴 setup" : "—"
+    table.cell(dash, 1, 7, velezTxt, bgcolor=c_bg,
+         text_color=velezBull or elephantUp or bull180 ? #00E676 : velezBear or elephantDn or bear180 ? #FF5252 : color.gray, text_size=size.small)
+    table.cell(dash, 0, 8, "Último trade", bgcolor=c_bg, text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 8, lastDir == "" ? "—" : lastDir + " x" + str.tostring(lastQty), bgcolor=c_bg,
+         text_color=str.contains(lastDir, "L") ? #00E676 : str.contains(lastDir, "S") ? #FF5252 : color.gray, text_size=size.small)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ ALERTAS
@@ -437,12 +567,14 @@ f_json(dir, entry, sl, tp1, tp2, qty, score) =>
      '","entry":' + str.tostring(entry) + ',"sl":' + str.tostring(sl) + ',"tp1":' + str.tostring(tp1) +
      ',"tp2":' + str.tostring(tp2) + ',"contracts":' + str.tostring(qty) + ',"score":' + str.tostring(score, "#.#") + '}'
 
-if longSignal
-    alert(f_json("LONG", lastEntry, lastSL, lastTP1, lastTP2, lastQty, scoreLong), alert.freq_once_per_bar_close)
-if shortSignal
-    alert(f_json("SHORT", lastEntry, lastSL, lastTP1, lastTP2, lastQty, scoreShort), alert.freq_once_per_bar_close)
+if finalLong
+    alert(f_json(stampedeBull ? "STAMPEDE_LONG" : "LONG", lastEntry, lastSL, lastTP1, lastTP2, lastQty, scoreLong), alert.freq_once_per_bar_close)
+if finalShort
+    alert(f_json(stampedeBear ? "STAMPEDE_SHORT" : "SHORT", lastEntry, lastSL, lastTP1, lastTP2, lastQty, scoreShort), alert.freq_once_per_bar_close)
 
-alertcondition(longSignal,  title="🎯 SMC Lite LONG",  message='{{ticker}} {{interval}} — LONG confluencia institucional')
-alertcondition(shortSignal, title="🎯 SMC Lite SHORT", message='{{ticker}} {{interval}} — SHORT confluencia institucional')
-alertcondition(sweepBull,   title="💧 Sweep alcista",  message='{{ticker}} {{interval}} — barrida de liquidez (SSL reclaim)')
-alertcondition(sweepBear,   title="💧 Sweep bajista",  message='{{ticker}} {{interval}} — barrida de liquidez (BSL reclaim)')
+alertcondition(finalLong,     title="🎯 SMC Lite LONG",  message='{{ticker}} {{interval}} — LONG confluencia institucional')
+alertcondition(finalShort,    title="🎯 SMC Lite SHORT", message='{{ticker}} {{interval}} — SHORT confluencia institucional')
+alertcondition(stampedeBull,  title="⭐🐘 STAMPEDE LONG",  message='{{ticker}} {{interval}} — STAMPEDE LONG (sweep + Elephant)')
+alertcondition(stampedeBear,  title="⭐🐘 STAMPEDE SHORT", message='{{ticker}} {{interval}} — STAMPEDE SHORT (sweep + Elephant)')
+alertcondition(sweepBull,     title="💧 Sweep alcista",  message='{{ticker}} {{interval}} — barrida de liquidez (SSL reclaim)')
+alertcondition(sweepBear,     title="💧 Sweep bajista",  message='{{ticker}} {{interval}} — barrida de liquidez (BSL reclaim)')
