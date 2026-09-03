@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Lite · Institutional Core v1.0 | Autor: SMC Project
+// SMC Lite · Institutional Core v1.3 | Autor: SMC Project
 // TF óptimo: 1m–15m (intradía) · Activo: MES / MNQ / FX / índices
 // ─────────────────────────────────────────────────────────
 // FILOSOFÍA (edge institucional destilado, no feature-creep):
@@ -12,8 +12,11 @@
 //        de Premium/Discount, durante una Kill Zone.
 //   Regla madre (fuentes ICT/SMC): "opera la barrida de LTF en la
 //   dirección del draw del HTF". Todo lo demás es ruido.
-//   Este script implementa SOLO esos fundamentos, con un scoring de
-//   confluencia y gestión de riesgo automática. Simple, rápido, fiable.
+//   Sobre esos fundamentos añade la metodología Oliver Velez como CAPA DE
+//   CONFIRMACIÓN: una vela Velez (Elephant/180/RBI/VBS) que valida el
+//   retesteo de un Order Block es el gatillo de mayor calidad (tier OB✓),
+//   y su fusión con un sweep en la misma vela es la señal STAMPEDE.
+//   Todo con scoring de confluencia y gestión de riesgo automática.
 // ─────────────────────────────────────────────────────────
 indicator("SMC Lite · Institutional Core", shorttitle="SMC Lite", overlay=true,
      max_labels_count=500, max_lines_count=500, max_boxes_count=500)
@@ -194,8 +197,11 @@ var float eqlLevel = na
 var int   eqhBar   = na
 var int   eqlBar   = na
 
-recentHigh = ta.highest(high, eqLookback)[1]
-recentLow  = ta.lowest(low, eqLookback)[1]
+// [FIX] offset swingLen+1: el pool previo debe EXCLUIR la vela del swing que se evalúa.
+// Con [1] la ventana incluía el propio swing, así que recentHigh solía ser el swing mismo
+// (diff 0) y detectaba EQH/EQL espurios en casi todo swing — contaminando sweep y STAMPEDE.
+recentHigh = ta.highest(high, eqLookback)[swingLen + 1]
+recentLow  = ta.lowest(low, eqLookback)[swingLen + 1]
 
 // Equal Highs: swing high que iguala (dentro de tolerancia) el máximo previo
 if isSwingHigh and not na(recentHigh) and math.abs(high[swingLen] - recentHigh) <= atr * eqTol
@@ -318,8 +324,9 @@ if barstate.isconfirmed and array.size(obs) > 0
         else
             // ¿el precio está tocando el OB en esta vela?
             bool tapping = low <= ob.top and high >= ob.bottom
-            // Confirmación: toque + vela Velez a favor del OB (una sola vez por OB)
-            if useOBConfirm and not ob.confirmed and tapping
+            // Confirmación: RETESTEO (OB de vela anterior) + vela Velez a favor (una sola vez por OB).
+            // El guard bar_index > createdAt evita que la propia vela de ruptura auto-confirme el OB.
+            if useOBConfirm and not ob.confirmed and tapping and bar_index > ob.createdAt
                 if ob.isBull and velezConfBull and close > open
                     ob.confirmed := true
                     ob.confirmBar := bar_index
@@ -453,15 +460,21 @@ f_contracts(entry, sl) =>
     dist > 0 ? math.max(1, math.round(rv / (dist * syminfo.pointvalue))) : 1
 
 f_drawTrade(bool isBuy, float entry, float sl) =>
-    float rk = math.max(isBuy ? entry - sl : sl - entry, atr * 0.2)
+    float _sl = sl
+    float rk = math.max(isBuy ? entry - _sl : _sl - entry, atr * 0.2)
+    // [FIX] tope de riesgo: un SL > 3.5×ATR volvía el TP2 (R-múltiplo) irreal y colapsaba el sizing.
+    // Se recorta el stop a 2×ATR para que TP, contratos y payload queden coherentes.
+    if rk > atr * 3.5
+        _sl := isBuy ? entry - atr * 2.0 : entry + atr * 2.0
+        rk := atr * 2.0
     float tp1 = isBuy ? entry + rk : entry - rk
     float tp2 = isBuy ? entry + rk * riskReward : entry - rk * riskReward
-    int contracts = f_contracts(entry, sl)
+    int contracts = f_contracts(entry, _sl)
     if showSLTP
-        line.new(bar_index, sl, bar_index + 10, sl, color=color.new(#FF5252, 10), style=line.style_dashed, width=2)
+        line.new(bar_index, _sl, bar_index + 10, _sl, color=color.new(#FF5252, 10), style=line.style_dashed, width=2)
         line.new(bar_index, tp1, bar_index + 10, tp1, color=color.new(#FFB300, 30), style=line.style_dotted, width=1)
         line.new(bar_index, tp2, bar_index + 10, tp2, color=color.new(#00E676, 10), width=2)
-    [tp1, tp2, contracts]
+    [_sl, tp1, tp2, contracts]
 
 var string lastDir = ""
 var float  lastEntry = na
@@ -472,7 +485,7 @@ var int    lastQty = 0
 
 if finalLong
     float sl = (cobBull and not na(cobBottom)) ? cobBottom - atr * 0.2 : math.min(low, low[1]) - atr * 0.2
-    [tp1, tp2, qty] = f_drawTrade(true, close, sl)
+    [eSl, tp1, tp2, qty] = f_drawTrade(true, close, sl)
     bool  hot = stampedeBull or cobBull
     string txt = stampedeBull ? "⭐🐘 STAMPEDE LONG" : cobBull ? "🎯 OB✓ LONG" : "▲ LONG " + str.tostring(scoreLong, "#.#")
     label.new(bar_index, low, txt, yloc=yloc.belowbar,
@@ -482,14 +495,14 @@ if finalLong
     lastSignalBar := bar_index
     lastDir := stampedeBull ? "STAMPEDE-L" : cobBull ? "OB✓-L" : "LONG"
     lastEntry := close
-    lastSL := sl
+    lastSL := eSl
     lastTP1 := tp1
     lastTP2 := tp2
     lastQty := qty
 
 if finalShort
     float sl = (cobBear and not na(cobTop)) ? cobTop + atr * 0.2 : math.max(high, high[1]) + atr * 0.2
-    [tp1, tp2, qty] = f_drawTrade(false, close, sl)
+    [eSl, tp1, tp2, qty] = f_drawTrade(false, close, sl)
     bool  hot = stampedeBear or cobBear
     string txt = stampedeBear ? "⭐🐘 STAMPEDE SHORT" : cobBear ? "🎯 OB✓ SHORT" : "▼ SHORT " + str.tostring(scoreShort, "#.#")
     label.new(bar_index, high, txt, yloc=yloc.abovebar,
@@ -499,7 +512,7 @@ if finalShort
     lastSignalBar := bar_index
     lastDir := stampedeBear ? "STAMPEDE-S" : cobBear ? "OB✓-S" : "SHORT"
     lastEntry := close
-    lastSL := sl
+    lastSL := eSl
     lastTP1 := tp1
     lastTP2 := tp2
     lastQty := qty
