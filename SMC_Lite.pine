@@ -129,12 +129,17 @@ isBearC  = close < open
 bodySize = math.abs(close - open)
 rng      = high - low
 
-// ── HTF Bias (draw on liquidity direccional) — wrapper seguro sin lookahead ──
+// ── HTF Bias (draw on liquidity direccional) — sesgo HTF CONFIRMADO, sin repaint ──
+// Patrón no-repaint canónico de TradingView: se pide el valor de la barra HTF ya
+// CERRADA con f_htfTrend()[1] + lookahead_on. El [1] toma el dato histórico (la vela
+// HTF anterior, ya confirmada) y lookahead_on solo alinea ese valor pasado — no filtra
+// futuro. El sesgo deja de reevaluarse dentro de la vela HTF en formación (más lag,
+// cero repaint), a diferencia del valor en vivo anterior.
 f_htfTrend() =>
     e9  = ta.ema(close, 9)
     e21 = ta.ema(close, 21)
     close > e9 and e9 > e21 ? 1 : close < e9 and e9 < e21 ? -1 : 0
-htfBias = request.security(syminfo.tickerid, htfTF, f_htfTrend(), lookahead=barmerge.lookahead_off)
+htfBias = request.security(syminfo.tickerid, htfTF, f_htfTrend()[1], lookahead=barmerge.lookahead_on)
 
 // ── Sesión / Kill Zones ──
 nyHour   = hour(time, "America/New_York")
