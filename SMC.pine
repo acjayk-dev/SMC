@@ -186,8 +186,18 @@
 //        (doble conteo del mismo sesgo); ahora es un único término (ambos → peso completo, uno solo → mitad),
 //        reduciendo el dominio del VWAP sobre la estructura. Defaults reproducen v6.22 salvo #2 y #3.
 //        Limpieza: eliminadas 6 variables muertas (isValidSession, partial*T, deltaExtreme, priceOutVA*).
+// v6.24: Auditoría de los 4 motores (Order Flow / SMC / Price Action / Velez) para repaint y fidelidad.
+//        NO-REPAINT: se cierran 3 latches de estado persistente que mutaban con la vela EN CURSO (misma clase
+//        de bug que FIX-A2 ya había corregido en el motor de estructura, pero replicada fuera de él):
+//          · EQH/EQL — el pool de liquidez podía fijarse en un tick intrabar y no revertir; de él dependen
+//            Sweep, Wyckoff Spring/UTAD y el bonus POI del score. Ahora exige barstate.isconfirmed.
+//          · OTE — el ratchet del swing (oteSwingH/L) avanzaba con un pico intrabar y no revertía, moviendo
+//            la zona 62-79% bajo los pies de la señal. Ahora solo avanza en barra cerrada.
+//          · IDM — el candidato de inducement se latcheaba con isSwingHigh sin confirmar. Idem.
+//        VELEZ: VBS/VSS se ancla a la SMA de Velez (ma2, "Oliver SMA") en vez del VWAP — la definición del
+//        Buy/Sell Setup es un pullback a la 20-SMA y la etiqueta ya decía "→SMA"; el VWAP queda para Color Change.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.23 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.23", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.24 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.24", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1448,8 +1458,15 @@ bool passMTFBear = not useMTF or (useMTFQuality ? mtfQualityBear : mtfBearCongru
 bool nearVWAPVBS = (nearVWAP or nearVWAPB1Bot) and low <= vwapValue + atr * 0.3
 bool nearVWAPVSS = (nearVWAP or nearVWAPB1Top) and high >= vwapValue - atr * 0.3
 
-bool vbsSignal = nz(consRed[1]) >= 3 and isBullC and close > high[1] and nearVWAPVBS[1] and vwapTrendingUp and trend == 1
-bool vssSignal = nz(consGreen[1]) >= 3 and isBearC and close < low[1] and nearVWAPVSS[1] and vwapTrendingDn and trend == -1
+// v6.24 [Velez] VBS/VSS se ancla a la SMA de Velez (ma2 = "Med MA / Oliver SMA"), NO al VWAP. La definición
+// de Velez del Buy/Sell Setup es un pullback de 3+ velas a la 20-SMA en tendencia y su giro — la etiqueta ya
+// decía "→SMA" mientras la lógica medía contra el VWAP. El VWAP se reserva para Color Change (VWAP Bounce/Reject).
+bool ma2Rising   = ma2 > ma2[1]
+bool ma2Falling  = ma2 < ma2[1]
+bool nearMA2Bull = low  <= ma2 + atr * 0.3 and low  >= ma2 - atr * 1.0
+bool nearMA2Bear = high >= ma2 - atr * 0.3 and high <= ma2 + atr * 1.0
+bool vbsSignal = nz(consRed[1]) >= 3 and isBullC and close > high[1] and nearMA2Bull[1] and ma2Rising and trend == 1
+bool vssSignal = nz(consGreen[1]) >= 3 and isBearC and close < low[1] and nearMA2Bear[1] and ma2Falling and trend == -1
 
 bool ccBull = prev_red  and isBullC and close > high[1] and nearVWAPVBS and vwapTrendingUp  and trend == 1
 bool ccBear = prev_green and isBearC and close < low[1]  and nearVWAPVSS and vwapTrendingDn and trend == -1
@@ -1843,7 +1860,10 @@ var int   lastEQLBar   = 0
 
 // v6.5 fix: exige separación mínima entre coincidencias contadas — antes cualquier vela dentro de la
 // tolerancia en la ventana sumaba, sobrecontando un mismo clúster de velas adyacentes como "iguales" distintos.
-if isSwingHigh
+// v6.24 [NO-REPAINT] Gate barstate.isconfirmed, consistente con el motor de estructura (FIX-A2): isSwingHigh
+// usa una ventana que incluye la vela EN CURSO, así que sin este candado un tick intrabar podía latchear
+// lastEQHLevel y no revertirlo al invalidarse el swing — y de ese pool dependen Sweep, Wyckoff y el bonus POI.
+if isSwingHigh and barstate.isconfirmed
     float refHigh = high[effSwingLen]
     float eqTol   = atr * eqTolerance
     int lastEqHighMatch = -999
@@ -1854,7 +1874,7 @@ if isSwingHigh
             eqHighCount    += 1
             lastEqHighMatch := i
 
-if isSwingLow
+if isSwingLow and barstate.isconfirmed
     float refLow = low[effSwingLen]
     float eqTol  = atr * eqTolerance
     int lastEqLowMatch = -999
@@ -2052,12 +2072,13 @@ var float idmPendingLow  = na
 bool idmHighSwept = not na(idmPendingHigh) and high > idmPendingHigh
 bool idmLowSwept  = not na(idmPendingLow)  and low  < idmPendingLow
 
-if idmHighFalse
+// v6.24 [NO-REPAINT] el candidato IDM se latchea solo en barra cerrada (isSwingHigh incluye la vela en curso).
+if idmHighFalse and barstate.isconfirmed
     idmPendingHigh := high[effSwingLen]
 else if idmHighSwept
     idmPendingHigh := na
 
-if idmLowFalse
+if idmLowFalse and barstate.isconfirmed
     idmPendingLow := low[effSwingLen]
 else if idmLowSwept
     idmPendingLow := na
@@ -2091,16 +2112,16 @@ if bosUp or chochUp
     oteSwingH   := _oteHighestH
     oteBullish  := true
     oteLastResetBar := bar_index
-else if trend == 1 and not na(oteSwingH) and high > oteSwingH and oteBullish
-    oteSwingH := high
+else if trend == 1 and not na(oteSwingH) and high > oteSwingH and oteBullish and barstate.isconfirmed
+    oteSwingH := high   // v6.24 [NO-REPAINT] el ratchet del swing solo avanza en barra cerrada; si no, un pico intrabar movía la zona OTE y no revertía
 
 if bosDown or chochDown
     oteSwingH   := structureHigh
     oteSwingL   := _oteLowestL
     oteBullish  := false
     oteLastResetBar := bar_index
-else if trend == -1 and not na(oteSwingL) and low < oteSwingL and not oteBullish
-    oteSwingL := low
+else if trend == -1 and not na(oteSwingL) and low < oteSwingL and not oteBullish and barstate.isconfirmed
+    oteSwingL := low   // v6.24 [NO-REPAINT] ver nota en el bloque alcista
 
 float oteRange = nz(oteSwingH) - nz(oteSwingL)
 
@@ -3125,7 +3146,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.23 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.24 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
