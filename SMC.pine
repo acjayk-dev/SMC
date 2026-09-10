@@ -196,8 +196,15 @@
 //          · IDM — el candidato de inducement se latcheaba con isSwingHigh sin confirmar. Idem.
 //        VELEZ: VBS/VSS se ancla a la SMA de Velez (ma2, "Oliver SMA") en vez del VWAP — la definición del
 //        Buy/Sell Setup es un pullback a la 20-SMA y la etiqueta ya decía "→SMA"; el VWAP queda para Color Change.
+// v6.25: Formación de Order Blocks — [A] eliminada la rama muerta "(weak) OB": el bloque de creación solo
+//        corre con rupturas FUERTES (bosUp/chochUp), mutuamente excluyentes con bosWeakUp/Down, así que
+//        isWeakB era siempre false y su visual punteada nunca se dibujaba. [B] la vela de ORIGEN del OB debe
+//        tener cuerpo real (input "OB Origin Min Body ×ATR", def 0.2) — si la opuesta más cercana es un doji
+//        sin desequilibrio, se salta a la siguiente opuesta con cuerpo. [C] el mean threshold del OB (línea
+//        punteada + mitigación 50%) pasa a ser el 50% del RANGO completo del bloque (estándar ICT) en vez del
+//        50% del cuerpo, vía toggle "OB Mean Threshold = 50% del rango" (def ON).
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.24 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.24", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.25 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.25", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -318,11 +325,15 @@ f_signal_json(_name, _entry, _sl, _tp1, _tp2, _contracts, _score) =>
 // v6.5 fix: definición institucional de Order Block = ÚLTIMA vela de color OPUESTO al impulso antes del
 // BOS/CHoCH (no el extremo del swing). Busca hacia atrás desde el origen del impulso; si no encuentra ninguna
 // vela opuesta en la ventana (todo el tramo fue del mismo color, caso raro), cae al extremo del swing como antes.
-f_lastOppositeCandle(bullishOB, maxBars, fallbackIdx) =>
+// v6.25 [B] minBodyAtr: la vela de origen debe tener CUERPO real (≥ minBodyAtr×ATR), no un doji — un OB
+// nace de un desequilibrio de órdenes, y un doji no lo representa. Si la opuesta más cercana es un doji, se
+// salta y se busca la siguiente. Con minBodyAtr=0 recupera el comportamiento anterior (primera opuesta).
+f_lastOppositeCandle(bullishOB, maxBars, fallbackIdx, minBodyAtr) =>
     int idx = fallbackIdx
     for k = 1 to maxBars
         bool isOpposite = bullishOB ? close[k] < open[k] : close[k] > open[k]
-        if isOpposite
+        bool realBody   = math.abs(close[k] - open[k]) >= nz(atr[k]) * minBodyAtr
+        if isOpposite and realBody
             idx := k
             break
     idx
@@ -353,6 +364,8 @@ mitigatedColor = input.color(color.new(#78909C, 90), "Mitigated OB", group=grpOB
 maxActiveOBs   = input.int(6,   "Max Active OBs", minval=1, maxval=20, group=grpOB)
 removeMitigated= input.bool(false, "Remove After Mitigation", group=grpOB)
 obMaxAge       = input.int(60, "OB Max Age (bars)", minval=20, maxval=300, group=grpOB, tooltip="5min: 60 bars = 5 horas (cubre sesión NY completa). OBs más viejos se auto-expiran.")
+obMinBodyAtr   = input.float(0.2, "OB Origin Min Body (×ATR)", minval=0.0, step=0.1, group=grpOB, tooltip="v6.25 [B] La vela de origen del OB debe ser una vela opuesta REAL (cuerpo ≥ este ×ATR), no un doji sin desequilibrio. Si la más cercana es un doji, busca la siguiente opuesta con cuerpo. 0 = desactivado (comportamiento previo).")
+obMeanFullRange= input.bool(true, "OB Mean Threshold = 50% del rango", group=grpOB, tooltip="v6.25 [C] ON: el umbral medio (línea punteada) y la mitigación 50% usan el 50% del RANGO completo del OB (mean threshold ICT). OFF: 50% del cuerpo.")
 showFVG        = input.bool(true,  "Show FVG / Imbalances",   group=grpOB)
 fvgColor       = input.color(color.new(#FFEB3B, 55), "FVG Color", group=grpOB)
 fvgMinSize     = input.float(0.5, "Min FVG Size (×ATR)", minval=0.1, step=0.1, group=grpOB, tooltip="5min MES/MNQ: 0.5 captura FVGs institucionales.")
@@ -2444,7 +2457,7 @@ if bearOBs.size() > 0
 // v6.5 fix: el origen del OB ya no es el extremo del swing (ta.lowestbars/highestbars) sino la última vela
 // de color opuesto al impulso — definición institucional real del Order Block.
 if bosUp or chochUp
-    int lowestIndex = f_lastOppositeCandle(true, effSwingLen * 2 + 1, -1 * obLbVal)
+    int lowestIndex = f_lastOppositeCandle(true, effSwingLen * 2 + 1, -1 * obLbVal, obMinBodyAtr)
     // v6.17 [FIX-A4] Unicorn = el FVG SOLAPA el Order Block. La prueba anterior (fvg.bottom >= ob.low) la
     // cumplía cualquier FVG situado por encima del OB, por lejos que estuviera. Ahora es intersección real.
     // v6.19 [FIX-P6] solo se probaba el FVG MÁS RECIENTE del array: si el último formado no solapaba el OB,
@@ -2456,25 +2469,27 @@ if bosUp or chochUp
             if _uf.bottom <= high[lowestIndex] and _uf.top >= low[lowestIndex]
                 hasUni := true
                 break
-    bool isWeakB = bosWeakUp
+    // v6.25 [A] Se eliminó isWeakB (=bosWeakUp): el bloque solo corre con bosUp/chochUp (rupturas FUERTES),
+    // mutuamente excluyentes con bosWeakUp, así que la visual "(weak)" era código muerto inalcanzable.
     int  obStr   = (hasUni and mtfBullCongruence) ? 4 : mtfBullCongruence ? 3 : hasUni ? 2 : 1
     float bHigh  = math.max(open[lowestIndex], close[lowestIndex])
     float bLow   = math.min(open[lowestIndex], close[lowestIndex])
+    float obMean = obMeanFullRange ? (high[lowestIndex] + low[lowestIndex]) / 2 : (bHigh + bLow) / 2   // v6.25 [C]
     box newBox   = na
     if showOB and showContext
         color  obBorder = hasUni ? color.new(#FFD700, 0) : mtfBullCongruence ? color.new(#00E5FF, 0) : obBullColor
-        string obText   = hasUni ? "🦄 OB+" : isWeakB ? "OB+ (weak)" : mtfBullCongruence ? "📡 OB+ HTF" : "OB+"
+        string obText   = hasUni ? "🦄 OB+" : mtfBullCongruence ? "📡 OB+ HTF" : "OB+"
         newBox := box.new(bar_index - lowestIndex, high[lowestIndex], bar_index + 5, low[lowestIndex],
                           border_color=obBorder, bgcolor=obBullColor,
-                          border_style=isWeakB ? line.style_dotted : line.style_solid,
+                          border_style=line.style_solid,
                           text=obText, text_color=color.white, text_size=size.tiny)
-        line.new(bar_index - lowestIndex, (bHigh + bLow) / 2, bar_index + 5, (bHigh + bLow) / 2,
+        line.new(bar_index - lowestIndex, obMean, bar_index + 5, obMean,
                  color=color.new(#00E676, 30), width=1, style=line.style_dashed)
     bullOBs.push(OrderBlock.new(newBox, high[lowestIndex], low[lowestIndex], bHigh, bLow, true, false, bar_index, hasUni, false, obStr))
     bullOBs.clean()
 
 if bosDown or chochDown
-    int highestIndex = f_lastOppositeCandle(false, effSwingLen * 2 + 1, -1 * obHbVal)
+    int highestIndex = f_lastOppositeCandle(false, effSwingLen * 2 + 1, -1 * obHbVal, obMinBodyAtr)
     // v6.17 [FIX-A4] Solapamiento real FVG ↔ OB (ver nota en el bloque alcista).
     // v6.19 [FIX-P6] ver nota en el bloque alcista.
     bool hasUni = false
@@ -2484,19 +2499,20 @@ if bosDown or chochDown
             if _uf.bottom <= high[highestIndex] and _uf.top >= low[highestIndex]
                 hasUni := true
                 break
-    bool isWeakB = bosWeakDown
+    // v6.25 [A] Se eliminó isWeakB (=bosWeakDown): código muerto inalcanzable (ver nota en el bloque alcista).
     int  obStr   = (hasUni and mtfBearCongruence) ? 4 : mtfBearCongruence ? 3 : hasUni ? 2 : 1
     float bHigh  = math.max(open[highestIndex], close[highestIndex])
     float bLow   = math.min(open[highestIndex], close[highestIndex])
+    float obMean = obMeanFullRange ? (high[highestIndex] + low[highestIndex]) / 2 : (bHigh + bLow) / 2   // v6.25 [C]
     box newBox   = na
     if showOB and showContext
         color  obBorder = hasUni ? color.new(#FFD700, 0) : mtfBearCongruence ? color.new(#00E5FF, 0) : obBearColor
-        string obText   = hasUni ? "🦄 OB-" : isWeakB ? "OB- (weak)" : mtfBearCongruence ? "📡 OB- HTF" : "OB-"
+        string obText   = hasUni ? "🦄 OB-" : mtfBearCongruence ? "📡 OB- HTF" : "OB-"
         newBox := box.new(bar_index - highestIndex, high[highestIndex], bar_index + 5, low[highestIndex],
                           border_color=obBorder, bgcolor=obBearColor,
-                          border_style=isWeakB ? line.style_dotted : line.style_solid,
+                          border_style=line.style_solid,
                           text=obText, text_color=color.white, text_size=size.tiny)
-        line.new(bar_index - highestIndex, (bHigh + bLow) / 2, bar_index + 5, (bHigh + bLow) / 2,
+        line.new(bar_index - highestIndex, obMean, bar_index + 5, obMean,
                  color=color.new(#FF5252, 30), width=1, style=line.style_dashed)
     bearOBs.push(OrderBlock.new(newBox, high[highestIndex], low[highestIndex], bHigh, bLow, false, false, bar_index, hasUni, false, obStr))
     bearOBs.clean()
@@ -2920,7 +2936,7 @@ if bullOBs.size() > 0
                         signalBuy := true
                         obSlBuyVal := math.min(ob.bottom, low)
                 if showPartialMit and not ob.isBreaker
-                    float obMid = (ob.bodyHigh + ob.bodyLow) / 2
+                    float obMid = obMeanFullRange ? (ob.top + ob.bottom) / 2 : (ob.bodyHigh + ob.bodyLow) / 2   // v6.25 [C]
                     if low <= obMid and not na(ob.id)
                         box.set_bgcolor(ob.id, color.new(#FFA500, 70))
                         box.set_text(ob.id, "50% MIT")
@@ -2941,7 +2957,7 @@ if bearOBs.size() > 0
                         signalSell := true
                         obSlSellVal := math.max(ob.top, high)
                 if showPartialMit and not ob.isBreaker
-                    float obMid = (ob.bodyHigh + ob.bodyLow) / 2
+                    float obMid = obMeanFullRange ? (ob.top + ob.bottom) / 2 : (ob.bodyHigh + ob.bodyLow) / 2   // v6.25 [C]
                     if high >= obMid and not na(ob.id)
                         box.set_bgcolor(ob.id, color.new(#FFA500, 70))
                         box.set_text(ob.id, "50% MIT")
@@ -3146,7 +3162,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.24 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.25 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
