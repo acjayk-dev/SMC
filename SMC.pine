@@ -328,11 +328,11 @@ f_signal_json(_name, _entry, _sl, _tp1, _tp2, _contracts, _score) =>
 // v6.25 [B] minBodyAtr: la vela de origen debe tener CUERPO real (≥ minBodyAtr×ATR), no un doji — un OB
 // nace de un desequilibrio de órdenes, y un doji no lo representa. Si la opuesta más cercana es un doji, se
 // salta y se busca la siguiente. Con minBodyAtr=0 recupera el comportamiento anterior (primera opuesta).
-f_lastOppositeCandle(bullishOB, maxBars, fallbackIdx, minBodyAtr) =>
+f_lastOppositeCandle(bullishOB, maxBars, fallbackIdx, minBodyAtr, atrVal) =>
     int idx = fallbackIdx
     for k = 1 to maxBars
         bool isOpposite = bullishOB ? close[k] < open[k] : close[k] > open[k]
-        bool realBody   = math.abs(close[k] - open[k]) >= nz(atr[k]) * minBodyAtr
+        bool realBody   = math.abs(close[k] - open[k]) >= atrVal * minBodyAtr
         if isOpposite and realBody
             idx := k
             break
@@ -2457,7 +2457,7 @@ if bearOBs.size() > 0
 // v6.5 fix: el origen del OB ya no es el extremo del swing (ta.lowestbars/highestbars) sino la última vela
 // de color opuesto al impulso — definición institucional real del Order Block.
 if bosUp or chochUp
-    int lowestIndex = f_lastOppositeCandle(true, effSwingLen * 2 + 1, -1 * obLbVal, obMinBodyAtr)
+    int lowestIndex = f_lastOppositeCandle(true, effSwingLen * 2 + 1, -1 * obLbVal, obMinBodyAtr, atr)
     // v6.17 [FIX-A4] Unicorn = el FVG SOLAPA el Order Block. La prueba anterior (fvg.bottom >= ob.low) la
     // cumplía cualquier FVG situado por encima del OB, por lejos que estuviera. Ahora es intersección real.
     // v6.19 [FIX-P6] solo se probaba el FVG MÁS RECIENTE del array: si el último formado no solapaba el OB,
@@ -2489,7 +2489,7 @@ if bosUp or chochUp
     bullOBs.clean()
 
 if bosDown or chochDown
-    int highestIndex = f_lastOppositeCandle(false, effSwingLen * 2 + 1, -1 * obHbVal, obMinBodyAtr)
+    int highestIndex = f_lastOppositeCandle(false, effSwingLen * 2 + 1, -1 * obHbVal, obMinBodyAtr, atr)
     // v6.17 [FIX-A4] Solapamiento real FVG ↔ OB (ver nota en el bloque alcista).
     // v6.19 [FIX-P6] ver nota en el bloque alcista.
     bool hasUni = false
