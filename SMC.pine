@@ -203,8 +203,15 @@
 //        sin desequilibrio, se salta a la siguiente opuesta con cuerpo. [C] el mean threshold del OB (línea
 //        punteada + mitigación 50%) pasa a ser el 50% del RANGO completo del bloque (estándar ICT) en vez del
 //        50% del cuerpo, vía toggle "OB Mean Threshold = 50% del rango" (def ON).
+// v6.26: Motor BOS/CHoCH — [#2] la clasificación FUERTE de una ruptura ahora acepta desplazamiento
+//        multi-barra (isDisplacementBull/Bear), no solo el cuerpo de la vela de ruptura (toggle "Break:
+//        contar desplazamiento multi-barra como fuerte", def ON): una ruptura institucional válida no
+//        siempre cabe en una sola vela y antes se degradaba a débil (sin OB). [#1] nuevo modo estricto
+//        opcional "Estructura: voltear solo con ruptura fuerte" (def OFF): una ruptura DÉBIL marca
+//        wBOS/wCHoCH pero NO voltea trend/structTrend ni consume el cooldown — el régimen solo cambia
+//        con desplazamiento real. Con OFF, comportamiento idéntico a v6.25.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.25 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.25", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.26 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.26", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -380,6 +387,8 @@ showInternalStructure = input.bool(false, "Show Internal Structure (iBOS/iCHoCH)
 atrMult          = input.float(0.8, "Displacement (×ATR)",      group=grpSMC, minval=0.3, step=0.1, tooltip="5min MES/MNQ: 0.8 — movimientos institucionales")
 volMultStructural= input.float(1.2, "Volume Confirm (×Avg)",    group=grpSMC, minval=1.0, step=0.1, tooltip="5min: 1.2 — volumen MES/MNQ más distribuido")
 bosCooldown      = input.int(3, "Min Bars Between BOS", minval=1, maxval=10, group=grpSMC, tooltip="5min: 3 = 15min cooldown.")
+useMultiBarDispBreak = input.bool(true,  "Break: contar desplazamiento multi-barra como fuerte", group=grpSMC, tooltip="v6.26 [#2] Una ruptura por desplazamiento de 2-3 velas (ninguna gigante) es institucionalmente válida. Con ON, isDisplacementBull/Bear también califica el break como FUERTE (crea OB, resetea leg OTE), no solo el cuerpo de la vela de ruptura.")
+strictStructFlip = input.bool(false, "Estructura: voltear solo con ruptura fuerte", group=grpSMC, tooltip="v6.26 [#1] OFF (default): cualquier cierre más allá del nivel voltea trend/structTrend (marca wBOS/wCHoCH si es débil). ON (estricto): una ruptura DÉBIL (sin desplazamiento) solo dibuja la etiqueta wBOS/wCHoCH pero NO voltea la estructura ni consume el cooldown — el régimen solo cambia con desplazamiento real.")
 
 // ── 3. SESSIONS ──
 grpCtx         = "═══ ⏰ SESSIONS & CONTEXT ═══"
@@ -1658,8 +1667,10 @@ bool bosWeakDown   = false
 bool chochWeakUp   = false
 bool chochWeakDown = false
 
-bool strongBullMove = bodySize > atr * effAtrMult and isBullC and volume > avgVol * volMultStructural
-bool strongBearMove = bodySize > atr * effAtrMult and isBearC and volume > avgVol * volMultStructural
+// v6.26 [#2] la ruptura es FUERTE por el cuerpo+volumen de la vela de ruptura, O por un desplazamiento
+// multi-barra ya confirmado (2-3 velas) — una ruptura institucional no siempre cabe en una sola vela.
+bool strongBullMove = (bodySize > atr * effAtrMult and isBullC and volume > avgVol * volMultStructural) or (useMultiBarDispBreak and isDisplacementBull)
+bool strongBearMove = (bodySize > atr * effAtrMult and isBearC and volume > avgVol * volMultStructural) or (useMultiBarDispBreak and isDisplacementBear)
 
 bool bosCooldownOK = (bar_index - lastBOSBar) >= effBosCooldown
 
@@ -1674,10 +1685,13 @@ if barstate.isconfirmed and not na(structureHigh) and close > structureHigh and 
             bosWeakUp := true
         else
             chochWeakUp := true
-    structTrend := 1
-    trend       := 1
-    lastBOSBar := bar_index
-    lastConfirmedLow := structureLow
+    // v6.26 [#1] en modo estricto, una ruptura DÉBIL marca la etiqueta pero NO voltea la estructura ni
+    // consume el cooldown; el régimen solo cambia con desplazamiento real.
+    if strongBullMove or not strictStructFlip
+        structTrend := 1
+        trend       := 1
+        lastBOSBar := bar_index
+        lastConfirmedLow := structureLow
 
 if barstate.isconfirmed and not na(structureLow) and close < structureLow and close[1] >= structureLow and bosCooldownOK
     if strongBearMove
@@ -1690,10 +1704,12 @@ if barstate.isconfirmed and not na(structureLow) and close < structureLow and cl
             bosWeakDown := true
         else
             chochWeakDown := true
-    structTrend := -1
-    trend       := -1
-    lastBOSBar := bar_index
-    lastConfirmedHigh := structureHigh
+    // v6.26 [#1] ver nota en el bloque alcista.
+    if strongBearMove or not strictStructFlip
+        structTrend := -1
+        trend       := -1
+        lastBOSBar := bar_index
+        lastConfirmedHigh := structureHigh
 
 bool earlyTrendShiftUp   = useEarlyTrendShift and trend == -1 and (bull180 or superEleBull) and volume > avgVol * 1.3 and barstate.isconfirmed
 bool earlyTrendShiftDown = useEarlyTrendShift and trend == 1  and (bear180 or superEleBear) and volume > avgVol * 1.3 and barstate.isconfirmed
@@ -3162,7 +3178,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.25 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.26 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
