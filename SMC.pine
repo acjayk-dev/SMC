@@ -210,8 +210,13 @@
 //        opcional "Estructura: voltear solo con ruptura fuerte" (def OFF): una ruptura DÉBIL marca
 //        wBOS/wCHoCH pero NO voltea trend/structTrend ni consume el cooldown — el régimen solo cambia
 //        con desplazamiento real. Con OFF, comportamiento idéntico a v6.25.
+// v6.27: Motor FVG — [#1 NO-REPAINT] la creación exige barstate.isconfirmed: en la vela en curso el low no
+//        es definitivo, así que un FVG podía aparecer/desaparecer y su borde moverse intrabar (misma clase de
+//        repaint ya cerrada en estructura/OB/EQH-EQL/OTE). [#2] toggle "Invalidar FVG en 50% CE (ICT estricto)"
+//        (def OFF): con ON el FVG se elimina al alcanzar su 50% = Consequent Encroachment; con OFF se mantiene
+//        como POI hasta el fill total. [#3] "Max Active FVGs" pasa a input (antes 15 hardcodeado).
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.26 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.26", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.27 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.27", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -377,6 +382,8 @@ showFVG        = input.bool(true,  "Show FVG / Imbalances",   group=grpOB)
 fvgColor       = input.color(color.new(#FFEB3B, 55), "FVG Color", group=grpOB)
 fvgMinSize     = input.float(0.5, "Min FVG Size (×ATR)", minval=0.1, step=0.1, group=grpOB, tooltip="5min MES/MNQ: 0.5 captura FVGs institucionales.")
 fvgMaxAge      = input.int(36, "FVG Max Age (bars)", minval=10, maxval=200, group=grpOB, tooltip="5min: 36 bars = 3 horas. FVGs sin contacto expiran.")
+maxFVGs        = input.int(15, "Max Active FVGs", minval=3, maxval=30, group=grpOB, tooltip="v6.27 [#3] antes hardcodeado en 15. Máx FVG vivos por lado; al superarlo se descarta el más viejo.")
+fvgInvalidateCE= input.bool(false, "Invalidar FVG en 50% CE (ICT estricto)", group=grpOB, tooltip="v6.27 [#2] ON: el FVG se invalida (se elimina) al alcanzar su 50% = Consequent Encroachment (criterio ICT estricto). OFF (default): se mantiene como POI hasta el fill total y solo recolorea al 50%.")
 showPartialMit = input.bool(true,  "Mark 50% OB Mitigation",  group=grpOB)
 
 // ── 2. MARKET STRUCTURE ──
@@ -2540,20 +2547,23 @@ if bosDown or chochDown
 bool isBullFVG = low > high[2] and (low - high[2]) > atr * effFvgMinSize
 bool isBearFVG = high < low[2] and (low[2] - high) > atr * effFvgMinSize
 
-if isBullFVG
+// v6.27 [#1 NO-REPAINT] la creación exige barstate.isconfirmed: en la vela EN CURSO el low no es definitivo,
+// así que sin este candado un FVG podía aparecer/desaparecer y su borde superior (=low) moverse intrabar.
+// Un FVG solo es real cuando la 3ª vela cierra. [#3] cap por input maxFVGs (antes 15 hardcodeado).
+if isBullFVG and barstate.isconfirmed
     box fvgBox = na
     if showFVG and showContext
         fvgBox := box.new(bar_index - 2, low, bar_index, high[2], border_color=na, bgcolor=fvgColor)
     bullFVGs.push(FVG.new(low, high[2], true, bar_index, fvgBox))
-    if bullFVGs.size() > 15
+    if bullFVGs.size() > maxFVGs
         bullFVGs.remove(0)
 
-if isBearFVG
+if isBearFVG and barstate.isconfirmed
     box fvgBox = na
     if showFVG and showContext
         fvgBox := box.new(bar_index - 2, low[2], bar_index, high, border_color=na, bgcolor=fvgColor)
     bearFVGs.push(FVG.new(low[2], high, false, bar_index, fvgBox))
-    if bearFVGs.size() > 15
+    if bearFVGs.size() > maxFVGs
         bearFVGs.remove(0)
 
 if bullFVGs.size() > 0
@@ -2571,8 +2581,14 @@ if bullFVGs.size() > 0
             if not na(_fvg.id)
                 box.set_bgcolor(_fvg.id, color.new(#78909C, 90))
             bullFVGs.remove(i)
-        else if fillPct >= 50 and not na(_fvg.id)
-            box.set_bgcolor(_fvg.id, color.new(#FFEB3B, 85))
+        else if fillPct >= 50
+            // v6.27 [#2] en modo ICT estricto el 50% (CE) invalida el FVG; por defecto solo recolorea y lo mantiene.
+            if fvgInvalidateCE
+                if not na(_fvg.id)
+                    box.set_bgcolor(_fvg.id, color.new(#78909C, 92))
+                bullFVGs.remove(i)
+            else if not na(_fvg.id)
+                box.set_bgcolor(_fvg.id, color.new(#FFEB3B, 85))
 
 if bearFVGs.size() > 0
     for i = bearFVGs.size() - 1 to 0
@@ -2589,8 +2605,14 @@ if bearFVGs.size() > 0
             if not na(_fvg.id)
                 box.set_bgcolor(_fvg.id, color.new(#78909C, 90))
             bearFVGs.remove(i)
-        else if fillPct >= 50 and not na(_fvg.id)
-            box.set_bgcolor(_fvg.id, color.new(#FFEB3B, 85))
+        else if fillPct >= 50
+            // v6.27 [#2] ver nota en el bloque alcista.
+            if fvgInvalidateCE
+                if not na(_fvg.id)
+                    box.set_bgcolor(_fvg.id, color.new(#78909C, 92))
+                bearFVGs.remove(i)
+            else if not na(_fvg.id)
+                box.set_bgcolor(_fvg.id, color.new(#FFEB3B, 85))
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ UNIFIED SIGNAL ENGINE
@@ -3178,7 +3200,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.26 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.27 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
