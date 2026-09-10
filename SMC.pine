@@ -220,8 +220,16 @@
 //        (−1× en la 5ª vela, −2× en la 8ª), vía peso "Penalización agotamiento 3-5-8" en SCORE WEIGHTS.
 //        Evita que DIAMOND/INST persigan un movimiento agotado. [#2] añadido el nivel informativo "3️⃣ 3rd BAR"
 //        (primer aviso de extensión de Velez), que antes no se marcaba.
+// v6.29: Settings reorganizados de "por función" (alertas/patrones/señales) a "por METODOLOGÍA" en 5 bloques:
+//        ① ⚡ ORDER FLOW · ② 🏦 SMART MONEY CONCEPTS · ③ 🐘 OLIVER VELEZ · ④ 🕯️ PRICE ACTION · ⑤ ⚙️ GENERAL.
+//        Cada uno de los 4 bloques metodológicos tiene un maestro "▶ ENABLE ..." (ofEnabled/smcEnabled/
+//        velezEnabled/paEnabled) que apaga sus SEÑALES + VISUALES + ALERTAS re-ANDando sus toggles en un
+//        bloque central (MASTER GATES). Los cálculos COMPARTIDOS (estructura→trend, ATR, VWAP, sesiones)
+//        siguen corriendo: apagar un bloque NUNCA rompe a los demás. Ningún parámetro/default cambió; es
+//        reorganización + Enable/Disable. GENERAL agrupa lo transversal (riesgo, filtros, MTF, score, MA fast,
+//        dashboard, alerts) que no pertenece a una sola metodología.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.28 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.28", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.29 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.29", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -359,245 +367,308 @@ f_lastOppositeCandle(bullishOB, maxBars, fallbackIdx, minBodyAtr, atrVal) =>
 // ██ INPUTS
 // ══════════════════════════════════════════════════════════════════════════════
 
-// ── 0. DISPLAY MODE & AUTO-CALIBRATION ──
-grpMode        = "═══ 🎚️ DISPLAY & AUTO-CALIBRATION ═══"
-displayMode    = input.string("CONTEXT", "Mode", options=["FULL","CONTEXT","SCALP"], group=grpMode,
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ v6.29: SETTINGS REORGANIZADOS EN 4 METODOLOGÍAS + GENERAL, con Enable/Disable
+// ██ Cada maestro (ofEnabled/smcEnabled/velezEnabled/paEnabled) apaga las SEÑALES +
+// ██ VISUALES + ALERTAS de su bloque. Los cálculos COMPARTIDOS (estructura→trend,
+// ██ ATR, VWAP, sesiones) siguen corriendo: apagar un bloque nunca rompe a los demás.
+// ══════════════════════════════════════════════════════════════════════════════
+gOF   = "① ⚡ ORDER FLOW"
+gOFv  = "① ⚡ ORDER FLOW ▸ VWAP Bands"
+gSMC  = "② 🏦 SMART MONEY CONCEPTS"
+gSMCs = "② 🏦 SMC ▸ Structure (BOS/CHoCH)"
+gSMCo = "② 🏦 SMC ▸ Order Blocks & FVG"
+gSMCl = "② 🏦 SMC ▸ Liquidity (EQH/EQL·Sweep·Run·DOL·IDM·Voids)"
+gSMCz = "② 🏦 SMC ▸ Levels & Zones (P/D·OTE·Sessions·Levels)"
+gSMCg = "② 🏦 SMC ▸ Entry Signals"
+gVZ   = "③ 🐘 OLIVER VELEZ"
+gVZw  = "③ 🐘 OLIVER VELEZ ▸ Weights & SMA"
+gPA   = "④ 🕯️ PRICE ACTION"
+gGd   = "⑤ ⚙️ GENERAL ▸ Display & Auto-Calibración"
+gGr   = "⑤ ⚙️ GENERAL ▸ Risk & Sizing"
+gGf   = "⑤ ⚙️ GENERAL ▸ Filters"
+gGm   = "⑤ ⚙️ GENERAL ▸ MTF Trend & Quality"
+gGs   = "⑤ ⚙️ GENERAL ▸ Score Weights"
+gGma  = "⑤ ⚙️ GENERAL ▸ Moving Average (Fast)"
+gGdash= "⑤ ⚙️ GENERAL ▸ Dashboard"
+gGal  = "⑤ ⚙️ GENERAL ▸ Alerts"
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ ① ⚡ ORDER FLOW
+// ══════════════════════════════════════════════════════════════════════════════
+ofEnabled      = input.bool(true, "▶ ENABLE ORDER FLOW", group=gOF, tooltip="Maestro: apaga señales/visuales/alertas de Order Flow (VWAP+bandas, Cum Delta, Squeeze, Displacement, OF BUY/SELL, Sweep+Δ, VWAP Bounce/Rev).")
+showOFSignals  = input.bool(true,  "Show Order Flow Signals (OF BUY/SELL)", group=gOF, tooltip="Absorción + Agotamiento + Iniciación.")
+ofAbsorpVolMult   = input.float(1.4, "OF: Absorption Min Volume (×Avg)", minval=1.0, step=0.1, group=gOF, tooltip="Absorción institucional = volumen alto SIN progreso de precio. Exige volumen mínimo en la vela que absorbe.")
+ofAbsorpRangeMult = input.float(0.8, "OF: Absorption Max Range (×ATR)", minval=0.2, step=0.1, group=gOF, tooltip="Rango máximo de la vela de absorción — alto volumen + rango contenido = esfuerzo vs. resultado.")
+showSweepDivSignal = input.bool(true, "Señal Sweep + Delta Divergence", group=gOF, tooltip="Barrida de liquidez no confirmada por el Delta Acumulado (absorción) + vela de rechazo.")
+showCumDelta    = input.bool(true,  "Show Cum. Delta Divergence",  group=gOF)
+showSqueeze     = input.bool(true,  "Show Squeeze (Pre-Breakout)", group=gOF)
+showDisplacement= input.bool(true,  "Show Multi-Bar Displacement", group=gOF)
+showVWAPBounce = input.bool(true,  "Show VWAP Bounce Signals",      group=gOF)
+showVWAPRev    = input.bool(true,  "Show VWAP Reversion Signals",   group=gOF)
+showVWAP       = input.bool(true,   "Show VWAP",                    group=gOFv)
+vwapBullColor  = input.color(#2196f3, "VWAP Bull Color",            group=gOFv)
+vwapBearColor  = input.color(#ff9800, "VWAP Bear Color",            group=gOFv)
+vwapCenterW    = input.int(2,        "VWAP Center Width",           group=gOFv, minval=1, maxval=5)
+vwapB1TopCol   = input.color(color.new(#2196f3, 40), "Band ±1σ Top Color", group=gOFv)
+vwapB1BotCol   = input.color(color.new(#ff9800, 40), "Band ±1σ Bot Color", group=gOFv)
+vwapB1Width    = input.int(1,        "Band ±1σ Width",              group=gOFv, minval=1, maxval=5)
+vwapB2TopCol   = input.color(color.new(#F44336, 50), "Band ±2σ Top Color", group=gOFv)
+vwapB2BotCol   = input.color(color.new(#4CAF50, 50), "Band ±2σ Bot Color", group=gOFv)
+vwapB2Width    = input.int(1,        "Band ±2σ Width",              group=gOFv, minval=1, maxval=5)
+vwapBandStyle  = input.string("Circles", "Band Style", options=["Circles", "Line", "Dashed"], group=gOFv)
+showVWAPFill   = input.bool(true,    "Show VWAP Fill",              group=gOFv)
+vwapFillTransp = input.int(90,       "Fill Transparency",           group=gOFv, minval=70, maxval=98)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ ② 🏦 SMART MONEY CONCEPTS
+// ══════════════════════════════════════════════════════════════════════════════
+smcEnabled   = input.bool(true, "▶ ENABLE SMART MONEY CONCEPTS", group=gSMC, tooltip="Maestro: apaga señales/visuales/alertas de SMC (OB, FVG, BOS/CHoCH visual, EQH/EQL, Sweep/Run/DOL, IDM, Voids, P/D, OTE, sesiones, niveles ICT, Wyckoff, Silver Bullet, INST/Diamond). El cálculo estructura→trend sigue activo para los demás bloques.")
+// ── Structure (BOS/CHoCH) ──
+swingLen         = input.int(5,   "Swing Length",               group=gSMCs, minval=3, maxval=15, tooltip="5min: 5 = mira 25min a cada lado para confirmar swing")
+showBOS          = input.bool(true, "Show BOS / CHoCH",         group=gSMCs)
+showInternalStructure = input.bool(false, "Show Internal Structure (iBOS/iCHoCH)", group=gSMCs, tooltip="Capa de estructura menor (swing length reducido) según distinción ICT interno vs. externo. Solo contexto — no dispara señales de entrada.")
+atrMult          = input.float(0.8, "Displacement (×ATR)",      group=gSMCs, minval=0.3, step=0.1, tooltip="5min MES/MNQ: 0.8 — movimientos institucionales")
+volMultStructural= input.float(1.2, "Volume Confirm (×Avg)",    group=gSMCs, minval=1.0, step=0.1, tooltip="5min: 1.2 — volumen MES/MNQ más distribuido")
+bosCooldown      = input.int(3, "Min Bars Between BOS", minval=1, maxval=10, group=gSMCs, tooltip="5min: 3 = 15min cooldown.")
+useMultiBarDispBreak = input.bool(true,  "Break: contar desplazamiento multi-barra como fuerte", group=gSMCs, tooltip="v6.26 [#2] Una ruptura por desplazamiento de 2-3 velas (ninguna gigante) es institucionalmente válida. Con ON, isDisplacementBull/Bear también califica el break como FUERTE (crea OB, resetea leg OTE), no solo el cuerpo de la vela de ruptura.")
+strictStructFlip = input.bool(false, "Estructura: voltear solo con ruptura fuerte", group=gSMCs, tooltip="v6.26 [#1] OFF (default): cualquier cierre más allá del nivel voltea trend/structTrend (marca wBOS/wCHoCH si es débil). ON (estricto): una ruptura DÉBIL (sin desplazamiento) solo dibuja la etiqueta wBOS/wCHoCH pero NO voltea la estructura ni consume el cooldown — el régimen solo cambia con desplazamiento real.")
+// ── Order Blocks & FVG ──
+showOB         = input.bool(true,  "Show Order Blocks",       group=gSMCo)
+obBullColor    = input.color(color.new(#00E676, 80), "Bull OB", group=gSMCo)
+obBearColor    = input.color(color.new(#FF5252, 80), "Bear OB", group=gSMCo)
+mitigatedColor = input.color(color.new(#78909C, 90), "Mitigated OB", group=gSMCo)
+maxActiveOBs   = input.int(6,   "Max Active OBs", minval=1, maxval=20, group=gSMCo)
+removeMitigated= input.bool(false, "Remove After Mitigation", group=gSMCo)
+obMaxAge       = input.int(60, "OB Max Age (bars)", minval=20, maxval=300, group=gSMCo, tooltip="5min: 60 bars = 5 horas (cubre sesión NY completa). OBs más viejos se auto-expiran.")
+obMinBodyAtr   = input.float(0.2, "OB Origin Min Body (×ATR)", minval=0.0, step=0.1, group=gSMCo, tooltip="v6.25 [B] La vela de origen del OB debe ser una vela opuesta REAL (cuerpo ≥ este ×ATR), no un doji sin desequilibrio. Si la más cercana es un doji, busca la siguiente opuesta con cuerpo. 0 = desactivado (comportamiento previo).")
+obMeanFullRange= input.bool(true, "OB Mean Threshold = 50% del rango", group=gSMCo, tooltip="v6.25 [C] ON: el umbral medio (línea punteada) y la mitigación 50% usan el 50% del RANGO completo del OB (mean threshold ICT). OFF: 50% del cuerpo.")
+showPartialMit = input.bool(true,  "Mark 50% OB Mitigation",  group=gSMCo)
+showOBProximity = input.bool(true, "Alert Near OB", group=gSMCo)
+obProximityDist = input.float(1.5, "Near OB (×ATR)", group=gSMCo, minval=0.5, step=0.5)
+showFVG        = input.bool(true,  "Show FVG / Imbalances",   group=gSMCo)
+fvgColor       = input.color(color.new(#FFEB3B, 55), "FVG Color", group=gSMCo)
+fvgMinSize     = input.float(0.5, "Min FVG Size (×ATR)", minval=0.1, step=0.1, group=gSMCo, tooltip="5min MES/MNQ: 0.5 captura FVGs institucionales.")
+fvgMaxAge      = input.int(36, "FVG Max Age (bars)", minval=10, maxval=200, group=gSMCo, tooltip="5min: 36 bars = 3 horas. FVGs sin contacto expiran.")
+maxFVGs        = input.int(15, "Max Active FVGs", minval=3, maxval=30, group=gSMCo, tooltip="v6.27 [#3] antes hardcodeado en 15. Máx FVG vivos por lado; al superarlo se descarta el más viejo.")
+fvgInvalidateCE= input.bool(false, "Invalidar FVG en 50% CE (ICT estricto)", group=gSMCo, tooltip="v6.27 [#2] ON: el FVG se invalida (se elimina) al alcanzar su 50% = Consequent Encroachment (criterio ICT estricto). OFF (default): se mantiene como POI hasta el fill total y solo recolorea al 50%.")
+// ── Liquidity ──
+showEQH        = input.bool(true,  "Show EQH (Equal Highs)", group=gSMCl)
+showEQL        = input.bool(true,  "Show EQL (Equal Lows)",  group=gSMCl)
+eqTolerance    = input.float(0.15, "EQL Tolerance (×ATR)", minval=0.05, step=0.05, group=gSMCl)
+eqLookback     = input.int(24, "EQL Lookback Bars", minval=5, maxval=50, group=gSMCl)
+colEQH         = input.color(color.new(#FF5252, 30), "EQH Color", group=gSMCl)
+colEQL         = input.color(color.new(#00E676, 30), "EQL Color", group=gSMCl)
+showIDM        = input.bool(false, "Show Inducement (IDM)", group=gSMCl)
+colIDM         = input.color(color.new(#FF9800, 0),  "IDM Color", group=gSMCl)
+showSweepSignal= input.bool(true,  "Señal Sweep EQH/EQL",          group=gSMCl, tooltip="ICT Judas Swing / Turtle Soup — barrida de liquidez + reclaim.")
+showLiqRun         = input.bool(true, "Show Liquidity Run (EQH/EQL)", group=gSMCl, tooltip="Contrapartida del Sweep: el precio perfora el pool de liquidez y CIERRA MÁS ALLÁ en vez de recuperarlo — la liquidez no lo rechaza, lo alimenta. Evento de continuación, no de reversión. Solo contexto: no dispara señal de entrada con SL/TP.")
+showDOL            = input.bool(true,  "Show Draw on Liquidity (DOL)", group=gSMCl, tooltip="Dibuja el pool de liquidez sin barrer más cercano por encima y por debajo del precio — el imán hacia el que el mercado se está desplazando. Solo visual.")
+useDOLTarget       = input.bool(false, "Use DOL as TP2 target", group=gSMCl, tooltip="OFF por defecto: cambia el TP2 de TODAS las señales. Con ON, el TP2 deja de ser un R-múltiplo ciego y pasa a ser el DOL en la dirección del trade. TP1 sigue siendo el parcial de 0.5R. Si el DOL está más cerca que dolMinAtr o no supera al TP1, se mantiene el R-múltiplo.")
+dolMinAtr          = input.float(1.0, "DOL Min Distance (×ATR)", minval=0.2, step=0.1, group=gSMCl, tooltip="Distancia mínima al DOL para admitirlo como objetivo. Evita que un pool pegado al precio degrade el TP2 a nada.")
+showLiqVoids    = input.bool(true,  "Show Liquidity Voids",        group=gSMCl)
+lvColor         = input.color(color.new(#B71C1C, 80), "Liq. Void Color", group=gSMCl)
+lvMinBars       = input.int(2, "Min Consecutive Bars for Void", minval=2, maxval=5, group=gSMCl)
+// ── Levels & Zones (P/D · OTE · Sessions · ICT Levels) ──
+showPD         = input.bool(true,  "Show Premium / Discount",    group=gSMCz)
+pdLookback     = input.int(60, "PD Lookback", minval=20, maxval=200, group=gSMCz, tooltip="5min: 60 = 5 horas de rango para calcular Premium/Discount intraday")
+premiumColor   = input.color(color.new(#FF5252, 95), "Premium Color",  group=gSMCz)
+discountColor  = input.color(color.new(#00E676, 95), "Discount Color", group=gSMCz)
+showOTE         = input.bool(true,  "Show OTE Zone (62–79%)",      group=gSMCz, tooltip="ICT Optimal Trade Entry — retroceso 62-79% Fib del leg confirmado por BOS/CHoCH.")
+oteColor        = input.color(color.new(#FF6F00, 75), "OTE Color", group=gSMCz)
+showKillZones  = input.bool(true,  "Show Kill Zones",            group=gSMCz)
+kzLondonStart  = input.int(2,  "London Start (NY hour)",         group=gSMCz, minval=0, maxval=23)
+kzLondonEnd    = input.int(5,  "London End",                     group=gSMCz, minval=0, maxval=23)
+kzNYStart      = input.int(8,  "NY Start",                       group=gSMCz, minval=0, maxval=23)
+kzNYEnd        = input.int(11, "NY End",                         group=gSMCz, minval=0, maxval=23)
+kzColor        = input.color(color.new(#FFD700, 95), "Session BG", group=gSMCz)
+showAsianRange = input.bool(true,  "Show Asian Range",           group=gSMCz)
+kzAsianStart   = input.int(20, "Asian Start (NY hour)",          group=gSMCz, minval=17, maxval=23)
+kzAsianEnd_    = input.int(2,  "Asian End (NY hour)",            group=gSMCz, minval=0,  maxval=6)
+asianColor     = input.color(color.new(#7B1FA2, 88), "Asian Color", group=gSMCz)
+showPDLevels    = input.bool(true,  "Show PDH/PDL/PWH/PWL",       group=gSMCz)
+pdlColor        = input.color(color.new(#FF9800, 30), "PDH/PDL Color", group=gSMCz)
+pwlColor        = input.color(color.new(#2196F3, 30), "PWH/PWL Color", group=gSMCz)
+showMidnight    = input.bool(true,  "Show Midnight Open (NY 00:00)", group=gSMCz)
+midnightColor   = input.color(color.new(#E040FB, 30), "Midnight Color", group=gSMCz)
+showOR          = input.bool(true,  "Show Opening Range",          group=gSMCz)
+orMinutes       = input.int(30, "OR Period (minutes)", options=[5, 15, 30], group=gSMCz)
+orColor         = input.color(color.new(#00BCD4, 80), "OR Color",  group=gSMCz)
+showSilverBullet= input.bool(true,  "Show Silver Bullet Windows",  group=gSMCz)
+sbColor         = input.color(color.new(#C0CA33, 93), "Silver Bullet Color", group=gSMCz)
+showWMSwings    = input.bool(true,  "Show Weekly/Monthly Swings",  group=gSMCz)
+wmColor         = input.color(color.new(#00E5FF, 40), "W/M Swing Color", group=gSMCz)
+// ── Entry Signals ──
+showMitigation = input.bool(true,  "Show Entry on OB Mitigation",   group=gSMCg)
+requireDiscount= input.bool(true,  "Require Discount for Buys",  group=gSMCg)
+requirePremium = input.bool(true,  "Require Premium for Sells",  group=gSMCg)
+showOTESignals = input.bool(true,  "Show OTE Entry Signals",        group=gSMCg, tooltip="ICT Optimal Trade Entry — retroceso 62-79% Fib del leg confirmado por BOS/CHoCH.")
+showWyckoff     = input.bool(true,  "Show Wyckoff Phases",         group=gSMCg)
+showWyckoffSignal  = input.bool(true, "Señal Wyckoff Spring/UTAD",  group=gSMCg, tooltip="Reversión Wyckoff confirmada en Trading Range (ADX bajo) — requiere 'Show Wyckoff Phases' activo para dibujar la etiqueta.")
+showSBSignal       = input.bool(true, "Señal Silver Bullet Pattern", group=gSMCg, tooltip="Kill Zone + sweep + FVG presente + confirmación PA — requiere 'Show Silver Bullet Windows' activo.")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ ③ 🐘 OLIVER VELEZ
+// ══════════════════════════════════════════════════════════════════════════════
+velezEnabled = input.bool(true, "▶ ENABLE OLIVER VELEZ", group=gVZ, tooltip="Maestro: apaga señales/visuales/alertas de Velez (Elephant, 180, VBS/VSS, Color Change, RBI/GBI, 3-5-8, Early Trend Shift).")
+showVelezPat   = input.bool(true,  "Show Oliver Velez Patterns (Master)", group=gVZ)
+showVelez180   = input.bool(true,  "  Show 180 Reversal", group=gVZ)
+showVelezVBS   = input.bool(true,  "  Show VBS/VSS",      group=gVZ)
+showVelezCC    = input.bool(true,  "  Show Color Change", group=gVZ)
+showVelezRBI   = input.bool(true,  "  Show RBI/GBI",      group=gVZ)
+showVelez358   = input.bool(true,  "  Show Rule 3-5-8",   group=gVZ)
+showElephant   = input.bool(true,  "Show Elephant Bars",  group=gVZ)
+colEleBull     = input.color(#00FF13, "Elephant Bull",    group=gVZ)
+colEleBear     = input.color(#FF0000, "Elephant Bear",    group=gVZ)
+eleBodyPct     = input.int(75,  "Elephant Min Body %", minval=50, group=gVZ)
+eleAtrMult     = input.float(1.3, "Elephant Size (×ATR)", minval=0.5, step=0.1, group=gVZ)
+eleVolMult     = input.float(1.2, "Elephant Volume (×Avg)", minval=0.5, step=0.1, group=gVZ)
+eleRequireClear= input.bool(true, "Elephant Requires Clearing 3 Opposite Bars", group=gVZ, tooltip="Metodología Velez: el 'institutional footprint' real exige que la vela limpie (cierre más allá del rango de) 3+ velas previas consecutivas del color opuesto, no solo tamaño/volumen.")
+useEleTrigger  = input.bool(true, "Elephant = Super-Signal", group=gVZ)
+useEarlyTrendShift= input.bool(true,  "Early Trend Shift on Velez 180+Elephant", group=gVZ, tooltip="Adelanta cambio de tendencia local cuando aparece 180 Reversal o Elephant contra-tendencia")
+w180Weight        = input.float(2.0,  "Weight: 180 Reversal", minval=0.0, maxval=5.0, step=0.5, group=gVZw)
+wEngulfWeight     = input.float(1.5,  "Weight: Engulfing",     minval=0.0, maxval=5.0, step=0.5, group=gVZw)
+wEleWeight        = input.float(2.5,  "Weight: Elephant Bar",   minval=0.0, maxval=5.0, step=0.5, group=gVZw)
+wRbiWeight        = input.float(1.0,  "Weight: RBI / GBI",      minval=0.0, maxval=5.0, step=0.5, group=gVZw)
+wExhaustWeight    = input.float(1.5,  "Weight: 3-5-8 Exhaustion", minval=0.0, maxval=5.0, step=0.5, group=gVZw)
+showMA2  = input.bool(true,  "Show Med MA (Oliver SMA)", group=gVZw)
+ma2Type  = input.string("SMA", "Med MA Type", options=["SMA","EMA","WMA","HMA","VWMA"], group=gVZw)
+ma2Len   = input.int(20,  "Med MA Length", minval=1, group=gVZw)
+ma2Color = input.color(#ff9800, "Med MA Color", group=gVZw)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ ④ 🕯️ PRICE ACTION
+// ══════════════════════════════════════════════════════════════════════════════
+paEnabled    = input.bool(true, "▶ ENABLE PRICE ACTION", group=gPA, tooltip="Maestro: apaga los patrones de vela (Pin/Outside/Shaved/Inside) y su uso como confluencia.")
+showPinBars    = input.bool(true,  "Show Pin Bars",       group=gPA)
+colPinBull     = input.color(#00E676, "Pin Bull",         group=gPA)
+colPinBear     = input.color(color.rgb(255,0,149), "Pin Bear", group=gPA)
+showOutsideBars= input.bool(false, "Show Outside Bars",   group=gPA)
+colOutBull     = input.color(#FF9800, "Outside Bull",     group=gPA)
+colOutBear     = input.color(#E65100, "Outside Bear",     group=gPA)
+showShavedBars = input.bool(false, "Show Shaved Bars",    group=gPA)
+colShavedBull  = input.color(#00C853, "Shaved Bull",      group=gPA)
+colShavedBear  = input.color(#d500b9, "Shaved Bear",      group=gPA)
+showInsideBars = input.bool(false, "Show Inside Bars",    group=gPA)
+colInBull      = input.color(#FFEB3B, "Inside Bull",      group=gPA)
+colInBear      = input.color(#FBC02D, "Inside Bear",      group=gPA)
+paRequireDisplacement = input.bool(true, "Engulf/Momentum Require Range Expansion (>0.5×ATR)", group=gPA, tooltip="Criterio institucional: un engulfing o una vela de momentum solo son desplazamiento si el rango se expande. Sin esto, una vela de rango mínimo obtiene el peso máximo de price action en el score (+3.0).")
+showPASignals  = input.bool(true,  "Use PA Pattern as Confluence (Diamond/OB Entry)", group=gPA, tooltip="v6.9: ya no dispara una alerta de trade propia — el tier genérico BUY/ELITE BUY fue eliminado por no corresponder a un patrón institucional con nombre (era pin bar/outside bar + score, sin POI específico). Sigue siendo un filtro interno para validar entradas ⬡ DIAMOND y de mitigación de Order Block (🏦 INST).")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ ⑤ ⚙️ GENERAL / ENGINE (infra transversal — no pertenece a una sola metodología)
+// ══════════════════════════════════════════════════════════════════════════════
+displayMode    = input.string("CONTEXT", "Mode", options=["FULL","CONTEXT","SCALP"], group=gGd,
                   tooltip="SCALP=only Elite+Diamond signals & nearest OB | CONTEXT=structure+OBs+FVGs | FULL=everything")
-useAutoCalib   = input.bool(true, "⚡ Auto-Calibrate Parameters by Timeframe", group=grpMode,
+useAutoCalib   = input.bool(true, "⚡ Auto-Calibrate Parameters by Timeframe", group=gGd,
                   tooltip="Automatically adjusts OB/FVG age limits, swing lengths, ATR displacement and BOS cooldown based on active timeframe (1M-3M, 5M-15M, 30M-1H, 4H/Daily)")
+// ── Risk & Sizing ──
+riskReward     = input.float(2.5,  "Risk:Reward", minval=1.0, step=0.5, group=gGr)
+minScore       = input.int(7, "Min Score (Standard)", minval=1, maxval=17, group=gGr)
+paMaxSignalGap = input.int(4, "Min Bars Between Signals", minval=1, maxval=30, group=gGr)
+showTP2        = input.bool(true, "Show TP1 + TP2 lines", group=gGr)
+showSLTP       = input.bool(true,  "Show SL/TP Lines",              group=gGr)
+accountBalance = input.float(10000.0, "Account Balance ($)", minval=100.0, group=gGr)
+riskPercentage = input.float(1.0, "Risk Per Trade (%)", minval=0.1, maxval=10.0, step=0.1, group=gGr)
+// ── Filters ──
+usePAFilter    = input.bool(true,  "Require PA Confirmation",    group=gGf)
+useVWAPFilter  = input.bool(true, "Filter: VWAP Trend Alignment", group=gGf)
+useVolFilter   = input.bool(false, "Filter: High Volume",        group=gGf)
+useRsiFilter   = input.bool(false, "Filter: RSI Levels",         group=gGf)
+useAtrFilter   = input.bool(false, "Filter: Normal Volatility",  group=gGf)
+useMTF         = input.bool(false, "Require MTF (1H+D)",         group=gGf)
+volMultEntry   = input.float(1.5, "Volume Mult", minval=1.0, group=gGf)
+rsiLen         = input.int(14, "RSI Length",    group=gGf)
+rsiOS          = input.int(30, "RSI Oversold",  group=gGf)
+rsiOB_         = input.int(70, "RSI Overbought", group=gGf)
+paRequireNoChop= input.bool(true,  "Filter Choppy Market (ADX)",   group=gGf)
+paAdxLen       = input.int(14,     "  ADX Length", minval=5,        group=gGf)
+paAdxSmooth    = input.int(14,     "  ADX Smoothing", minval=2, maxval=50, group=gGf, tooltip="Suavizado del ADX, independiente de la longitud de DI. Wilder original: 14 en ambos.")
+paAdxMin       = input.int(22,     "  Min ADX", minval=10, maxval=40, group=gGf)
+maxCandleSizeAtr = input.float(2.2, "Max Confirmation Candle Size (×ATR)", minval=0.5, step=0.1, group=gGf)
+// ── MTF Trend & Quality ──
+mtfMinStrength    = input.float(4.0,  "Min Trend Quality (0-10)", minval=0.0, maxval=10.0, step=0.5, group=gGm, tooltip="Calidad mínima (0-10) en cada TF para considerar la tendencia sólida")
+useMTFQuality     = input.bool(false, "Require Quality MTF for Signals", group=gGm, tooltip="Si activado, requiere tendencia HTF alineada y con calidad alta (semáforo 🟢)")
+// ── Score Weights (motor de confluencia — fusión de las 4 metodologías) ──
+wScStruct   = input.float(2.0, "Estructura (BOS / CHoCH)", minval=0.0, maxval=6.0, step=0.5, group=gGs, tooltip="v6.23: subido de 1.0 a 2.0 — el rompimiento estructural es el núcleo de SMC; debe pesar como la confirmación de price action.")
+wScPA       = input.float(3.0, "Price Action (engulf/pin/outside)", minval=0.0, maxval=6.0, step=0.5, group=gGs, tooltip="Peso del patrón PA más fuerte (engulfing o pin+outside). Los tiers menores escalan a 2/3 (pin u outside solo) y 1/3 (momentum) de este valor.")
+wScVwapBias = input.float(2.0, "VWAP Bias (pendiente+posición, fusionado)", minval=0.0, maxval=6.0, step=0.5, group=gGs, tooltip="v6.23: fusiona vwapTrendingUp (1.5) + bullTrend (1.0) que estaban ACOPLADOS y sumaban 2.5 juntos en toda tendencia (doble conteo del mismo sesgo VWAP). Ahora: ambos → peso completo; uno solo → mitad.")
+wScVwapProx = input.float(2.0, "VWAP Proximity (mean-revert)", minval=0.0, maxval=6.0, step=0.5, group=gGs, tooltip="Peso máximo por cercanía al VWAP (centro). Bandas externas escalan a 0.75× y la banda ±1σ a 0.5×.")
+wScDiscount = input.float(1.5, "Premium / Discount", minval=0.0, maxval=6.0, step=0.5, group=gGs)
+wScOTE      = input.float(1.5, "OTE Zone (62-79%)", minval=0.0, maxval=6.0, step=0.5, group=gGs)
+wScDelta    = input.float(1.0, "Cumulative Delta confirm", minval=0.0, maxval=6.0, step=0.5, group=gGs)
+wScVol      = input.float(1.0, "High Volume", minval=0.0, maxval=6.0, step=0.5, group=gGs)
+wScDisp     = input.float(1.0, "Displacement", minval=0.0, maxval=6.0, step=0.5, group=gGs)
+wScMTF      = input.float(2.0, "MTF Quality congruence", minval=0.0, maxval=6.0, step=0.5, group=gGs, tooltip="Alineación HTF con calidad. La congruencia simple (sin calidad) vale la mitad de este valor.")
+wScPOIob    = input.float(1.5, "POI: Order Block proximity", minval=0.0, maxval=6.0, step=0.5, group=gGs)
+wScPOIfvg   = input.float(1.0, "POI: FVG proximity", minval=0.0, maxval=6.0, step=0.5, group=gGs)
+wScExhaust  = input.float(1.0, "Penalización agotamiento 3-5-8 (Velez)", minval=0.0, maxval=6.0, step=0.5, group=gGs, tooltip="v6.28 [#1] Regla 3-5-8 de Velez: resta score al comprar/vender DENTRO de una extensión exhausta. −1× en la 5ª vela consecutiva del mismo color (caución) y −2× en la 8ª (climax). Evita perseguir el movimiento agotado. 0 = desactivado.")
+// ── Moving Average (Fast / trend) ──
+showMA1  = input.bool(true,  "Show Fast MA (Trend)",   group=gGma)
+ma1Type  = input.string("EMA", "Fast MA Type", options=["SMA","EMA","WMA","HMA","VWMA"], group=gGma)
+ma1Len   = input.int(9,   "Fast MA Length", minval=1, group=gGma)
+ma1Color = input.color(#2196f3, "Fast MA Color", group=gGma)
+// ── Dashboard ──
+showDash     = input.bool(true,  "Show Dashboard",  group=gGdash)
+dashSize     = input.string("Small", "Size", options=["Tiny","Small","Normal"], group=gGdash)
+showMTFDash  = input.bool(true,  "Show MTF Table",  group=gGdash)
+dashShowScore= input.bool(true,  "Show Scores",     group=gGdash)
+// ── Alerts ──
+showDeadZoneAlert  = input.bool(true, "Alert: Dead Zone (No Trade)", group=gGal)
 
-// ── 0b. ALERTS — ENABLE/DISABLE (v6.15: todos los interruptores maestros de alertas, unificados en una
-//        sola sección. Cada uno también condiciona directamente su alertcondition() correspondiente más
-//        abajo — antes varios toggles solo apagaban la etiqueta visual pero la alerta seguía disparando.) ──
-grpAlerts          = "═══ 🔔 ALERTS — ENABLE/DISABLE ═══"
-showDeadZoneAlert  = input.bool(true, "Alert: Dead Zone (No Trade)", group=grpAlerts)
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ MASTER GATES (v6.29) — cada maestro apaga SEÑALES + VISUALES + ALERTAS de su bloque.
+// Se re-ANDan los toggles de feature con su maestro en un solo lugar; el resto del script
+// ya respeta cada toggle, así que el maestro se propaga solo. Los cálculos COMPARTIDOS
+// (estructura→trend, ATR, VWAP, sesiones) NO se tocan: apagar un bloque no rompe a los demás.
+// ══════════════════════════════════════════════════════════════════════════════
+showVWAP           := showVWAP           and ofEnabled
+showVWAPFill       := showVWAPFill       and ofEnabled
+showOFSignals      := showOFSignals      and ofEnabled
+showCumDelta       := showCumDelta       and ofEnabled
+showSqueeze        := showSqueeze        and ofEnabled
+showDisplacement   := showDisplacement   and ofEnabled
+showSweepDivSignal := showSweepDivSignal and ofEnabled
+showVWAPBounce     := showVWAPBounce     and ofEnabled
+showVWAPRev        := showVWAPRev        and ofEnabled
 
-// ── 1. ORDER BLOCKS ──
-grpOB          = "═══ 📦 ORDER BLOCKS ═══"
-showOB         = input.bool(true,  "Show Order Blocks",       group=grpOB)
-obBullColor    = input.color(color.new(#00E676, 80), "Bull OB", group=grpOB)
-obBearColor    = input.color(color.new(#FF5252, 80), "Bear OB", group=grpOB)
-mitigatedColor = input.color(color.new(#78909C, 90), "Mitigated OB", group=grpOB)
-maxActiveOBs   = input.int(6,   "Max Active OBs", minval=1, maxval=20, group=grpOB)
-removeMitigated= input.bool(false, "Remove After Mitigation", group=grpOB)
-obMaxAge       = input.int(60, "OB Max Age (bars)", minval=20, maxval=300, group=grpOB, tooltip="5min: 60 bars = 5 horas (cubre sesión NY completa). OBs más viejos se auto-expiran.")
-obMinBodyAtr   = input.float(0.2, "OB Origin Min Body (×ATR)", minval=0.0, step=0.1, group=grpOB, tooltip="v6.25 [B] La vela de origen del OB debe ser una vela opuesta REAL (cuerpo ≥ este ×ATR), no un doji sin desequilibrio. Si la más cercana es un doji, busca la siguiente opuesta con cuerpo. 0 = desactivado (comportamiento previo).")
-obMeanFullRange= input.bool(true, "OB Mean Threshold = 50% del rango", group=grpOB, tooltip="v6.25 [C] ON: el umbral medio (línea punteada) y la mitigación 50% usan el 50% del RANGO completo del OB (mean threshold ICT). OFF: 50% del cuerpo.")
-showFVG        = input.bool(true,  "Show FVG / Imbalances",   group=grpOB)
-fvgColor       = input.color(color.new(#FFEB3B, 55), "FVG Color", group=grpOB)
-fvgMinSize     = input.float(0.5, "Min FVG Size (×ATR)", minval=0.1, step=0.1, group=grpOB, tooltip="5min MES/MNQ: 0.5 captura FVGs institucionales.")
-fvgMaxAge      = input.int(36, "FVG Max Age (bars)", minval=10, maxval=200, group=grpOB, tooltip="5min: 36 bars = 3 horas. FVGs sin contacto expiran.")
-maxFVGs        = input.int(15, "Max Active FVGs", minval=3, maxval=30, group=grpOB, tooltip="v6.27 [#3] antes hardcodeado en 15. Máx FVG vivos por lado; al superarlo se descarta el más viejo.")
-fvgInvalidateCE= input.bool(false, "Invalidar FVG en 50% CE (ICT estricto)", group=grpOB, tooltip="v6.27 [#2] ON: el FVG se invalida (se elimina) al alcanzar su 50% = Consequent Encroachment (criterio ICT estricto). OFF (default): se mantiene como POI hasta el fill total y solo recolorea al 50%.")
-showPartialMit = input.bool(true,  "Mark 50% OB Mitigation",  group=grpOB)
+showOB             := showOB             and smcEnabled
+showFVG            := showFVG            and smcEnabled
+showBOS            := showBOS            and smcEnabled
+showInternalStructure := showInternalStructure and smcEnabled
+showPD             := showPD             and smcEnabled
+showOTE            := showOTE            and smcEnabled
+showEQH            := showEQH            and smcEnabled
+showEQL            := showEQL            and smcEnabled
+showIDM            := showIDM            and smcEnabled
+showKillZones      := showKillZones      and smcEnabled
+showAsianRange     := showAsianRange     and smcEnabled
+showPDLevels       := showPDLevels       and smcEnabled
+showMidnight       := showMidnight       and smcEnabled
+showOR             := showOR             and smcEnabled
+showSilverBullet   := showSilverBullet   and smcEnabled
+showWMSwings       := showWMSwings       and smcEnabled
+showLiqVoids       := showLiqVoids       and smcEnabled
+showLiqRun         := showLiqRun         and smcEnabled
+showDOL            := showDOL            and smcEnabled
+showSweepSignal    := showSweepSignal    and smcEnabled
+showWyckoff        := showWyckoff        and smcEnabled
+showWyckoffSignal  := showWyckoffSignal  and smcEnabled
+showSBSignal       := showSBSignal       and smcEnabled
+showOTESignals     := showOTESignals     and smcEnabled
+showMitigation     := showMitigation     and smcEnabled
+showOBProximity    := showOBProximity    and smcEnabled
 
-// ── 2. MARKET STRUCTURE ──
-grpSMC           = "═══ 🏦 STRUCTURE & ORDER FLOW ═══"
-swingLen         = input.int(5,   "Swing Length",               group=grpSMC, minval=3, maxval=15, tooltip="5min: 5 = mira 25min a cada lado para confirmar swing")
-showBOS          = input.bool(true, "Show BOS / CHoCH",         group=grpAlerts)
-showInternalStructure = input.bool(false, "Show Internal Structure (iBOS/iCHoCH)", group=grpAlerts, tooltip="Capa de estructura menor (swing length reducido) según distinción ICT interno vs. externo. Solo contexto — no dispara señales de entrada.")
-atrMult          = input.float(0.8, "Displacement (×ATR)",      group=grpSMC, minval=0.3, step=0.1, tooltip="5min MES/MNQ: 0.8 — movimientos institucionales")
-volMultStructural= input.float(1.2, "Volume Confirm (×Avg)",    group=grpSMC, minval=1.0, step=0.1, tooltip="5min: 1.2 — volumen MES/MNQ más distribuido")
-bosCooldown      = input.int(3, "Min Bars Between BOS", minval=1, maxval=10, group=grpSMC, tooltip="5min: 3 = 15min cooldown.")
-useMultiBarDispBreak = input.bool(true,  "Break: contar desplazamiento multi-barra como fuerte", group=grpSMC, tooltip="v6.26 [#2] Una ruptura por desplazamiento de 2-3 velas (ninguna gigante) es institucionalmente válida. Con ON, isDisplacementBull/Bear también califica el break como FUERTE (crea OB, resetea leg OTE), no solo el cuerpo de la vela de ruptura.")
-strictStructFlip = input.bool(false, "Estructura: voltear solo con ruptura fuerte", group=grpSMC, tooltip="v6.26 [#1] OFF (default): cualquier cierre más allá del nivel voltea trend/structTrend (marca wBOS/wCHoCH si es débil). ON (estricto): una ruptura DÉBIL (sin desplazamiento) solo dibuja la etiqueta wBOS/wCHoCH pero NO voltea la estructura ni consume el cooldown — el régimen solo cambia con desplazamiento real.")
+showElephant       := showElephant       and velezEnabled
+showVelezPat       := showVelezPat       and velezEnabled
+showMA2            := showMA2            and velezEnabled
+useEarlyTrendShift := useEarlyTrendShift and velezEnabled
 
-// ── 3. SESSIONS ──
-grpCtx         = "═══ ⏰ SESSIONS & CONTEXT ═══"
-showKillZones  = input.bool(true,  "Show Kill Zones",            group=grpCtx)
-kzLondonStart  = input.int(2,  "London Start (NY hour)",         group=grpCtx, minval=0, maxval=23)
-kzLondonEnd    = input.int(5,  "London End",                     group=grpCtx, minval=0, maxval=23)
-kzNYStart      = input.int(8,  "NY Start",                       group=grpCtx, minval=0, maxval=23)
-kzNYEnd        = input.int(11, "NY End",                         group=grpCtx, minval=0, maxval=23)
-kzColor        = input.color(color.new(#FFD700, 95), "Session BG", group=grpCtx)
-showPD         = input.bool(true,  "Show Premium / Discount",    group=grpCtx)
-pdLookback     = input.int(60, "PD Lookback", minval=20, maxval=200, group=grpCtx, tooltip="5min: 60 = 5 horas de rango para calcular Premium/Discount intraday")
-premiumColor   = input.color(color.new(#FF5252, 95), "Premium Color",  group=grpCtx)
-discountColor  = input.color(color.new(#00E676, 95), "Discount Color", group=grpCtx)
-showAsianRange = input.bool(true,  "Show Asian Range",           group=grpCtx)
-kzAsianStart   = input.int(20, "Asian Start (NY hour)",          group=grpCtx, minval=17, maxval=23)
-kzAsianEnd_    = input.int(2,  "Asian End (NY hour)",            group=grpCtx, minval=0,  maxval=6)
-asianColor     = input.color(color.new(#7B1FA2, 88), "Asian Color", group=grpCtx)
-
-// ── 3b. VWAP BANDS ──
-grpVWAP        = "═══ 📊 VWAP BANDS ═══"
-showVWAP       = input.bool(true,   "Show VWAP",                    group=grpVWAP)
-vwapBullColor  = input.color(#2196f3, "VWAP Bull Color",            group=grpVWAP)
-vwapBearColor  = input.color(#ff9800, "VWAP Bear Color",            group=grpVWAP)
-vwapCenterW    = input.int(2,        "VWAP Center Width",           group=grpVWAP, minval=1, maxval=5)
-vwapB1TopCol   = input.color(color.new(#2196f3, 40), "Band ±1σ Top Color", group=grpVWAP)
-vwapB1BotCol   = input.color(color.new(#ff9800, 40), "Band ±1σ Bot Color", group=grpVWAP)
-vwapB1Width    = input.int(1,        "Band ±1σ Width",              group=grpVWAP, minval=1, maxval=5)
-vwapB2TopCol   = input.color(color.new(#F44336, 50), "Band ±2σ Top Color", group=grpVWAP)
-vwapB2BotCol   = input.color(color.new(#4CAF50, 50), "Band ±2σ Bot Color", group=grpVWAP)
-vwapB2Width    = input.int(1,        "Band ±2σ Width",              group=grpVWAP, minval=1, maxval=5)
-vwapBandStyle  = input.string("Circles", "Band Style", options=["Circles", "Line", "Dashed"], group=grpVWAP)
-showVWAPFill   = input.bool(true,    "Show VWAP Fill",              group=grpVWAP)
-vwapFillTransp = input.int(90,       "Fill Transparency",           group=grpVWAP, minval=70, maxval=98)
-
-// ── 4. PATTERNS ──
-grpPat         = "═══ 🕯️ PATTERNS & FILTERS ═══"
-showPinBars    = input.bool(true,  "Show Pin Bars",       group=grpPat)
-colPinBull     = input.color(#00E676, "Pin Bull",         group=grpPat)
-colPinBear     = input.color(color.rgb(255,0,149), "Pin Bear", group=grpPat)
-showOutsideBars= input.bool(false, "Show Outside Bars",   group=grpPat)
-colOutBull     = input.color(#FF9800, "Outside Bull",     group=grpPat)
-colOutBear     = input.color(#E65100, "Outside Bear",     group=grpPat)
-showShavedBars = input.bool(false, "Show Shaved Bars",    group=grpPat)
-colShavedBull  = input.color(#00C853, "Shaved Bull",      group=grpPat)
-colShavedBear  = input.color(#d500b9, "Shaved Bear",      group=grpPat)
-showInsideBars = input.bool(false, "Show Inside Bars",    group=grpPat)
-colInBull      = input.color(#FFEB3B, "Inside Bull",      group=grpPat)
-colInBear      = input.color(#FBC02D, "Inside Bear",      group=grpPat)
-showElephant   = input.bool(true,  "Show Elephant Bars",  group=grpAlerts)
-colEleBull     = input.color(#00FF13, "Elephant Bull",    group=grpPat)
-colEleBear     = input.color(#FF0000, "Elephant Bear",    group=grpPat)
-eleBodyPct     = input.int(75,  "Elephant Min Body %", minval=50, group=grpPat)
-eleAtrMult     = input.float(1.3, "Elephant Size (×ATR)", minval=0.5, step=0.1, group=grpPat)
-eleVolMult     = input.float(1.2, "Elephant Volume (×Avg)", minval=0.5, step=0.1, group=grpPat)
-eleRequireClear= input.bool(true, "Elephant Requires Clearing 3 Opposite Bars", group=grpPat, tooltip="Metodología Velez: el 'institutional footprint' real exige que la vela limpie (cierre más allá del rango de) 3+ velas previas consecutivas del color opuesto, no solo tamaño/volumen.")
-useEleTrigger  = input.bool(true, "Elephant = Super-Signal", group=grpPat)
-// v6.19 [FIX-P3] el filtro de tamaño (isSizeValid, rango > 0.5×ATR) solo se aplicaba al pin bar. Engulfing
-// y momentum — que pesan más en el score y alimentan Wyckoff/Silver Bullet/Sweep/OTE/OR-Retest — no exigían
-// ninguna expansión de rango: una vela de rango mínimo calificaba como "desplazamiento" institucional.
-paRequireDisplacement = input.bool(true, "Engulf/Momentum Require Range Expansion (>0.5×ATR)", group=grpPat, tooltip="Criterio institucional: un engulfing o una vela de momentum solo son desplazamiento si el rango se expande. Sin esto, una vela de rango mínimo obtiene el peso máximo de price action en el score (+3.0).")
-showEQH        = input.bool(true,  "Show EQH (Equal Highs)", group=grpPat)
-showEQL        = input.bool(true,  "Show EQL (Equal Lows)",  group=grpPat)
-eqTolerance    = input.float(0.15, "EQL Tolerance (×ATR)", minval=0.05, step=0.05, group=grpPat)
-eqLookback     = input.int(24, "EQL Lookback Bars", minval=5, maxval=50, group=grpPat)
-colEQH         = input.color(color.new(#FF5252, 30), "EQH Color", group=grpPat)
-colEQL         = input.color(color.new(#00E676, 30), "EQL Color", group=grpPat)
-showIDM        = input.bool(false, "Show Inducement (IDM)", group=grpPat)
-colIDM         = input.color(color.new(#FF9800, 0),  "IDM Color", group=grpPat)
-showVelezPat   = input.bool(true,  "Show Oliver Velez Patterns (Master)", group=grpAlerts)
-showVelez180   = input.bool(true,  "  Show 180 Reversal", group=grpAlerts)
-showVelezVBS   = input.bool(true,  "  Show VBS/VSS",      group=grpAlerts)
-showVelezCC    = input.bool(true,  "  Show Color Change", group=grpAlerts)
-showVelezRBI   = input.bool(true,  "  Show RBI/GBI",      group=grpAlerts)
-showVelez358   = input.bool(true,  "  Show Rule 3-5-8",   group=grpAlerts)
-
-// ── 5. UNIFIED SIGNAL ENGINE (v6.9: solo patrones con nombre en metodología institucional) ──
-grpSignal      = "═══ 🎯 UNIFIED SIGNALS (Institutional Patterns Only) ═══"
-showMitigation = input.bool(true,  "Show Entry on OB Mitigation",   group=grpAlerts)
-requireDiscount= input.bool(true,  "Require Discount for Buys",  group=grpSignal)
-requirePremium = input.bool(true,  "Require Premium for Sells",  group=grpSignal)
-riskReward     = input.float(2.5,  "Risk:Reward", minval=1.0, step=0.5, group=grpSignal)
-minScore       = input.int(7, "Min Score (Standard)", minval=1, maxval=17, group=grpSignal)
-usePAFilter    = input.bool(true,  "Require PA Confirmation",    group=grpSignal)
-useVWAPFilter  = input.bool(true, "Filter: VWAP Trend Alignment", group=grpSignal)
-useVolFilter   = input.bool(false, "Filter: High Volume",        group=grpSignal)
-useRsiFilter   = input.bool(false, "Filter: RSI Levels",         group=grpSignal)
-useAtrFilter   = input.bool(false, "Filter: Normal Volatility",  group=grpSignal)
-useMTF         = input.bool(false, "Require MTF (1H+D)",         group=grpSignal)
-volMultEntry   = input.float(1.5, "Volume Mult", minval=1.0, group=grpSignal)
-rsiLen         = input.int(14, "RSI Length",    group=grpSignal)
-rsiOS          = input.int(30, "RSI Oversold",  group=grpSignal)
-rsiOB_         = input.int(70, "RSI Overbought", group=grpSignal)
-showTP2        = input.bool(true, "Show TP1 + TP2 lines", group=grpSignal)
-showPASignals  = input.bool(true,  "Use PA Pattern as Confluence (Diamond/OB Entry)", group=grpSignal,
-                  tooltip="v6.9: ya no dispara una alerta de trade propia — el tier genérico BUY/ELITE BUY fue eliminado por no corresponder a un patrón institucional con nombre (era pin bar/outside bar + score, sin POI específico). Sigue siendo un filtro interno para validar entradas ⬡ DIAMOND y de mitigación de Order Block (🏦 INST).")
-showVWAPBounce = input.bool(true,  "Show VWAP Bounce Signals",      group=grpAlerts)
-showVWAPRev    = input.bool(true,  "Show VWAP Reversion Signals",   group=grpAlerts)
-showOTESignals = input.bool(true,  "Show OTE Entry Signals",        group=grpAlerts, tooltip="ICT Optimal Trade Entry — retroceso 62-79% Fib del leg confirmado por BOS/CHoCH.")
-showOFSignals  = input.bool(true,  "Show Order Flow Signals (OF BUY/SELL)", group=grpAlerts, tooltip="Absorción + Agotamiento + Iniciación.")
-ofAbsorpVolMult   = input.float(1.4, "  OF: Absorption Min Volume (×Avg)", minval=1.0, step=0.1, group=grpSignal, tooltip="Absorción institucional = volumen alto SIN progreso de precio. Exige volumen mínimo en la vela que absorbe.")
-ofAbsorpRangeMult = input.float(0.8, "  OF: Absorption Max Range (×ATR)", minval=0.2, step=0.1, group=grpSignal, tooltip="Rango máximo de la vela de absorción — alto volumen + rango contenido = esfuerzo vs. resultado.")
-paMaxSignalGap = input.int(4, "Min Bars Between Signals", minval=1, maxval=30, group=grpSignal)
-showSweepSignal= input.bool(true,  "Señal Sweep EQH/EQL",          group=grpAlerts, tooltip="ICT Judas Swing / Turtle Soup — barrida de liquidez + reclaim.")
-// v6.9: toggles nuevos — antes Wyckoff Spring/UTAD y Silver Bullet Pattern se detectaban correctamente pero
-// no llegaban a ser una señal de trade con SL/TP; Sweep+Divergencia es una señal nueva que no existía.
-showWyckoffSignal  = input.bool(true, "Señal Wyckoff Spring/UTAD",  group=grpAlerts, tooltip="Reversión Wyckoff confirmada en Trading Range (ADX bajo) — requiere 'Show Wyckoff Phases' activo para dibujar la etiqueta.")
-showSBSignal       = input.bool(true, "Señal Silver Bullet Pattern", group=grpAlerts, tooltip="Kill Zone + sweep + FVG presente + confirmación PA — requiere 'Show Silver Bullet Windows' activo.")
-showSweepDivSignal = input.bool(true, "Señal Sweep + Delta Divergence", group=grpAlerts, tooltip="Barrida de liquidez no confirmada por el Delta Acumulado (absorción) + vela de rechazo.")
-showLiqRun         = input.bool(true, "Show Liquidity Run (EQH/EQL)", group=grpAlerts, tooltip="Contrapartida del Sweep: el precio perfora el pool de liquidez y CIERRA MÁS ALLÁ en vez de recuperarlo — la liquidez no lo rechaza, lo alimenta. Evento de continuación, no de reversión. Solo contexto: no dispara señal de entrada con SL/TP.")
-showDOL            = input.bool(true,  "Show Draw on Liquidity (DOL)", group=grpAlerts, tooltip="Dibuja el pool de liquidez sin barrer más cercano por encima y por debajo del precio — el imán hacia el que el mercado se está desplazando. Solo visual.")
-useDOLTarget       = input.bool(false, "  Use DOL as TP2 target", group=grpAlerts, tooltip="OFF por defecto: cambia el TP2 de TODAS las señales. Con ON, el TP2 deja de ser un R-múltiplo ciego y pasa a ser el DOL en la dirección del trade. TP1 sigue siendo el parcial de 0.5R. Si el DOL está más cerca que dolMinAtr o no supera al TP1, se mantiene el R-múltiplo.")
-dolMinAtr          = input.float(1.0, "  DOL Min Distance (×ATR)", minval=0.2, step=0.1, group=grpAlerts, tooltip="Distancia mínima al DOL para admitirlo como objetivo. Evita que un pool pegado al precio degrade el TP2 a nada.")
-paRequireNoChop= input.bool(true,  "Filter Choppy Market (ADX)",   group=grpSignal)
-paAdxLen       = input.int(14,     "  ADX Length", minval=5,        group=grpSignal)
-// v6.17 [FIX-N5] El suavizado del ADX estaba cableado al mismo valor que la longitud de DI —
-// ta.dmi(paAdxLen, paAdxLen) — sin input propio. Se expone por separado, como es estándar.
-paAdxSmooth    = input.int(14,     "  ADX Smoothing", minval=2, maxval=50, group=grpSignal, tooltip="Suavizado del ADX, independiente de la longitud de DI. Wilder original: 14 en ambos.")
-paAdxMin       = input.int(22,     "  Min ADX", minval=10, maxval=40, group=grpSignal)
-showSLTP       = input.bool(true,  "Show SL/TP Lines",              group=grpSignal)
-maxCandleSizeAtr = input.float(2.2, "Max Confirmation Candle Size (×ATR)", minval=0.5, step=0.1, group=grpSignal)
-accountBalance = input.float(10000.0, "Account Balance ($)", minval=100.0, group=grpSignal)
-riskPercentage = input.float(1.0, "Risk Per Trade (%)", minval=0.1, maxval=10.0, step=0.1, group=grpSignal)
-
-// ── 5b. MTF TREND & QUALITY ──
-grpMTFQ           = "═══ 📡 MTF TREND & QUALITY ═══"
-w180Weight        = input.float(2.0,  "Weight: 180 Reversal", minval=0.0, maxval=5.0, step=0.5, group=grpMTFQ)
-wEngulfWeight     = input.float(1.5,  "Weight: Engulfing",     minval=0.0, maxval=5.0, step=0.5, group=grpMTFQ)
-wEleWeight        = input.float(2.5,  "Weight: Elephant Bar",   minval=0.0, maxval=5.0, step=0.5, group=grpMTFQ)
-wRbiWeight        = input.float(1.0,  "Weight: RBI / GBI",      minval=0.0, maxval=5.0, step=0.5, group=grpMTFQ)
-wExhaustWeight    = input.float(1.5,  "Weight: 3-5-8 Exhaustion", minval=0.0, maxval=5.0, step=0.5, group=grpMTFQ)
-mtfMinStrength    = input.float(4.0,  "Min Trend Quality (0-10)", minval=0.0, maxval=10.0, step=0.5, group=grpMTFQ, tooltip="Calidad mínima (0-10) en cada TF para considerar la tendencia sólida")
-useMTFQuality     = input.bool(false, "Require Quality MTF for Signals", group=grpMTFQ, tooltip="Si activado, requiere tendencia HTF alineada y con calidad alta (semáforo 🟢)")
-useEarlyTrendShift= input.bool(true,  "Early Trend Shift on Velez 180+Elephant", group=grpMTFQ, tooltip="Adelanta cambio de tendencia local cuando aparece 180 Reversal o Elephant contra-tendencia")
-
-// ── 5c. SCORE WEIGHTS (v6.23: pesos de la confluencia base, antes literales hardcodeados) ──
-// Exponer los pesos permite OPTIMIZARLOS con datos (backtest) en vez de fijarlos por opinión.
-// Los defaults reproducen el comportamiento v6.22 EXCEPTO el rebalanceo SMC pedido:
-//   · Estructura (BOS/CHoCH) sube de 1.0 → 2.0 (evento central de SMC, a la par de la confirmación PA)
-//   · VWAP bias se fusiona en UN término (antes pendiente 1.5 + posición 1.0 = 2.5 acoplados → 2.0 máx)
-grpScoreW  = "═══ ⚖️ SCORE WEIGHTS (Confluence Engine) ═══"
-wScStruct   = input.float(2.0, "Estructura (BOS / CHoCH)", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW, tooltip="v6.23: subido de 1.0 a 2.0 — el rompimiento estructural es el núcleo de SMC; debe pesar como la confirmación de price action.")
-wScPA       = input.float(3.0, "Price Action (engulf/pin/outside)", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW, tooltip="Peso del patrón PA más fuerte (engulfing o pin+outside). Los tiers menores escalan a 2/3 (pin u outside solo) y 1/3 (momentum) de este valor.")
-wScVwapBias = input.float(2.0, "VWAP Bias (pendiente+posición, fusionado)", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW, tooltip="v6.23: fusiona vwapTrendingUp (1.5) + bullTrend (1.0) que estaban ACOPLADOS y sumaban 2.5 juntos en toda tendencia (doble conteo del mismo sesgo VWAP). Ahora: ambos → peso completo; uno solo → mitad.")
-wScVwapProx = input.float(2.0, "VWAP Proximity (mean-revert)", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW, tooltip="Peso máximo por cercanía al VWAP (centro). Bandas externas escalan a 0.75× y la banda ±1σ a 0.5×.")
-wScDiscount = input.float(1.5, "Premium / Discount", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
-wScOTE      = input.float(1.5, "OTE Zone (62-79%)", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
-wScDelta    = input.float(1.0, "Cumulative Delta confirm", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
-wScVol      = input.float(1.0, "High Volume", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
-wScDisp     = input.float(1.0, "Displacement", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
-wScMTF      = input.float(2.0, "MTF Quality congruence", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW, tooltip="Alineación HTF con calidad. La congruencia simple (sin calidad) vale la mitad de este valor.")
-wScPOIob    = input.float(1.5, "POI: Order Block proximity", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
-wScPOIfvg   = input.float(1.0, "POI: FVG proximity", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
-wScExhaust  = input.float(1.0, "Penalización agotamiento 3-5-8 (Velez)", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW, tooltip="v6.28 [#1] Regla 3-5-8 de Velez: resta score al comprar/vender DENTRO de una extensión exhausta. −1× en la 5ª vela consecutiva del mismo color (caución) y −2× en la 8ª (climax). Evita perseguir el movimiento agotado. 0 = desactivado.")
-
-// ── 6. MOVING AVERAGES ──
-grpMA    = "═══ 📈 MOVING AVERAGES ═══"
-showMA1  = input.bool(true,  "Show Fast MA (Trend)",   group=grpMA)
-ma1Type  = input.string("EMA", "Fast MA Type", options=["SMA","EMA","WMA","HMA","VWMA"], group=grpMA)
-ma1Len   = input.int(9,   "Fast MA Length", minval=1, group=grpMA)
-ma1Color = input.color(#2196f3, "Fast MA Color", group=grpMA)
-showMA2  = input.bool(true,  "Show Med MA (Oliver SMA)", group=grpMA)
-ma2Type  = input.string("SMA", "Med MA Type", options=["SMA","EMA","WMA","HMA","VWMA"], group=grpMA)
-ma2Len   = input.int(20,  "Med MA Length", minval=1, group=grpMA)
-ma2Color = input.color(#ff9800, "Med MA Color", group=grpMA)
-
-// ── 7. DASHBOARD ──
-grpDash      = "═══ 📊 DASHBOARD ═══"
-showDash     = input.bool(true,  "Show Dashboard",  group=grpDash)
-dashSize     = input.string("Small", "Size", options=["Tiny","Small","Normal"], group=grpDash)
-showMTFDash  = input.bool(true,  "Show MTF Table",  group=grpDash)
-dashShowScore= input.bool(true,  "Show Scores",     group=grpDash)
-showOBProximity = input.bool(true, "Alert Near OB", group=grpAlerts)
-obProximityDist = input.float(1.5, "Near OB (×ATR)", group=grpDash, minval=0.5, step=0.5)
-
-// ── 8. ICT KEY LEVELS ──
-grpICT          = "═══ 🔑 ICT KEY LEVELS ═══"
-showPDLevels    = input.bool(true,  "Show PDH/PDL/PWH/PWL",       group=grpAlerts)
-pdlColor        = input.color(color.new(#FF9800, 30), "PDH/PDL Color", group=grpICT)
-pwlColor        = input.color(color.new(#2196F3, 30), "PWH/PWL Color", group=grpICT)
-showMidnight    = input.bool(true,  "Show Midnight Open (NY 00:00)", group=grpICT)
-midnightColor   = input.color(color.new(#E040FB, 30), "Midnight Color", group=grpICT)
-showOR          = input.bool(true,  "Show Opening Range",          group=grpAlerts)
-orMinutes       = input.int(30, "OR Period (minutes)", options=[5, 15, 30], group=grpICT)
-orColor         = input.color(color.new(#00BCD4, 80), "OR Color",  group=grpICT)
-showSilverBullet= input.bool(true,  "Show Silver Bullet Windows",  group=grpAlerts)
-sbColor         = input.color(color.new(#C0CA33, 93), "Silver Bullet Color", group=grpICT)
-showOTE         = input.bool(true,  "Show OTE Zone (62–79%)",      group=grpAlerts)
-oteColor        = input.color(color.new(#FF6F00, 75), "OTE Color", group=grpICT)
-showLiqVoids    = input.bool(true,  "Show Liquidity Voids",        group=grpAlerts)
-lvColor         = input.color(color.new(#B71C1C, 80), "Liq. Void Color", group=grpICT)
-lvMinBars       = input.int(2, "Min Consecutive Bars for Void", minval=2, maxval=5, group=grpICT)
-showCumDelta    = input.bool(true,  "Show Cum. Delta Divergence",  group=grpAlerts)
-showDisplacement= input.bool(true,  "Show Multi-Bar Displacement", group=grpAlerts)
-showSqueeze     = input.bool(true,  "Show Squeeze (Pre-Breakout)", group=grpAlerts)
-showWyckoff     = input.bool(true,  "Show Wyckoff Phases",         group=grpAlerts)
-showWMSwings    = input.bool(true,  "Show Weekly/Monthly Swings",  group=grpICT)
-wmColor         = input.color(color.new(#00E5FF, 40), "W/M Swing Color", group=grpICT)
+showPinBars        := showPinBars        and paEnabled
+showOutsideBars    := showOutsideBars    and paEnabled
+showShavedBars     := showShavedBars     and paEnabled
+showInsideBars     := showInsideBars     and paEnabled
+showPASignals      := showPASignals      and paEnabled
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ DYNAMIC TIMEFRAME AUTO-CALIBRATION ENGINE v6.3
@@ -2762,8 +2833,9 @@ bool isVWAPRevBearValid    = showVWAPRev and vwapRevBear and finalScoreBear >= e
 bool paBuy  = barstate.isconfirmed and ((showPASignals and isPABullPattern) or isVWAPBounceBullValid or isVWAPRevBullValid) and finalScoreBull >= effMinScore and paGatesBull
 bool paSell = barstate.isconfirmed and ((showPASignals and isPABearPattern) or isVWAPBounceBearValid or isVWAPRevBearValid) and finalScoreBear >= effMinScore and paGatesBear
 
-bool isDiamondBuy  = paBuy  and paNearBullOB and paNearBullFVG and nearVWAP and isInNY and finalScoreBull >= tierDiamond
-bool isDiamondSell = paSell and paNearBearOB and paNearBearFVG and nearVWAP and isInNY and finalScoreBear >= tierDiamond
+// v6.29: DIAMOND es una señal SMC (POI OB+FVG); se gatea con el maestro smcEnabled (no tiene toggle propio).
+bool isDiamondBuy  = smcEnabled and paBuy  and paNearBullOB and paNearBullFVG and nearVWAP and isInNY and finalScoreBull >= tierDiamond
+bool isDiamondSell = smcEnabled and paSell and paNearBearOB and paNearBearFVG and nearVWAP and isInNY and finalScoreBear >= tierDiamond
 
 if paBuy
     lastSignalBullBar := bar_index
@@ -3216,7 +3288,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.28 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.29 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
