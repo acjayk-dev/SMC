@@ -215,8 +215,13 @@
 //        repaint ya cerrada en estructura/OB/EQH-EQL/OTE). [#2] toggle "Invalidar FVG en 50% CE (ICT estricto)"
 //        (def OFF): con ON el FVG se elimina al alcanzar su 50% = Consequent Encroachment; con OFF se mantiene
 //        como POI hasta el fill total. [#3] "Max Active FVGs" pasa a input (antes 15 hardcodeado).
+// v6.28: Velez/Price Action — [#1] la Regla 3-5-8 ahora PENALIZA el score de entrada (antes solo alimentaba
+//        el localTrendStr del dashboard): se resta score al comprar/vender dentro de la extensión exhausta
+//        (−1× en la 5ª vela, −2× en la 8ª), vía peso "Penalización agotamiento 3-5-8" en SCORE WEIGHTS.
+//        Evita que DIAMOND/INST persigan un movimiento agotado. [#2] añadido el nivel informativo "3️⃣ 3rd BAR"
+//        (primer aviso de extensión de Velez), que antes no se marcaba.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.27 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.27", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.28 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.28", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -548,6 +553,7 @@ wScDisp     = input.float(1.0, "Displacement", minval=0.0, maxval=6.0, step=0.5,
 wScMTF      = input.float(2.0, "MTF Quality congruence", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW, tooltip="Alineación HTF con calidad. La congruencia simple (sin calidad) vale la mitad de este valor.")
 wScPOIob    = input.float(1.5, "POI: Order Block proximity", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
 wScPOIfvg   = input.float(1.0, "POI: FVG proximity", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
+wScExhaust  = input.float(1.0, "Penalización agotamiento 3-5-8 (Velez)", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW, tooltip="v6.28 [#1] Regla 3-5-8 de Velez: resta score al comprar/vender DENTRO de una extensión exhausta. −1× en la 5ª vela consecutiva del mismo color (caución) y −2× en la 8ª (climax). Evita perseguir el movimiento agotado. 0 = desactivado.")
 
 // ── 6. MOVING AVERAGES ──
 grpMA    = "═══ 📈 MOVING AVERAGES ═══"
@@ -1154,8 +1160,10 @@ bool gbiSignal = smallGreen and isBearC and close < low[1]  and trend == -1 and 
 
 // v6.2 fix: consGreen/consRed (L692-701) already count consecutive bull/bear bars — unified
 
+bool exhaust3Bull = consGreen == 3   // v6.28 [#2] primer aviso de extensión (Velez 3-5-8)
 bool exhaust5Bull = consGreen == 5
 bool exhaust8Bull = consGreen == 8
+bool exhaust3Bear = consRed == 3
 bool exhaust5Bear = consRed == 5
 bool exhaust8Bear = consRed == 8
 
@@ -1624,10 +1632,14 @@ if showVelezPat and showVelez358 and showContext and barstate.isconfirmed
         label.new(bar_index, high, "🛑 8th BAR\nExhaustion!", color=#D50000, textcolor=color.white, style=label.style_label_down, size=size.tiny)
     else if exhaust5Bull
         label.new(bar_index, high, "⚠️ 5th BAR\nCaution", color=color.new(#FF9800, 20), textcolor=#000000, style=label.style_label_down, size=size.tiny)
+    else if exhaust3Bull
+        label.new(bar_index, high, "3️⃣ 3rd BAR", color=color.new(#FFC107, 45), textcolor=color.rgb(0, 0, 0), style=label.style_label_down, size=size.tiny)   // v6.28 [#2]
     if exhaust8Bear
         label.new(bar_index, low, "🛑 8th BAR\nExhaustion!", color=#D50000, textcolor=color.white, style=label.style_label_up, size=size.tiny)
     else if exhaust5Bear
         label.new(bar_index, low, "⚠️ 5th BAR\nCaution", color=color.new(#FF9800, 20), textcolor=color.rgb(0, 0, 0), style=label.style_label_up, size=size.tiny)
+    else if exhaust3Bear
+        label.new(bar_index, low, "3️⃣ 3rd BAR", color=color.new(#FFC107, 45), textcolor=color.rgb(0, 0, 0), style=label.style_label_up, size=size.tiny)   // v6.28 [#2]
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ STRUCTURE ENGINE (Auto-Calibrated effSwingLen, effAtrMult, effBosCooldown)
@@ -2382,6 +2394,8 @@ if chochWeakDown
     scoreBull -= 1.0
 if nearVWAPB2Top or nearVWAPB3Top
     scoreBull -= 3.0
+// v6.28 [#1] Regla 3-5-8 (Velez): no perseguir un movimiento exhausto — penaliza comprar en la 5ª/8ª vela verde.
+scoreBull -= exhaust8Bull ? wScExhaust * 2.0 : exhaust5Bull ? wScExhaust : 0.0
 // v6.17 [FIX-A6] Penalización de dead zone retirada del score aditivo: sessionMult ya aplica ×0.7.
 
 // v6.23 [#3] VWAP bias fusionado (ver nota en el bloque alcista).
@@ -2426,6 +2440,8 @@ if chochWeakUp
     scoreBear -= 1.0
 if nearVWAPB2Bot or nearVWAPB3Bot
     scoreBear -= 3.0
+// v6.28 [#1] Regla 3-5-8 (Velez): penaliza vender en la 5ª/8ª vela roja consecutiva (movimiento exhausto).
+scoreBear -= exhaust8Bear ? wScExhaust * 2.0 : exhaust5Bear ? wScExhaust : 0.0
 // v6.17 [FIX-A6] Idem: dead zone solo vía sessionMult.
 
 if mtfQualityBull
@@ -3200,7 +3216,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.27 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.28 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
