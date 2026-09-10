@@ -178,8 +178,16 @@
 //        Virtual Trade Tracker un nivel que sus propias alertas de SL_HIT nunca iban a casar con la línea.
 //        Las seis ramas pasan a consumir [_eSl, _eTp1, _eTp2] de f_sl_tp: una sola fuente de verdad para
 //        gráfico, sizing, webhook y tracker. De paso, si el SL sale na ya no se emite un payload con NaN.
+// v6.23: Motor de scoring — (#1) los pesos de la confluencia base, antes literales hardcodeados, se exponen
+//        como inputs (grupo "⚖️ SCORE WEIGHTS") para poder optimizarlos con datos. (#2) Rebalanceo hacia SMC:
+//        el peso de Estructura (BOS/CHoCH) sube de 1.0 a 2.0 — el rompimiento estructural es el evento central
+//        de SMC y ahora pesa a la par de la confirmación de price action. (#3) Se fusiona el sesgo VWAP:
+//        vwapTrendingUp (1.5) + bullTrend (1.0) eran dos términos ACOPLADOS que sumaban 2.5 en toda tendencia
+//        (doble conteo del mismo sesgo); ahora es un único término (ambos → peso completo, uno solo → mitad),
+//        reduciendo el dominio del VWAP sobre la estructura. Defaults reproducen v6.22 salvo #2 y #3.
+//        Limpieza: eliminadas 6 variables muertas (isValidSession, partial*T, deltaExtreme, priceOutVA*).
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.22 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.22", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.23 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.23", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -482,6 +490,25 @@ wExhaustWeight    = input.float(1.5,  "Weight: 3-5-8 Exhaustion", minval=0.0, ma
 mtfMinStrength    = input.float(4.0,  "Min Trend Quality (0-10)", minval=0.0, maxval=10.0, step=0.5, group=grpMTFQ, tooltip="Calidad mínima (0-10) en cada TF para considerar la tendencia sólida")
 useMTFQuality     = input.bool(false, "Require Quality MTF for Signals", group=grpMTFQ, tooltip="Si activado, requiere tendencia HTF alineada y con calidad alta (semáforo 🟢)")
 useEarlyTrendShift= input.bool(true,  "Early Trend Shift on Velez 180+Elephant", group=grpMTFQ, tooltip="Adelanta cambio de tendencia local cuando aparece 180 Reversal o Elephant contra-tendencia")
+
+// ── 5c. SCORE WEIGHTS (v6.23: pesos de la confluencia base, antes literales hardcodeados) ──
+// Exponer los pesos permite OPTIMIZARLOS con datos (backtest) en vez de fijarlos por opinión.
+// Los defaults reproducen el comportamiento v6.22 EXCEPTO el rebalanceo SMC pedido:
+//   · Estructura (BOS/CHoCH) sube de 1.0 → 2.0 (evento central de SMC, a la par de la confirmación PA)
+//   · VWAP bias se fusiona en UN término (antes pendiente 1.5 + posición 1.0 = 2.5 acoplados → 2.0 máx)
+grpScoreW  = "═══ ⚖️ SCORE WEIGHTS (Confluence Engine) ═══"
+wScStruct   = input.float(2.0, "Estructura (BOS / CHoCH)", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW, tooltip="v6.23: subido de 1.0 a 2.0 — el rompimiento estructural es el núcleo de SMC; debe pesar como la confirmación de price action.")
+wScPA       = input.float(3.0, "Price Action (engulf/pin/outside)", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW, tooltip="Peso del patrón PA más fuerte (engulfing o pin+outside). Los tiers menores escalan a 2/3 (pin u outside solo) y 1/3 (momentum) de este valor.")
+wScVwapBias = input.float(2.0, "VWAP Bias (pendiente+posición, fusionado)", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW, tooltip="v6.23: fusiona vwapTrendingUp (1.5) + bullTrend (1.0) que estaban ACOPLADOS y sumaban 2.5 juntos en toda tendencia (doble conteo del mismo sesgo VWAP). Ahora: ambos → peso completo; uno solo → mitad.")
+wScVwapProx = input.float(2.0, "VWAP Proximity (mean-revert)", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW, tooltip="Peso máximo por cercanía al VWAP (centro). Bandas externas escalan a 0.75× y la banda ±1σ a 0.5×.")
+wScDiscount = input.float(1.5, "Premium / Discount", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
+wScOTE      = input.float(1.5, "OTE Zone (62-79%)", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
+wScDelta    = input.float(1.0, "Cumulative Delta confirm", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
+wScVol      = input.float(1.0, "High Volume", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
+wScDisp     = input.float(1.0, "Displacement", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
+wScMTF      = input.float(2.0, "MTF Quality congruence", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW, tooltip="Alineación HTF con calidad. La congruencia simple (sin calidad) vale la mitad de este valor.")
+wScPOIob    = input.float(1.5, "POI: Order Block proximity", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
+wScPOIfvg   = input.float(1.0, "POI: FVG proximity", minval=0.0, maxval=6.0, step=0.5, group=grpScoreW)
 
 // ── 6. MOVING AVERAGES ──
 grpMA    = "═══ 📈 MOVING AVERAGES ═══"
@@ -2251,41 +2278,41 @@ if showLiqVoids and showContext and barstate.isconfirmed
 float scoreBull = 0.0
 float scoreBear = 0.0
 
-if vwapTrendingUp
-    scoreBull += 1.5
-if bullTrend
-    scoreBull += 1.0
+// v6.23 [#3] VWAP bias fusionado — antes vwapTrendingUp (1.5) + bullTrend (1.0) eran DOS términos
+// acoplados que sumaban 2.5 en toda tendencia (doble conteo del mismo sesgo). Ahora un solo término:
+// pendiente Y posición → peso completo; solo una de las dos → mitad.
+scoreBull += (vwapTrendingUp and bullTrend) ? wScVwapBias : (vwapTrendingUp or bullTrend) ? wScVwapBias * 0.5 : 0.0
 if bosUp or chochUp
-    scoreBull += 1.0
+    scoreBull += wScStruct   // v6.23 [#2] estructura rebalanceada al alza
 
 if nearVWAPB3Bot or nearVWAPB2Bot
-    scoreBull += 1.5
+    scoreBull += wScVwapProx * 0.75
 else if nearVWAP
-    scoreBull += 2.0
+    scoreBull += wScVwapProx
 else if nearVWAPB1Bot
-    scoreBull += 1.0
+    scoreBull += wScVwapProx * 0.5
 
 if inDiscount
-    scoreBull += 1.5
+    scoreBull += wScDiscount
 if inOTEBull
-    scoreBull += 1.5
+    scoreBull += wScOTE
 
 if engulfBull or (pBarUp and validOutsideBull)
-    scoreBull += 3.0
+    scoreBull += wScPA
 else if pBarUp or validOutsideBull
-    scoreBull += 2.0
+    scoreBull += wScPA * 0.667
 else if momBull
-    scoreBull += 1.0
+    scoreBull += wScPA * 0.333
 
 if deltaConfirmBull
-    scoreBull += 1.0
+    scoreBull += wScDelta
 // v6.17 [FIX-A6] Se retira el bono aditivo por sesión: la sesión ya se pondera de forma multiplicativa en
 // sessionMult, así que aplicarla también aquí la contaba dos veces. Se conserva el componente de VOLUMEN,
 // que es lo que realmente aportaba información independiente de la hora.
 if isHighVol
-    scoreBull += 1.0
+    scoreBull += wScVol
 if isDisplacementBull
-    scoreBull += 1.0
+    scoreBull += wScDisp
 if sbPatternBull
     scoreBull += 0.5
 if orRetestBull
@@ -2300,39 +2327,37 @@ if nearVWAPB2Top or nearVWAPB3Top
     scoreBull -= 3.0
 // v6.17 [FIX-A6] Penalización de dead zone retirada del score aditivo: sessionMult ya aplica ×0.7.
 
-if vwapTrendingDn
-    scoreBear += 1.5
-if bearTrend
-    scoreBear += 1.0
+// v6.23 [#3] VWAP bias fusionado (ver nota en el bloque alcista).
+scoreBear += (vwapTrendingDn and bearTrend) ? wScVwapBias : (vwapTrendingDn or bearTrend) ? wScVwapBias * 0.5 : 0.0
 if bosDown or chochDown
-    scoreBear += 1.0
+    scoreBear += wScStruct   // v6.23 [#2] estructura rebalanceada al alza
 
 if nearVWAPB3Top or nearVWAPB2Top
-    scoreBear += 1.5
+    scoreBear += wScVwapProx * 0.75
 else if nearVWAP
-    scoreBear += 2.0
+    scoreBear += wScVwapProx
 else if nearVWAPB1Top
-    scoreBear += 1.0
+    scoreBear += wScVwapProx * 0.5
 
 if inPremium
-    scoreBear += 1.5
+    scoreBear += wScDiscount
 if inOTEBear
-    scoreBear += 1.5
+    scoreBear += wScOTE
 
 if engulfBear or (pBarDn and validOutsideBear)
-    scoreBear += 3.0
+    scoreBear += wScPA
 else if pBarDn or validOutsideBear
-    scoreBear += 2.0
+    scoreBear += wScPA * 0.667
 else if momBear
-    scoreBear += 1.0
+    scoreBear += wScPA * 0.333
 
 if deltaConfirmBear
-    scoreBear += 1.0
+    scoreBear += wScDelta
 // v6.17 [FIX-A6] Idem bloque alcista: sesión solo vía sessionMult, volumen como componente propio.
 if isHighVol
-    scoreBear += 1.0
+    scoreBear += wScVol
 if isDisplacementBear
-    scoreBear += 1.0
+    scoreBear += wScDisp
 if sbPatternBear
     scoreBear += 0.5
 if orRetestBear
@@ -2347,14 +2372,14 @@ if nearVWAPB2Bot or nearVWAPB3Bot
 // v6.17 [FIX-A6] Idem: dead zone solo vía sessionMult.
 
 if mtfQualityBull
-    scoreBull += 2.0
+    scoreBull += wScMTF
 else if mtfBullCongruence
-    scoreBull += 1.0
+    scoreBull += wScMTF * 0.5
 
 if mtfQualityBear
-    scoreBear += 2.0
+    scoreBear += wScMTF
 else if mtfBearCongruence
-    scoreBear += 1.0
+    scoreBear += wScMTF * 0.5
 
 if mtfBearCongruence and trend == 1
     scoreBull -= 1.5
@@ -2571,17 +2596,17 @@ bool paNearEQH = eqhAlive and math.abs(high - lastEQHLevel) < atr * 1.5
 
 float poiBonusBull = 0.0
 if paNearBullOB
-    poiBonusBull += 1.5
+    poiBonusBull += wScPOIob
 if paNearBullFVG
-    poiBonusBull += 1.0
+    poiBonusBull += wScPOIfvg
 if paNearEQL
     poiBonusBull += eqBonusL
 
 float poiBonusBear = 0.0
 if paNearBearOB
-    poiBonusBear += 1.5
+    poiBonusBear += wScPOIob
 if paNearBearFVG
-    poiBonusBear += 1.0
+    poiBonusBear += wScPOIfvg
 if paNearEQH
     poiBonusBear += eqBonusH
 
@@ -3100,7 +3125,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.22 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.23 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
