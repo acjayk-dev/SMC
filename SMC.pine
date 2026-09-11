@@ -228,8 +228,25 @@
 //        siguen corriendo: apagar un bloque NUNCA rompe a los demás. Ningún parámetro/default cambió; es
 //        reorganización + Enable/Disable. GENERAL agrupa lo transversal (riesgo, filtros, MTF, score, MA fast,
 //        dashboard, alerts) que no pertenece a una sola metodología.
+// v6.30: AUDITORÍA DE SEÑALES DE ENTRADA — se depuran las que no correspondían a un setup institucional
+//        con nombre propio y riesgo definido. Quedan 7 señales, todas con tesis identificable:
+//          ✅ SWEEP EQL/EQH (Turtle Soup/Judas) · SWEEP+DIV (absorción en pool) · WYCKOFF SPRING/UTAD ·
+//             SILVER BULLET (ICT) · OTE (ICT) · INST (retesteo de Order Block) · OF (Absorción+Agot.+Inic.)
+//        [BORRADA] "🐘 BUY / 🐘 SELL": era una vela Velez suelta presentada como entrada — sin SL, sin TP,
+//          sin sizing, sin payload y sin registro en el Virtual Trade Tracker. Contradecía la doctrina v6.6
+//          ("🎯 SEÑAL = riesgo definido"). El Elephant conserva su rol real: score, veto contra-tendencia,
+//          localTrendStr, barcolor y alerta ℹ️ CONTEXTO.
+//        [REDISEÑADA] 💎 DIAMOND → 🦄 UNICORN. La anterior se apoyaba en paBuy, activable por pin bar /
+//          outside bar / rebote VWAP — la MISMA base genérica que v6.9 descartó al eliminar el tier
+//          BUY/ELITE ("sin POI institucional específico"); la contradicción seguía viva bajo capas de AND.
+//          Además mezclaba tesis opuestas (POI de continuación vs. mean-reversion al VWAP) y exigía OB y FVG
+//          por proximidad SEPARADA, no solapados. Ahora implementa el Unicorn Model de ICT literal: Order
+//          Block que CONTIENE un FVG (ob.hasFVG, intersección real) + desplazamiento + zona P/D correcta +
+//          sesión NY + score ≥ tier. Sin patrones de vela genéricos.
+//        [DESACOPLADO] VWAP Bounce / VWAP Reversion dejan de alimentar paBuy/paSell (y por tanto cualquier
+//          entrada): son mean-reversion y contaminaban la tesis. Siguen dibujándose y alertando como CONTEXTO.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.29 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.29", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.30 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.30", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -423,7 +440,7 @@ vwapFillTransp = input.int(90,       "Fill Transparency",           group=gOFv, 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ ② 🏦 SMART MONEY CONCEPTS
 // ══════════════════════════════════════════════════════════════════════════════
-smcEnabled   = input.bool(true, "▶ ENABLE SMART MONEY CONCEPTS", group=gSMC, tooltip="Maestro: apaga señales/visuales/alertas de SMC (OB, FVG, BOS/CHoCH visual, EQH/EQL, Sweep/Run/DOL, IDM, Voids, P/D, OTE, sesiones, niveles ICT, Wyckoff, Silver Bullet, INST/Diamond). El cálculo estructura→trend sigue activo para los demás bloques.")
+smcEnabled   = input.bool(true, "▶ ENABLE SMART MONEY CONCEPTS", group=gSMC, tooltip="Maestro: apaga señales/visuales/alertas de SMC (OB, FVG, BOS/CHoCH visual, EQH/EQL, Sweep/Run/DOL, IDM, Voids, P/D, OTE, sesiones, niveles ICT, Wyckoff, Silver Bullet, INST/Unicorn). El cálculo estructura→trend sigue activo para los demás bloques.")
 // ── Structure (BOS/CHoCH) ──
 swingLen         = input.int(5,   "Swing Length",               group=gSMCs, minval=3, maxval=15, tooltip="5min: 5 = mira 25min a cada lado para confirmar swing")
 showBOS          = input.bool(true, "Show BOS / CHoCH",         group=gSMCs)
@@ -553,13 +570,13 @@ showInsideBars = input.bool(false, "Show Inside Bars",    group=gPA)
 colInBull      = input.color(#FFEB3B, "Inside Bull",      group=gPA)
 colInBear      = input.color(#FBC02D, "Inside Bear",      group=gPA)
 paRequireDisplacement = input.bool(true, "Engulf/Momentum Require Range Expansion (>0.5×ATR)", group=gPA, tooltip="Criterio institucional: un engulfing o una vela de momentum solo son desplazamiento si el rango se expande. Sin esto, una vela de rango mínimo obtiene el peso máximo de price action en el score (+3.0).")
-showPASignals  = input.bool(true,  "Use PA Pattern as Confluence (Diamond/OB Entry)", group=gPA, tooltip="v6.9: ya no dispara una alerta de trade propia — el tier genérico BUY/ELITE BUY fue eliminado por no corresponder a un patrón institucional con nombre (era pin bar/outside bar + score, sin POI específico). Sigue siendo un filtro interno para validar entradas ⬡ DIAMOND y de mitigación de Order Block (🏦 INST).")
+showPASignals  = input.bool(true,  "Use PA Pattern as Confluence (trailing + anti-spam)", group=gPA, tooltip="v6.30: el patrón PA (pin/outside + score) ya NO alimenta ninguna señal de entrada. La antigua 💎 DIAMOND dependía de él y se rediseñó como 🦄 UNICORN (OB con FVG solapado), que no usa patrones de vela genéricos. Este toggle ahora solo gobierna el disparo del trailing stop visual y el contador anti-spam entre señales. La confirmación PA de la entrada 🏦 INST se controla con 'Require PA Confirmation' (Filters).")
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ ⑤ ⚙️ GENERAL / ENGINE (infra transversal — no pertenece a una sola metodología)
 // ══════════════════════════════════════════════════════════════════════════════
 displayMode    = input.string("CONTEXT", "Mode", options=["FULL","CONTEXT","SCALP"], group=gGd,
-                  tooltip="SCALP=only Elite+Diamond signals & nearest OB | CONTEXT=structure+OBs+FVGs | FULL=everything")
+                  tooltip="SCALP=only Unicorn+INST signals & nearest OB | CONTEXT=structure+OBs+FVGs | FULL=everything")
 useAutoCalib   = input.bool(true, "⚡ Auto-Calibrate Parameters by Timeframe", group=gGd,
                   tooltip="Automatically adjusts OB/FVG age limits, swing lengths, ATR displacement and BOS cooldown based on active timeframe (1M-3M, 5M-15M, 30M-1H, 4H/Daily)")
 // ── Risk & Sizing ──
@@ -2711,6 +2728,14 @@ bool  paNearBullOB   = false
 bool  paNearBearOB   = false
 float paBullOBBottom = na
 float paBearOBTop    = na
+// v6.30 [UNICORN] Variante estricta: el precio está en un OB que ADEMÁS tiene un FVG SOLAPADO
+// (ob.hasFVG, calculado en la creación del OB con intersección real de intervalos). Ése es el
+// Unicorn Model de ICT — OB + FVG en la misma zona — y es la base de la señal 🦄 (antes 💎 DIAMOND,
+// que solo exigía "cerca de un OB" Y "cerca de un FVG" por separado, sin solapamiento).
+bool  paNearBullUniOB   = false
+bool  paNearBearUniOB   = false
+float paUniBullOBBottom = na
+float paUniBearOBTop    = na
 
 if bullOBs.size() > 0
     for i = bullOBs.size() - 1 to 0
@@ -2718,13 +2743,16 @@ if bullOBs.size() > 0
         if not _ob.mitigated and not _ob.isBreaker
             // v6.19 [FIX-P7] math.abs() era ciego a la dirección: con el precio hasta 2 ATR POR DEBAJO del
             // techo de una zona de DEMANDA — es decir, ya atravesada — el bloque seguía puntuando como POI
-            // (+1.5) y habilitando 💎 DIAMOND BUY. A una zona de demanda solo se llega desde arriba o desde
-            // dentro. (La mitigación del OB se evalúa más abajo en el script, así que en la propia vela de
-            // ruptura este bucle todavía lo ve como no mitigado.)
+            // (+1.5). A una zona de demanda solo se llega desde arriba o desde dentro. (La mitigación del OB
+            // se evalúa más abajo en el script, así que en la propia vela de ruptura este bucle todavía lo ve
+            // como no mitigado.)
             if close >= _ob.bottom and close <= _ob.top + atr * 2.0
-                paNearBullOB   := true
-                paBullOBBottom := _ob.bottom
-                break
+                if not paNearBullOB
+                    paNearBullOB   := true
+                    paBullOBBottom := _ob.bottom
+                if _ob.hasFVG and not paNearBullUniOB
+                    paNearBullUniOB   := true
+                    paUniBullOBBottom := _ob.bottom
 
 if bearOBs.size() > 0
     for i = bearOBs.size() - 1 to 0
@@ -2733,9 +2761,12 @@ if bearOBs.size() > 0
             // v6.19 [FIX-P7] ver nota en el bloque alcista — a una zona de OFERTA solo se llega desde abajo
             // o desde dentro.
             if close <= _ob.top and close >= _ob.bottom - atr * 2.0
-                paNearBearOB := true
-                paBearOBTop  := _ob.top
-                break
+                if not paNearBearOB
+                    paNearBearOB := true
+                    paBearOBTop  := _ob.top
+                if _ob.hasFVG and not paNearBearUniOB
+                    paNearBearUniOB := true
+                    paUniBearOBTop  := _ob.top
 
 bool paNearBullFVG = false
 bool paNearBearFVG = false
@@ -2784,7 +2815,7 @@ float volRatio = not na(atrLong) and atrLong > 0 ? atr / atrLong : 1.0
 float effMinScore = volRatio < 0.65 ? math.max(4.0, minScore - 1.0) : volRatio > 1.4 ? minScore + 1.0 : minScore
 
 float tierElite   = effMinScore * 1.4
-float tierDiamond = effMinScore * 1.75
+float tierUnicorn = effMinScore * 1.75
 
 // v6.3: Squeeze / Pre-Breakout Consolidation Detection
 // v6.13: agregado toggle propio (showSqueeze) y alertcondition de contexto — antes solo dependía del
@@ -2825,17 +2856,24 @@ bool isCandleWithinLimits = (high - low) <= (atr * maxCandleSizeAtr)
 bool paGatesBull = passTrendBull and passVolBull and passRsiBull and passAtrBull and passChopBull and passMTFBull and signalNotSpamBull and not isDeadZone and isCandleWithinLimits
 bool paGatesBear = passTrendBear and passVolBear and passRsiBear and passAtrBear and passChopBear and passMTFBear and signalNotSpamBear and not isDeadZone and isCandleWithinLimits
 
-bool isVWAPBounceBullValid = showVWAPBounce and vwapBounceBull and finalScoreBull >= effMinScore
-bool isVWAPBounceBearValid = showVWAPBounce and vwapBounceBear and finalScoreBear >= effMinScore
-bool isVWAPRevBullValid    = showVWAPRev and vwapRevBull and finalScoreBull >= effMinScore
-bool isVWAPRevBearValid    = showVWAPRev and vwapRevBear and finalScoreBear >= effMinScore
+// v6.30 [DESACOPLE VWAP] Las señales de VWAP Bounce / VWAP Reversion son MEAN-REVERSION: tesis opuesta a
+// la de un POI de continuación (OB/FVG). Alimentar con ellas la misma señal de entrada producía trades sin
+// tesis identificable — un rebote contra-tendencia en la banda 2σ y un retesteo de Order Block entraban por
+// la misma puerta. Se retiran de paBuy/paSell; siguen dibujándose y alertando como ℹ️ CONTEXTO.
+bool paBuy  = barstate.isconfirmed and showPASignals and isPABullPattern and finalScoreBull >= effMinScore and paGatesBull
+bool paSell = barstate.isconfirmed and showPASignals and isPABearPattern and finalScoreBear >= effMinScore and paGatesBear
 
-bool paBuy  = barstate.isconfirmed and ((showPASignals and isPABullPattern) or isVWAPBounceBullValid or isVWAPRevBullValid) and finalScoreBull >= effMinScore and paGatesBull
-bool paSell = barstate.isconfirmed and ((showPASignals and isPABearPattern) or isVWAPBounceBearValid or isVWAPRevBearValid) and finalScoreBear >= effMinScore and paGatesBear
-
-// v6.29: DIAMOND es una señal SMC (POI OB+FVG); se gatea con el maestro smcEnabled (no tiene toggle propio).
-bool isDiamondBuy  = smcEnabled and paBuy  and paNearBullOB and paNearBullFVG and nearVWAP and isInNY and finalScoreBull >= tierDiamond
-bool isDiamondSell = smcEnabled and paSell and paNearBearOB and paNearBearFVG and nearVWAP and isInNY and finalScoreBear >= tierDiamond
+// ══════════════════════════════════════════════════════════════════════════════
+// ██ 🦄 UNICORN (ICT) — rediseño de la antigua 💎 DIAMOND (v6.30)
+// ══════════════════════════════════════════════════════════════════════════════
+// La señal anterior se apoyaba en paBuy, que se activaba por pin bar / outside bar / rebote VWAP — la misma
+// base genérica que v6.9 ya había descartado al eliminar el tier "BUY/ELITE" ("sin POI institucional
+// específico"). Además exigía OB y FVG por proximidad SEPARADA, no solapados.
+// El Unicorn Model de ICT es preciso: un Order Block que CONTIENE un FVG (zona de doble ineficiencia),
+// retesteado con desplazamiento a favor, en la zona correcta de Premium/Discount y en sesión NY.
+// Esa es ahora la única condición — sin patrones de vela genéricos ni mean-reversion de por medio.
+bool isUnicornBuy  = smcEnabled and barstate.isconfirmed and paNearBullUniOB and isDisplacementBull and (not requireDiscount or inDiscount) and isInNY and finalScoreBull >= tierUnicorn and paGatesBull
+bool isUnicornSell = smcEnabled and barstate.isconfirmed and paNearBearUniOB and isDisplacementBear and (not requirePremium or inPremium) and isInNY and finalScoreBear >= tierUnicorn and paGatesBear
 
 if paBuy
     lastSignalBullBar := bar_index
@@ -2879,17 +2917,18 @@ else if showInsideBars and validInsideBear
 barcolor(_barCol)
 
 // Signals Labels
-if isDiamondBuy and maxSignalRankThisBar < 6 and sigDirThisBar >= 0
+if isUnicornBuy and maxSignalRankThisBar < 6 and sigDirThisBar >= 0
     maxSignalRankThisBar := 6
     sigDirThisBar := 1
-    label.new(bar_index, low, "💎 DIAMOND BUY\nScore: " + str.tostring(finalScoreBull, "#.1"), color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny, tooltip=bullTooltip)
-    float paSlBuy = not na(paBullOBBottom) ? math.min(paBullOBBottom - atr * 0.1, localSwingLow - atr * 0.1) : localSwingLow - atr * 0.1
+    label.new(bar_index, low, "🦄 UNICORN BUY\nOB+FVG · " + str.tostring(finalScoreBull, "#.1"), color=#00E5FF, textcolor=color.black, style=label.style_label_up, size=size.tiny, tooltip=bullTooltip)
+    // v6.30 el stop se ancla al suelo del OB UNICORN (el que contiene el FVG), no a un OB cualquiera.
+    float paSlBuy = not na(paUniBullOBBottom) ? math.min(paUniBullOBBottom - atr * 0.1, localSwingLow - atr * 0.1) : localSwingLow - atr * 0.1
     // v6.22 [FIX-CLAMP] SL/TP tomados del retorno de f_sl_tp, no recalculados a mano: el clamp de 3.5×ATR
     // mueve el stop y antes solo se reflejaba en la línea dibujada, no en sizing/JSON/tracker.
     [_eSl, _eTp1, _eTp2] = f_sl_tp(true, paSlBuy, close, atr, riskReward, showSLTP, showTP2, dolTpBull)
     if not na(_eSl)
         int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _eSl)
-        alert(f_signal_json("DIAMOND BUY", close, _eSl, _eTp1, _eTp2, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
+        alert(f_signal_json("UNICORN BUY", close, _eSl, _eTp1, _eTp2, _optContracts, finalScoreBull), alert.freq_once_per_bar_close)
         if not vtBullActive   // v6.17 [FIX-N3] no pisar un trade vivo
             vtBullSL := _eSl
             vtBullTP1 := _eTp1
@@ -2897,17 +2936,18 @@ if isDiamondBuy and maxSignalRankThisBar < 6 and sigDirThisBar >= 0
             vtBullTP1Done := false
             vtBullActive := true
 
-if isDiamondSell and maxSignalRankThisBar < 6 and sigDirThisBar <= 0
+if isUnicornSell and maxSignalRankThisBar < 6 and sigDirThisBar <= 0
     maxSignalRankThisBar := 6
     sigDirThisBar := -1
-    label.new(bar_index, high, "💎 DIAMOND SELL\nScore: " + str.tostring(finalScoreBear, "#.1"), color=#E91E63, textcolor=color.white, style=label.style_label_down, size=size.tiny, tooltip=bearTooltip)
-    float paSlSell = not na(paBearOBTop) ? math.max(paBearOBTop + atr * 0.1, localSwingHigh + atr * 0.1) : localSwingHigh + atr * 0.1
+    label.new(bar_index, high, "🦄 UNICORN SELL\nOB+FVG · " + str.tostring(finalScoreBear, "#.1"), color=#E91E63, textcolor=color.white, style=label.style_label_down, size=size.tiny, tooltip=bearTooltip)
+    // v6.30 el stop se ancla al techo del OB UNICORN (el que contiene el FVG), no a un OB cualquiera.
+    float paSlSell = not na(paUniBearOBTop) ? math.max(paUniBearOBTop + atr * 0.1, localSwingHigh + atr * 0.1) : localSwingHigh + atr * 0.1
     // v6.22 [FIX-CLAMP] SL/TP tomados del retorno de f_sl_tp, no recalculados a mano: el clamp de 3.5×ATR
     // mueve el stop y antes solo se reflejaba en la línea dibujada, no en sizing/JSON/tracker.
     [_eSl, _eTp1, _eTp2] = f_sl_tp(false, paSlSell, close, atr, riskReward, showSLTP, showTP2, dolTpBear)
     if not na(_eSl)
         int _optContracts = f_calc_contracts(accountBalance, riskPercentage, close, _eSl)
-        alert(f_signal_json("DIAMOND SELL", close, _eSl, _eTp1, _eTp2, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
+        alert(f_signal_json("UNICORN SELL", close, _eSl, _eTp1, _eTp2, _optContracts, finalScoreBear), alert.freq_once_per_bar_close)
         if not vtBearActive   // v6.17 [FIX-N3] no pisar un trade vivo
             vtBearSL := _eSl
             vtBearTP1 := _eTp1
@@ -2918,7 +2958,7 @@ if isDiamondSell and maxSignalRankThisBar < 6 and sigDirThisBar <= 0
 // v6.9 fix: se eliminó el tier genérico "BUY/ELITE BUY" (pin bar/outside bar + score ≥ umbral, sin
 // exigir cercanía a ningún POI institucional específico) como alerta de TRADE — no corresponde a ningún
 // patrón con nombre en la metodología ICT/SMC/Wyckoff/Order Flow, era el más discrecional de todos los
-// tiers. paBuy/paSell se conservan como ingrediente interno de isDiamondBuy/Sell y de la validación de
+// tiers. paBuy/paSell se conservan como ingrediente interno de isUnicornBuy/Sell y de la validación de
 // mitigación de OB (paValidBull/paValidBear), pero ya no disparan una señal de trade por sí solos.
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -3148,11 +3188,11 @@ if bearOBs.size() > 0
             nearBearOBAlert := true
             break
 
-if showElephant
-    if superEleBull and barstate.isconfirmed and maxSignalRankThisBar < 1 and sigDirThisBar >= 0
-        label.new(bar_index, low,  "🐘 BUY",  color=colEleBull, textcolor=color.black, style=label.style_label_up,   size=size.tiny)
-    if superEleBear and barstate.isconfirmed and maxSignalRankThisBar < 1 and sigDirThisBar <= 0
-        label.new(bar_index, high, "🐘 SELL", color=colEleBear, textcolor=color.black, style=label.style_label_down, size=size.tiny)
+// v6.30 [BORRADA] La etiqueta "🐘 BUY / 🐘 SELL" se eliminó como SEÑAL DE ENTRADA: era una vela Velez suelta
+// presentada como entrada, sin SL, sin TP, sin sizing, sin payload y sin registro en el Virtual Trade Tracker
+// — violaba la propia doctrina del script (v6.6: "🎯 SEÑAL = setup con riesgo definido"). El Elephant Bar
+// mantiene intacto su rol real: confluencia del score, veto de contra-tendencia, localTrendStr, coloreado de
+// vela (barcolor) y su alerta ℹ️ CONTEXTO. Lo que desaparece es únicamente la falsa orden de compra/venta.
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ TRAILING STOP VISUAL ENGINE v6.3
@@ -3164,14 +3204,14 @@ var float trailStopBear = na
 // v6.17 [FIX-A3] REPINTADO: el trailing se recalculaba en cada tick, así que un close intrabar por debajo
 // del stop lo anulaba (:= na) de forma permanente aunque la vela cerrara por encima. Solo vela cerrada.
 if barstate.isconfirmed
-    if paBuy or signalBuy or isDiamondBuy
+    if paBuy or signalBuy or isUnicornBuy
         trailStopBull := not na(paBullOBBottom) ? math.min(paBullOBBottom - atr * 0.1, localSwingLow - atr * 0.1) : localSwingLow - atr * 0.1
     else if not na(trailStopBull)
         trailStopBull := math.max(trailStopBull, localSwingLow - atr * 0.1)
         if close < trailStopBull or trend == -1
             trailStopBull := na
 
-    if paSell or signalSell or isDiamondSell
+    if paSell or signalSell or isUnicornSell
         trailStopBear := not na(paBearOBTop) ? math.max(paBearOBTop + atr * 0.1, localSwingHigh + atr * 0.1) : localSwingHigh + atr * 0.1
     else if not na(trailStopBear)
         trailStopBear := math.min(trailStopBear, localSwingHigh + atr * 0.1)
@@ -3288,7 +3328,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.29 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.30 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
@@ -3418,7 +3458,7 @@ if not na(pendSigSL) and barstate.isconfirmed
 // Order Flow: Sweep+Delta Divergence). v6.9: se eliminó el tier genérico BUY/ELITE BUY (pin bar/outside
 // bar + score, sin POI institucional específico) y se promovieron Wyckoff, Silver Bullet y Sweep+Div.
 alertcondition((signalBuy or signalSell) and barstate.isconfirmed, "🎯 SEÑAL: INST BUY/SELL (OB Touch)", "🏦 Institutional Signal — OB Touch")
-alertcondition((isDiamondBuy or isDiamondSell) and barstate.isconfirmed, "🎯 SEÑAL: ⬡ DIAMOND BUY/SELL", "⬡ DIAMOND Signal — Máxima Confluencia")
+alertcondition((isUnicornBuy or isUnicornSell) and barstate.isconfirmed, "🎯 SEÑAL: 🦄 UNICORN BUY/SELL", "🦄 Unicorn Model (ICT) — Order Block con FVG solapado + desplazamiento")
 alertcondition((ofBuy or ofSell) and barstate.isconfirmed, "🎯 SEÑAL: 📊 OF BUY/SELL", "📊 Order Flow Signal — Absorción+Agotamiento+Iniciación")
 alertcondition((sweepBullSig or sweepBearSig) and showSweepSignal, "🎯 SEÑAL: SWEEP EQL/EQH", "💧 Liquidity Sweep Signal")
 alertcondition((oteBullPA or oteBearPA) and showOTESignals and barstate.isconfirmed, "🎯 SEÑAL: OTE BUY/SELL", "🎯 OTE Zone Signal — 62-79% Fib")
