@@ -245,8 +245,25 @@
 //          sesión NY + score ≥ tier. Sin patrones de vela genéricos.
 //        [DESACOPLADO] VWAP Bounce / VWAP Reversion dejan de alimentar paBuy/paSell (y por tanto cualquier
 //          entrada): son mean-reversion y contaminaban la tesis. Siguen dibujándose y alertando como CONTEXTO.
+// v6.31: CALIDAD DE POI (Fase 2) + LIQUIDEZ CLASIFICADA (Fase 3.1).
+//        [2.1] FILTRO DE VOLATILIDAD EN EL ANCLAJE DEL OB (obMaxRangeAtr, default 2.0×ATR). La vela de origen
+//          ya no puede ser climáctica: un rango extremo es capitulación/pánico (liquidación de posiciones),
+//          no colocación de órdenes institucionales. Anclar ahí producía un bloque enorme y difuso que el
+//          precio "mitigaba" de inmediato. Si la opuesta más cercana es climática, se busca la siguiente.
+//        [2.2] MITIGACIÓN DE OB CONFIGURABLE (obMitigationWick, default OFF = por CIERRE). Antes fija por
+//          cierre; ahora es un input explícito. Por cierre es el criterio institucional: una mecha que
+//          perfora el bloque y vuelve dentro es un BARRIDO de liquidez, no una invalidación del POI.
+//        [2.3] FVG ENDURECIDO. (a) fvgRequireClose (default ON): la vela de desplazamiento debe CERRAR más
+//          allá del extremo que crea el gap — un hueco abierto por una mecha sin cierre desplazado es ruido
+//          de subasta, no desequilibrio de órdenes. (b) fvgAutoThreshold (default OFF): umbral de tamaño
+//          medido contra la media acumulada de True Range en vez del ATR(14), que se infla justo durante la
+//          expansión en la que nacen los mejores FVG y por tanto los filtra.
+//        [3.1] STRONG / WEAK HIGH-LOW (showStrongWeak). Clasifica el extremo estructural vigente por lo que
+//          el mercado hizo con él: STRONG = no lo rompió (liquidez PROTEGIDA, imán real); WEAK = ya barrido
+//          (liquidez consumida, pozo vacío). Se opera EN DIRECCIÓN del extremo Strong. Expone isStrongHigh /
+//          isStrongLow para consumo posterior del motor de objetivos (DOL).
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.30 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.30", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.31 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.31", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -370,12 +387,18 @@ f_signal_json(_name, _entry, _sl, _tp1, _tp2, _contracts, _score) =>
 // v6.25 [B] minBodyAtr: la vela de origen debe tener CUERPO real (≥ minBodyAtr×ATR), no un doji — un OB
 // nace de un desequilibrio de órdenes, y un doji no lo representa. Si la opuesta más cercana es un doji, se
 // salta y se busca la siguiente. Con minBodyAtr=0 recupera el comportamiento anterior (primera opuesta).
-f_lastOppositeCandle(bullishOB, maxBars, fallbackIdx, minBodyAtr, atrVal) =>
+// v6.31 [2.1] maxRangeAtr: además se descartan las velas CLIMÁCTICAS (rango high-low ≥ maxRangeAtr×ATR).
+// Una vela de rango extremo es capitulación/pánico — liquidación de posiciones, no colocación de órdenes
+// institucionales. Anclar el OB ahí produce una zona enorme y difusa que el precio "mitiga" de inmediato.
+// LuxAlgo aplica la misma idea invirtiendo high/low en barras de alta volatilidad; aquí simplemente se
+// rechaza la vela y se busca la siguiente opuesta con cuerpo y rango normales. 0 = desactivado.
+f_lastOppositeCandle(bullishOB, maxBars, fallbackIdx, minBodyAtr, maxRangeAtr, atrVal) =>
     int idx = fallbackIdx
     for k = 1 to maxBars
-        bool isOpposite = bullishOB ? close[k] < open[k] : close[k] > open[k]
-        bool realBody   = math.abs(close[k] - open[k]) >= atrVal * minBodyAtr
-        if isOpposite and realBody
+        bool isOpposite   = bullishOB ? close[k] < open[k] : close[k] > open[k]
+        bool realBody     = math.abs(close[k] - open[k]) >= atrVal * minBodyAtr
+        bool notClimactic = maxRangeAtr <= 0 or (high[k] - low[k]) < atrVal * maxRangeAtr
+        if isOpposite and realBody and notClimactic
             idx := k
             break
     idx
@@ -459,6 +482,8 @@ maxActiveOBs   = input.int(6,   "Max Active OBs", minval=1, maxval=20, group=gSM
 removeMitigated= input.bool(false, "Remove After Mitigation", group=gSMCo)
 obMaxAge       = input.int(60, "OB Max Age (bars)", minval=20, maxval=300, group=gSMCo, tooltip="5min: 60 bars = 5 horas (cubre sesión NY completa). OBs más viejos se auto-expiran.")
 obMinBodyAtr   = input.float(0.2, "OB Origin Min Body (×ATR)", minval=0.0, step=0.1, group=gSMCo, tooltip="v6.25 [B] La vela de origen del OB debe ser una vela opuesta REAL (cuerpo ≥ este ×ATR), no un doji sin desequilibrio. Si la más cercana es un doji, busca la siguiente opuesta con cuerpo. 0 = desactivado (comportamiento previo).")
+obMaxRangeAtr  = input.float(2.0, "OB Origin Max Range (×ATR)", minval=0.0, step=0.5, group=gSMCo, tooltip="v6.31 [2.1] La vela de origen del OB no puede ser climáctica: si su rango (high-low) ≥ este ×ATR es una vela de pánico/capitulación, no una vela de acumulación institucional — se salta y se busca la siguiente opuesta válida. 0 = desactivado.")
+obMitigationWick= input.bool(false, "Mitigación OB por mecha (no cierre)", group=gSMCo, tooltip="v6.31 [2.2] OFF (default, institucional): el OB solo se mitiga si el precio CIERRA más allá del bloque — una mecha que lo perfora y vuelve dentro es un barrido, no una invalidación. ON: cualquier mecha más allá del bloque lo mitiga (más conservador, menos OBs vivos).")
 obMeanFullRange= input.bool(true, "OB Mean Threshold = 50% del rango", group=gSMCo, tooltip="v6.25 [C] ON: el umbral medio (línea punteada) y la mitigación 50% usan el 50% del RANGO completo del OB (mean threshold ICT). OFF: 50% del cuerpo.")
 showPartialMit = input.bool(true,  "Mark 50% OB Mitigation",  group=gSMCo)
 showOBProximity = input.bool(true, "Alert Near OB", group=gSMCo)
@@ -468,6 +493,8 @@ fvgColor       = input.color(color.new(#FFEB3B, 55), "FVG Color", group=gSMCo)
 fvgMinSize     = input.float(0.5, "Min FVG Size (×ATR)", minval=0.1, step=0.1, group=gSMCo, tooltip="5min MES/MNQ: 0.5 captura FVGs institucionales.")
 fvgMaxAge      = input.int(36, "FVG Max Age (bars)", minval=10, maxval=200, group=gSMCo, tooltip="5min: 36 bars = 3 horas. FVGs sin contacto expiran.")
 maxFVGs        = input.int(15, "Max Active FVGs", minval=3, maxval=30, group=gSMCo, tooltip="v6.27 [#3] antes hardcodeado en 15. Máx FVG vivos por lado; al superarlo se descarta el más viejo.")
+fvgRequireClose= input.bool(true,  "FVG exige cierre de desplazamiento", group=gSMCo, tooltip="v6.31 [2.3] ON (institucional): la 3ª vela debe además CERRAR más allá del gap (close[1] > high[2] alcista). Un gap creado por una mecha sin cierre desplazado no es un desequilibrio institucional. OFF = comportamiento previo (solo geometría).")
+fvgAutoThreshold= input.bool(false, "FVG umbral auto-adaptativo", group=gSMCo, tooltip="v6.31 [2.3] ON: el tamaño mínimo se mide contra el rango medio acumulado del símbolo (media de True Range desde el inicio) en vez del ATR(14). Más estable en cambios de régimen — el ATR se infla en expansión y oculta FVGs válidos. OFF (default): ATR(14).")
 fvgInvalidateCE= input.bool(false, "Invalidar FVG en 50% CE (ICT estricto)", group=gSMCo, tooltip="v6.27 [#2] ON: el FVG se invalida (se elimina) al alcanzar su 50% = Consequent Encroachment (criterio ICT estricto). OFF (default): se mantiene como POI hasta el fill total y solo recolorea al 50%.")
 // ── Liquidity ──
 showEQH        = input.bool(true,  "Show EQH (Equal Highs)", group=gSMCl)
@@ -515,6 +542,9 @@ showSilverBullet= input.bool(true,  "Show Silver Bullet Windows",  group=gSMCz)
 sbColor         = input.color(color.new(#C0CA33, 93), "Silver Bullet Color", group=gSMCz)
 showWMSwings    = input.bool(true,  "Show Weekly/Monthly Swings",  group=gSMCz)
 wmColor         = input.color(color.new(#00E5FF, 40), "W/M Swing Color", group=gSMCz)
+showStrongWeak  = input.bool(true,  "Show Strong / Weak High-Low",  group=gSMCz, tooltip="v6.31 [3.1] Clasifica el extremo estructural vigente según si el mercado lo respetó o lo rompió. STRONG HIGH = máximo que el precio NO logró romper (estructura bajista): liquidez protegida, imán de largo plazo. WEAK HIGH = máximo ya barrido (estructura alcista): liquidez consumida. Simétrico para los mínimos.")
+colStrong       = input.color(color.new(#FFFFFF, 0),  "Strong H/L Color", group=gSMCz)
+colWeak         = input.color(color.new(#787B86, 30), "Weak H/L Color",   group=gSMCz)
 // ── Entry Signals ──
 showMitigation = input.bool(true,  "Show Entry on OB Mitigation",   group=gSMCg)
 requireDiscount= input.bool(true,  "Require Discount for Buys",  group=gSMCg)
@@ -665,6 +695,7 @@ showMidnight       := showMidnight       and smcEnabled
 showOR             := showOR             and smcEnabled
 showSilverBullet   := showSilverBullet   and smcEnabled
 showWMSwings       := showWMSwings       and smcEnabled
+showStrongWeak     := showStrongWeak     and smcEnabled
 showLiqVoids       := showLiqVoids       and smcEnabled
 showLiqRun         := showLiqRun         and smcEnabled
 showDOL            := showDOL            and smcEnabled
@@ -1862,6 +1893,39 @@ if showBOS and showContext and barstate.isconfirmed
         label.new(bar_index, structureLow, "BOS•", color=color.new(obBearColor, 0), textcolor=color.gray, style=label.style_none, size=size.tiny)
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ██ STRONG / WEAK HIGH-LOW (v6.31 [3.1])
+// ══════════════════════════════════════════════════════════════════════════════
+// No toda la liquidez vale lo mismo. Un extremo estructural se clasifica por lo que el mercado HIZO con él:
+//   • STRONG HIGH  = máximo que el precio intentó y NO logró romper; la estructura sigue bajista (structTrend
+//     == -1). Es liquidez PROTEGIDA: las órdenes acumuladas encima siguen intactas, así que es el imán real
+//     de largo plazo (Draw on Liquidity de grado superior) y una zona donde vender tiene respaldo.
+//   • WEAK HIGH    = máximo ya barrido; la estructura volteó alcista (structTrend == 1). Su liquidez ya fue
+//     consumida por el BOS, no queda combustible: perseguirlo como objetivo es perseguir un pozo vacío.
+//   • Simétrico para los mínimos: STRONG LOW con estructura alcista, WEAK LOW con estructura bajista.
+// Regla operativa: se opera EN DIRECCIÓN de un extremo Strong (es el objetivo) y se desconfía de las entradas
+// que apuntan a un extremo Weak. Un Strong High por encima + un Weak Low por debajo = sesgo alcista limpio.
+// isStrongHigh/isStrongLow quedan expuestos para consumo posterior (DOL, filtros de objetivo).
+bool isStrongHigh = structTrend == -1
+bool isStrongLow  = structTrend == 1
+
+var line  swHighLine  = na
+var line  swLowLine   = na
+var label swHighLabel = na
+var label swLowLabel  = na
+
+if barstate.islast and showStrongWeak and showContext and not na(structureHigh) and not na(structureLow)
+    line.delete(swHighLine)
+    line.delete(swLowLine)
+    label.delete(swHighLabel)
+    label.delete(swLowLabel)
+    color cHi = isStrongHigh ? colStrong : colWeak
+    color cLo = isStrongLow  ? colStrong : colWeak
+    swHighLine  := line.new(bar_index - 40, structureHigh, bar_index + 8, structureHigh, color=cHi, width=1, style=isStrongHigh ? line.style_solid : line.style_dotted)
+    swLowLine   := line.new(bar_index - 40, structureLow,  bar_index + 8, structureLow,  color=cLo, width=1, style=isStrongLow  ? line.style_solid : line.style_dotted)
+    swHighLabel := label.new(bar_index + 8, structureHigh, isStrongHigh ? "STRONG HIGH" : "weak high", color=color.new(color.black, 100), textcolor=cHi, style=label.style_label_left, size=size.tiny)
+    swLowLabel  := label.new(bar_index + 8, structureLow,  isStrongLow  ? "STRONG LOW"  : "weak low",  color=color.new(color.black, 100), textcolor=cLo, style=label.style_label_left, size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════════════════════
 // ██ INTERNAL STRUCTURE (ICT internal vs. external structure — v6.12)
 // Capa aditiva independiente con swing length reducido (internalSwingLen). No reemplaza ni
 // alimenta structureHigh/structureLow externos: OB/FVG/OTE/EQH/Premium-Discount siguen anclados
@@ -2584,7 +2648,7 @@ if bearOBs.size() > 0
 // v6.5 fix: el origen del OB ya no es el extremo del swing (ta.lowestbars/highestbars) sino la última vela
 // de color opuesto al impulso — definición institucional real del Order Block.
 if bosUp or chochUp
-    int lowestIndex = f_lastOppositeCandle(true, effSwingLen * 2 + 1, -1 * obLbVal, obMinBodyAtr, atr)
+    int lowestIndex = f_lastOppositeCandle(true, effSwingLen * 2 + 1, -1 * obLbVal, obMinBodyAtr, obMaxRangeAtr, atr)
     // v6.17 [FIX-A4] Unicorn = el FVG SOLAPA el Order Block. La prueba anterior (fvg.bottom >= ob.low) la
     // cumplía cualquier FVG situado por encima del OB, por lejos que estuviera. Ahora es intersección real.
     // v6.19 [FIX-P6] solo se probaba el FVG MÁS RECIENTE del array: si el último formado no solapaba el OB,
@@ -2616,7 +2680,7 @@ if bosUp or chochUp
     bullOBs.clean()
 
 if bosDown or chochDown
-    int highestIndex = f_lastOppositeCandle(false, effSwingLen * 2 + 1, -1 * obHbVal, obMinBodyAtr, atr)
+    int highestIndex = f_lastOppositeCandle(false, effSwingLen * 2 + 1, -1 * obHbVal, obMinBodyAtr, obMaxRangeAtr, atr)
     // v6.17 [FIX-A4] Solapamiento real FVG ↔ OB (ver nota en el bloque alcista).
     // v6.19 [FIX-P6] ver nota en el bloque alcista.
     bool hasUni = false
@@ -2648,8 +2712,16 @@ if bosDown or chochDown
 // ██ FVG CREATION (Auto-Calibrated effFvgMinSize & effFvgMaxAge)
 // ══════════════════════════════════════════════════════════════════════════════
 
-bool isBullFVG = low > high[2] and (low - high[2]) > atr * effFvgMinSize
-bool isBearFVG = high < low[2] and (low[2] - high) > atr * effFvgMinSize
+// v6.31 [2.3] Dos endurecimientos institucionales:
+//   (a) fvgRequireClose — el gap geométrico no basta: la vela de desplazamiento (la del medio, [1]) debe
+//       CERRAR más allá del extremo que crea el gap. Un hueco abierto por una mecha sin cierre desplazado
+//       es ruido de subasta, no un desequilibrio de órdenes que el mercado deba rebalancear.
+//   (b) fvgAutoThreshold — el umbral de tamaño se mide contra la media acumulada de True Range en vez del
+//       ATR(14). El ATR se infla durante la expansión (justo cuando nacen los mejores FVG) y los filtra;
+//       la media larga es una referencia de volatilidad estable frente a cambios de régimen.
+float fvgVolMeasure = fvgAutoThreshold ? ta.cum(ta.tr) / math.max(bar_index, 1) : atr
+bool isBullFVG = low > high[2] and (low - high[2]) > fvgVolMeasure * effFvgMinSize and (not fvgRequireClose or close[1] > high[2])
+bool isBearFVG = high < low[2] and (low[2] - high) > fvgVolMeasure * effFvgMinSize and (not fvgRequireClose or close[1] < low[2])
 
 // v6.27 [#1 NO-REPAINT] la creación exige barstate.isconfirmed: en la vela EN CURSO el low no es definitivo,
 // así que sin este candado un FVG podía aparecer/desaparecer y su borde superior (=low) moverse intrabar.
@@ -3091,7 +3163,9 @@ if bullOBs.size() > 0
         OrderBlock ob = bullOBs.get(i)
         ob.extend()
         if not ob.mitigated and barstate.isconfirmed
-            if close < ob.bottom
+            // v6.31 [2.2] fuente de mitigación configurable: por cierre (default, institucional — una mecha
+            // que perfora y vuelve dentro es un barrido de liquidez, no una invalidación) o por mecha.
+            if obMitigationWick ? low < ob.bottom : close < ob.bottom
                 ob.mitigate(removeMitigated, mitigatedColor)
                 if trend == -1 and not ob.isBreaker
                     ob.toBreaker(false, obBearColor)
@@ -3113,7 +3187,8 @@ if bearOBs.size() > 0
         OrderBlock ob = bearOBs.get(i)
         ob.extend()
         if not ob.mitigated and barstate.isconfirmed
-            if close > ob.top
+            // v6.31 [2.2] ver nota en el bloque alcista.
+            if obMitigationWick ? high > ob.top : close > ob.top
                 ob.mitigate(removeMitigated, mitigatedColor)
                 if trend == 1 and not ob.isBreaker
                     ob.toBreaker(true, obBullColor)
@@ -3328,7 +3403,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.30 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.31 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
