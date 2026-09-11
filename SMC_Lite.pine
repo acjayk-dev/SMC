@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────
-// SMC Lite · Institutional Core v1.3 | Autor: SMC Project
+// SMC Lite · Institutional Core v1.4 | Autor: SMC Project
 // TF óptimo: 1m–15m (intradía) · Activo: MES / MNQ / FX / índices
 // ─────────────────────────────────────────────────────────
 // FILOSOFÍA (edge institucional destilado, no feature-creep):
@@ -56,6 +56,7 @@ showStr   = input.bool(true, "Mostrar BOS / CHoCH", group=grpStr)
 grpLiq    = "═══ 💧 LIQUIDEZ & POI ═══"
 eqLookback= input.int(20, "Lookback Highs/Lows Iguales", minval=5, maxval=60, group=grpLiq)
 eqTol     = input.float(0.10, "Tolerancia EQH/EQL (×ATR)", minval=0.02, step=0.02, group=grpLiq)
+sweepRequireReject = input.bool(true, "Sweep exige rechazo + volumen", group=grpLiq, tooltip="[C] Un stop-hunt institucional real muestra RECHAZO (cierre en la mitad favorable de la vela) y VOLUMEN. Con ON, una barrida solo cuenta si la vela de reclaim cierra fuerte y con volumen>promedio — descarta reclaims débiles. OFF: cualquier cierre de vuelta cuenta.")
 showLiq   = input.bool(true, "Mostrar pools EQH/EQL", group=grpLiq)
 showOB    = input.bool(true, "Mostrar Order Blocks", group=grpLiq)
 maxOBs    = input.int(4, "Máx Order Blocks activos", minval=1, maxval=10, group=grpLiq)
@@ -81,6 +82,7 @@ minScore  = input.float(7.0, "Score mínimo para señal", minval=3.0, maxval=12.
 requireSweep = input.bool(true, "Exigir barrida de liquidez (trigger)", group=grpSig, tooltip="El gatillo institucional real: no hay entrada sin stop-hunt previo.")
 requireZone  = input.bool(true, "Exigir Discount(long)/Premium(short)", group=grpSig)
 riskReward   = input.float(2.5, "Risk:Reward (TP2)", minval=1.0, step=0.5, group=grpSig)
+useDOLTarget = input.bool(false, "TP2 = Draw on Liquidity (pool objetivo)", group=grpSig, tooltip="[B] ON: el TP2 apunta al siguiente pool de liquidez sin barrer (EQH/EQL opuesto o el extremo del dealing range) en vez de un R-múltiplo ciego — cumple la filosofía 'opera hacia el draw'. Si no hay pool válido más allá del TP1, cae al R-múltiplo. OFF (default): R-múltiplo puro.")
 cooldownBars = input.int(5, "Barras mínimas entre señales", minval=1, maxval=30, group=grpSig)
 showSLTP     = input.bool(true, "Dibujar SL / TP", group=grpSig)
 accountBal   = input.float(10000.0, "Balance de cuenta ($)", minval=100.0, group=grpSig)
@@ -147,12 +149,11 @@ inLondon = nyHour >= lnStart and nyHour < lnEnd
 inNY     = nyHour >= nyStart and nyHour < nyEnd
 inKZ     = inLondon or inNY
 
-// ── Premium / Discount (dealing range) ──
+// ── Rango rolling (fallback de P/D y objetivo DOL) ──
 rngHi    = ta.highest(high, pdLookback)
 rngLo    = ta.lowest(low, pdLookback)
-eqm      = (rngHi + rngLo) / 2.0
-inDiscount = close < eqm
-inPremium  = close > eqm
+// [A] El equilibrio Premium/Discount se calcula MÁS ABAJO, anclado al dealing range activo
+// (último swing high↔low confirmado), no a esta ventana rolling. Ver sección MARKET STRUCTURE.
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ MARKET STRUCTURE (BOS / CHoCH) — sin repaint
@@ -194,6 +195,22 @@ if barstate.isconfirmed and (bar_index - lastBosBar) > swingLen
         lastBosBar := bar_index
         lastSwingLow := na
 
+// [A] DEALING RANGE — bounds persistentes del leg activo (último swing high↔low confirmado).
+// A diferencia de lastSwingHigh/Low (que se anulan al romper), estos NO se nulifican: definen el
+// rango vigente sobre el que ICT mide Premium/Discount. Solo se actualizan en barra cerrada.
+var float drHigh = na
+var float drLow  = na
+if isSwingHigh and barstate.isconfirmed
+    drHigh := high[swingLen]
+if isSwingLow and barstate.isconfirmed
+    drLow := low[swingLen]
+
+// Premium/Discount anclado al dealing range; si aún no hay leg confirmado, cae a la ventana rolling.
+bool  pdUseLeg = not na(drHigh) and not na(drLow) and drHigh > drLow
+eqm        = pdUseLeg ? (drHigh + drLow) / 2.0 : (rngHi + rngLo) / 2.0
+inDiscount = close < eqm
+inPremium  = close > eqm
+
 // ══════════════════════════════════════════════════════════════════════════════
 // ██ LIQUIDEZ: pools EQH/EQL + barrida (sweep / stop-hunt)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -220,8 +237,14 @@ eqhAlive = not na(eqhLevel) and (bar_index - eqhBar) < eqLookback * 3
 eqlAlive = not na(eqlLevel) and (bar_index - eqlBar) < eqLookback * 3
 
 // SWEEP = perforar el pool y CERRAR de vuelta (reclaim) => trampa de liquidez
-sweepBull = eqlAlive and low < eqlLevel and close > eqlLevel and barstate.isconfirmed
-sweepBear = eqhAlive and high > eqhLevel and close < eqhLevel and barstate.isconfirmed
+// [C] Calidad institucional: la vela de reclaim debe mostrar RECHAZO (cierre en la mitad favorable
+// de su rango) y VOLUMEN — un stop-hunt real deja mecha y esfuerzo, no un cierre marginal.
+sweepRejBull = rng > 0 and (close - low) / rng > 0.5
+sweepRejBear = rng > 0 and (high - close) / rng > 0.5
+sweepQualBull = not sweepRequireReject or (sweepRejBull and volume > avgVol)
+sweepQualBear = not sweepRequireReject or (sweepRejBear and volume > avgVol)
+sweepBull = eqlAlive and low < eqlLevel and close > eqlLevel and sweepQualBull and barstate.isconfirmed
+sweepBear = eqhAlive and high > eqhLevel and close < eqhLevel and sweepQualBear and barstate.isconfirmed
 if sweepBull
     eqlLevel := na
 if sweepBear
@@ -464,7 +487,7 @@ f_contracts(entry, sl) =>
     float rv = accountBal * (riskPct / 100.0)
     dist > 0 ? math.max(1, math.round(rv / (dist * syminfo.pointvalue))) : 1
 
-f_drawTrade(bool isBuy, float entry, float sl) =>
+f_drawTrade(bool isBuy, float entry, float sl, float dolTgt) =>
     float _sl = sl
     float rk = math.max(isBuy ? entry - _sl : _sl - entry, atr * 0.2)
     // [FIX] tope de riesgo: un SL > 3.5×ATR volvía el TP2 (R-múltiplo) irreal y colapsaba el sizing.
@@ -474,6 +497,10 @@ f_drawTrade(bool isBuy, float entry, float sl) =>
         rk := atr * 2.0
     float tp1 = isBuy ? entry + rk : entry - rk
     float tp2 = isBuy ? entry + rk * riskReward : entry - rk * riskReward
+    // [B] Draw on Liquidity: si hay pool objetivo válido y está MÁS ALLÁ del TP1, el TP2 apunta a él
+    // (el imán de liquidez) en vez del R-múltiplo ciego. Si no, conserva el R-múltiplo.
+    if useDOLTarget and not na(dolTgt) and (isBuy ? dolTgt > tp1 : dolTgt < tp1)
+        tp2 := dolTgt
     int contracts = f_contracts(entry, _sl)
     if showSLTP
         line.new(bar_index, _sl, bar_index + 10, _sl, color=color.new(#FF5252, 10), style=line.style_dashed, width=2)
@@ -490,7 +517,9 @@ var int    lastQty = 0
 
 if finalLong
     float sl = (cobBull and not na(cobBottom)) ? cobBottom - atr * 0.2 : math.min(low, low[1]) - atr * 0.2
-    [eSl, tp1, tp2, qty] = f_drawTrade(true, close, sl)
+    // [B] Draw objetivo alcista: EQH vivo por encima, o el techo del rango como imán de liquidez.
+    float dolUp = eqhAlive and eqhLevel > close ? eqhLevel : rngHi > close ? rngHi : na
+    [eSl, tp1, tp2, qty] = f_drawTrade(true, close, sl, dolUp)
     bool  hot = stampedeBull or cobBull
     string txt = stampedeBull ? "⭐🐘 STAMPEDE LONG" : cobBull ? "🎯 OB✓ LONG" : "▲ LONG " + str.tostring(scoreLong, "#.#")
     label.new(bar_index, low, txt, yloc=yloc.belowbar,
@@ -507,7 +536,9 @@ if finalLong
 
 if finalShort
     float sl = (cobBear and not na(cobTop)) ? cobTop + atr * 0.2 : math.max(high, high[1]) + atr * 0.2
-    [eSl, tp1, tp2, qty] = f_drawTrade(false, close, sl)
+    // [B] Draw objetivo bajista: EQL vivo por debajo, o el piso del rango como imán de liquidez.
+    float dolDn = eqlAlive and eqlLevel < close ? eqlLevel : rngLo < close ? rngLo : na
+    [eSl, tp1, tp2, qty] = f_drawTrade(false, close, sl, dolDn)
     bool  hot = stampedeBear or cobBear
     string txt = stampedeBear ? "⭐🐘 STAMPEDE SHORT" : cobBear ? "🎯 OB✓ SHORT" : "▼ SHORT " + str.tostring(scoreShort, "#.#")
     label.new(bar_index, high, txt, yloc=yloc.abovebar,
