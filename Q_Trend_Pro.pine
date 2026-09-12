@@ -1,0 +1,403 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Q-TREND PRO v1.0 — Línea escalonada adaptativa con filtro de régimen
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// Reingeniería del indicador "Q-Trend" de © tarasenko_ (MPL-2.0, Pine v5).
+// TF óptimo: 1 / 5 / 15 min intradía · Activo: MNQ / MES y cualquier instrumento líquido.
+//
+// ── QUÉ SE CONSERVA (porque el motor es bueno) ────────────────────────────────────────────────
+// La idea original vale: una línea que arranca en el centro de un canal largo y RATCHEA en pasos
+// de tamaño ATR hacia el precio cada vez que éste rompe su banda. No es una media —no promedia
+// nada— es un nivel con memoria que solo se mueve cuando el precio lo obliga. Eso le da una
+// propiedad rara y valiosa: en lateral se queda quieto en vez de serpentear detrás del precio.
+//
+// ── LOS 8 DEFECTOS REALES DEL ORIGINAL ────────────────────────────────────────────────────────
+//  [D1] REPINTADO COMPLETO. `change_up = ... or src > m + epsilon` se evalúa sobre la vela VIVA, y
+//       `src` es `close`, que se mueve en cada tick. La línea, el color, `ls` y las señales
+//       cambiaban y volvían atrás dentro de la misma vela. No había un solo barstate.isconfirmed.
+//       (El ATR sí estaba bien resuelto con `ta.atr(p)[1]` — eso se mantiene.)
+//  [D2] INICIALIZACIÓN FRÁGIL. `m := bar_index > p ? m[1] : m` intercalado con la reasignación
+//       posterior hace que el valor inicial dependa del ORDEN de las sentencias y de cuántas velas
+//       tenga el gráfico cargado. En un gráfico con menos de `p` velas nunca inicializa bien.
+//       Aquí es un `var` con inicialización explícita y única.
+//  [D3] RETRASO TRAS UN HUECO. La línea avanzaba UN epsilon por vela. Tras un gap o un impulso
+//       fuerte se quedaba a 5 ATR del precio y tardaba 5 velas en alcanzarlo: durante todo ese
+//       tramo la lectura de tendencia era obsoleta. Ahora el avance por vela es configurable
+//       (`maxSteps`), con 1 = comportamiento original.
+//  [D4] "STRONG" MAL DEFINIDO. `sb = open < l + d/8 and open >= l` usaba el OPEN —no el cierre, no
+//       el mínimo— y el 1/8 estaba cableado. La INTENCIÓN era buena (comprar en la parte baja del
+//       rango = descuento) pero la implementación era arbitraria. Aquí es la posición del CIERRE
+//       en el rango, con zona configurable, y además exige que el régimen acompañe.
+//  [D5] CERO FILTROS. Sin régimen, volumen, sesión ni marco superior. En lateral la línea oscila y
+//       el indicador dispara compra/venta alternadas: el modo de fallo clásico de todo seguidor de
+//       tendencia. Es, con diferencia, su mayor problema práctico.
+//  [D6] SEÑALES SIN RIESGO DEFINIDO. Ni stop, ni objetivo, ni tamaño. Una señal sin riesgo definido
+//       no es una operación, es una opinión.
+//  [D7] SEÑALES BINARIAS. Todas valían lo mismo. Una ruptura con régimen limpio, volumen y descuento
+//       no es la misma señal que una ruptura en mitad de un lateral sin volumen.
+//  [D8] 8 plotshape para 4 señales (duplicados solo por Labels/Arrows). Se sustituyen por labels
+//       dinámicos, que además permiten mostrar el score y no consumen presupuesto de plots.
+//
+// ── LO QUE SE AÑADE ───────────────────────────────────────────────────────────────────────────
+//  ▸ FILTRO DE RÉGIMEN con el Ratio de Eficiencia de Kaufman: recorrido NETO / recorrido TOTAL.
+//    Cerca de 1 = el precio fue del punto A al B en línea recta (tendencia). Cerca de 0 = recorrió
+//    mucho para no ir a ninguna parte (lateral). Es la herramienta exacta para el problema [D5]:
+//    mide directamente si la premisa "hay tendencia" se cumple, en vez de suponerla.
+//  ▸ EPSILON ADAPTATIVO AL RÉGIMEN: en lateral la banda se ENSANCHA para que la línea no voltee;
+//    en tendencia se estrecha para reaccionar antes. Ataca la causa del whipsaw, no el síntoma.
+//  ▸ Score 0-100, gestión de riesgo con SL/TP/sizing, dashboard y auto-estadística de acierto.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+indicator("Q-Trend Pro v1.0 · Régimen + Riesgo", shorttitle="Q-Trend Pro", overlay=true,
+     max_labels_count=500, max_lines_count=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ TIPOS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+type Trade
+    bool  isBuy
+    float sl
+    float tp1
+    float tp2
+    bool  tp1Done
+    bool  closed
+    int   openBar
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+gEng = "① ⚙️ MOTOR (línea escalonada)"
+gReg = "② 🌡️ RÉGIMEN (el filtro que faltaba)"
+gSig = "③ 🎯 SEÑAL Y SCORE"
+gRsk = "④ 💰 RIESGO"
+gCtx = "⑤ 🧭 CONTEXTO (HTF · Sesión)"
+gVis = "⑥ 🎨 VISUAL Y ESTADÍSTICAS"
+
+srcIn      = input.source(close, "Fuente", group=gEng)
+useSmooth  = input.bool(false, "Suavizar la fuente con EMA", group=gEng, tooltip="Reduce el ruido tick a tick a costa de retrasar la reacción. En 1min suele ayudar; en 15min sobra.")
+smoothLen  = input.int(3, "Periodo de la EMA suavizadora", minval=1, maxval=50, group=gEng)
+chanLen    = input.int(200, "Periodo del canal", minval=10, maxval=1000, group=gEng, tooltip="Ventana del canal cuyo centro inicializa la línea y que define las zonas de descuento/premium. 200 en 5min ≈ 16 horas: el rango de referencia de varias sesiones.")
+atrLen     = input.int(14, "Periodo del ATR", minval=1, maxval=100, group=gEng)
+mult       = input.float(1.0, "Multiplicador del ATR (epsilon)", minval=0.1, step=0.1, group=gEng, tooltip="Media anchura de la banda alrededor de la línea. Más alto = menos señales y menos whipsaw; más bajo = más reactivo. Es el mando principal de sensibilidad.")
+maxSteps   = input.int(3, "Avance máximo por vela (pasos de epsilon)", minval=1, maxval=20, group=gEng, tooltip="CORRIGE [D3]. El original avanzaba UN epsilon por vela: tras un hueco la línea se quedaba a varios ATR del precio y tardaba otras tantas velas en alcanzarlo, con la lectura de tendencia obsoleta todo ese tramo. Con 3, la línea recupera el retraso en una vela sin teletransportarse. Pon 1 para reproducir exactamente el comportamiento original.")
+
+useRegime  = input.bool(true, "Filtrar por régimen (Ratio de Eficiencia)", group=gReg, tooltip="EL FILTRO MÁS IMPORTANTE. Ratio de Eficiencia de Kaufman = recorrido NETO / recorrido TOTAL en la ventana. Cerca de 1: el precio fue de A a B casi en línea recta — hay tendencia. Cerca de 0: recorrió mucho para no ir a ninguna parte — es lateral, y un seguidor de tendencia ahí solo puede perder. Mide directamente si la premisa del indicador se cumple, en vez de suponerla.")
+erLen      = input.int(20, "Ventana del Ratio de Eficiencia", minval=5, maxval=100, group=gReg)
+erMin      = input.float(0.30, "Eficiencia mínima para operar", minval=0.0, maxval=1.0, step=0.05, group=gReg, tooltip="Por debajo de este valor el mercado es ruido y las señales se marcan como filtradas. 0.30 es un lateral claro; 0.50 exige una tendencia bastante limpia. Bájalo a 0.20 si te salen muy pocas señales.")
+adaptEps   = input.bool(true, "Epsilon adaptativo al régimen", group=gReg, tooltip="Ataca la CAUSA del whipsaw en vez del síntoma: en lateral ENSANCHA la banda para que la línea no voltee a cada oscilación; en tendencia la estrecha para reaccionar antes. El ATR ya adapta al tamaño del movimiento, pero no distingue entre 'se mueve mucho yendo a algún sitio' y 'se mueve mucho sin ir a ninguna parte'. Esto sí.")
+adaptForce = input.float(1.0, "Fuerza de la adaptación", minval=0.0, maxval=3.0, step=0.25, group=gReg, tooltip="Con 1.0, en lateral puro (eficiencia 0) la banda se DUPLICA. Con 0 se desactiva la adaptación sin tocar el toggle.")
+
+minScore   = input.int(55, "Score mínimo para señal ejecutable", minval=0, maxval=100, group=gSig, tooltip="Las señales por debajo del umbral se siguen dibujando, pero atenuadas y sin SL/TP: son cambios de tendencia reales que NO cumplen las condiciones para operarse. Ver la diferencia enseña más que ocultarlas.")
+strongZone = input.float(0.25, "Zona de descuento / premium (fracción del canal)", minval=0.05, maxval=0.5, step=0.05, group=gSig, tooltip="CORRIGE [D4]. El original marcaba 'STRONG' si el OPEN caía en el octavo inferior del canal — con el open, no el cierre, y con el 1/8 cableado. La intención era buena: comprar en la parte baja del rango. Aquí se mide la posición del CIERRE y la zona es configurable. 0.25 = el cuarto inferior es descuento y el superior premium.")
+volMult    = input.float(1.2, "Volumen de confirmación (× media)", minval=1.0, step=0.1, group=gSig, tooltip="Se ignora automáticamente si el símbolo no publica volumen.")
+
+slBufAtr   = input.float(0.30, "Colchón del stop (× ATR)", minval=0.0, step=0.05, group=gRsk, tooltip="El stop va al otro lado de la LÍNEA, no a una distancia inventada: la línea ES la tesis. Si el precio la cruza de vuelta, la tendencia que motivó la entrada dejó de existir.")
+tp1R       = input.float(1.5, "TP1 (múltiplo de R)", minval=0.3, step=0.1, group=gRsk)
+tp2R       = input.float(3.0, "TP2 (múltiplo de R)", minval=0.5, step=0.1, group=gRsk, tooltip="Un seguidor de tendencia vive de pocas operaciones muy grandes. Un TP2 corto le quita justo aquello de lo que vive.")
+riskTrade  = input.float(200.0, "Riesgo por operación ($)", minval=1.0, step=25.0, group=gRsk)
+tickVal    = input.float(0.50, "Valor del tick ($)", minval=0.01, step=0.01, group=gRsk, tooltip="MNQ = 0.50 · MES = 1.25")
+tickSz     = input.float(0.25, "Tamaño del tick", minval=0.0001, step=0.01, group=gRsk)
+
+useHTF     = input.bool(true, "Filtro de marco superior", group=gCtx, tooltip="Se lee con [1] + lookahead_on: el patrón canónico ANTI-REPINTADO, que toma la vela HTF ya CERRADA en lugar de la que se está formando.")
+htfMode    = input.string("Auto", "Marco superior", options=["Auto", "Manual"], group=gCtx)
+htfManual  = input.timeframe("60", "HTF manual", group=gCtx)
+useSession = input.bool(false, "Filtro de sesión", group=gCtx, tooltip="Desactivado por defecto: a diferencia de un modelo de trampas de liquidez, un seguidor de tendencia sí funciona fuera de la sesión principal, solo que más despacio.")
+sessWin    = input.session("0830-1600", "Sesión (hora de Nueva York)", group=gCtx)
+
+showLine   = input.bool(true, "Dibujar la línea de tendencia", group=gVis)
+showBands  = input.bool(false, "Dibujar las bandas ± epsilon", group=gVis, tooltip="Muestra el umbral exacto que el precio debe romper para mover la línea. Útil para entender el indicador; ruidoso para operar.")
+showChan   = input.bool(true, "Sombrear descuento / premium", group=gVis)
+colorBars  = input.bool(true, "Colorear velas", group=gVis)
+colBuy     = input.color(#39FF14, "Color alcista", group=gVis, inline="c")
+colSell    = input.color(#FF00FF, "Color bajista", group=gVis, inline="c")
+showDash   = input.bool(true, "Dashboard", group=gVis)
+showStats  = input.bool(true, "Auto-estadísticas (acierto real en este gráfico)", group=gVis, tooltip="El indicador sigue sus propias señales ejecutables y cuenta cuántas alcanzaron TP1 y TP2 antes que el stop. Cuando SL y TP se tocan en la misma vela cuenta SL: el OHLC no dice cuál llegó antes y la suposición pesimista es la única honesta. El número mostrado es un SUELO.")
+maxTracked = input.int(60, "Operaciones seguidas en memoria", minval=10, maxval=200, group=gVis)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ FUNCIONES
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Ratio de Eficiencia de Kaufman. Recorrido NETO dividido entre recorrido TOTAL.
+// Si el precio sube 100 puntos subiendo 100 puntos → 1.0 (tendencia perfecta).
+// Si sube 100 puntos habiendo recorrido 1000 arriba y abajo → 0.1 (ruido caro).
+f_efficiency(int len) =>
+    float net   = math.abs(close - close[len])
+    float total = math.sum(math.abs(close - close[1]), len)
+    total > 0 ? net / total : 0.0
+
+f_htfBias() =>
+    float ef = ta.ema(close, 21)
+    float es = ta.ema(close, 50)
+    close > ef and ef > es ? 1 : close < ef and ef < es ? -1 : 0
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ CÁLCULOS BASE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+float src    = useSmooth ? ta.ema(srcIn, smoothLen) : srcIn
+float avgVol = ta.sma(volume, 20)
+bool  hasVol = not na(avgVol) and avgVol > 0
+float bodySz = math.abs(close - open)
+
+// [D1] El ATR con [1] es lo ÚNICO que el original ya tenía bien resuelto contra el repintado:
+// usa la volatilidad de la vela CERRADA, no la de la que está formándose. Se conserva tal cual.
+float atr = ta.atr(atrLen)[1]
+
+float chanHi = ta.highest(src, chanLen)
+float chanLo = ta.lowest(src,  chanLen)
+float chanW  = chanHi - chanLo
+float rangePos = chanW > 0 ? (close - chanLo) / chanW : 0.5
+
+float er = f_efficiency(erLen)
+bool  regimeOK = not useRegime or er >= erMin
+
+// Epsilon adaptativo: en lateral (er bajo) la banda se ensancha para no voltear a cada oscilación.
+float effMult = adaptEps ? mult * (1.0 + (1.0 - er) * adaptForce) : mult
+float eps     = atr * effMult
+
+string htfAuto = not timeframe.isintraday ? "W" : timeframe.multiplier <= 1 ? "15" : timeframe.multiplier <= 5 ? "60" : timeframe.multiplier <= 15 ? "240" : "D"
+string htfUse  = htfMode == "Auto" ? htfAuto : htfManual
+htfRaw         = request.security(syminfo.tickerid, htfUse, f_htfBias()[1], lookahead=barmerge.lookahead_on)
+int    htfBias = useHTF ? nz(htfRaw) : 0
+
+bool inSess = not useSession or not na(time(timeframe.period, sessWin, "America/New_York"))
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ MOTOR: LA LÍNEA ESCALONADA
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// [D2] Inicialización explícita y única, con `var`. El original la resolvía con
+// `m := bar_index > p ? m[1] : m` intercalado con la reasignación posterior, de modo que el valor
+// inicial dependía del orden de las sentencias y del número de velas cargadas.
+// [D1] Toda mutación va tras barstate.isconfirmed: la línea deja de moverse dentro de la vela viva.
+// [D3] El avance por vela deja de estar limitado a un solo epsilon.
+
+var float m        = na
+var int   trendDir = 0
+
+bool flipUp = false
+bool flipDn = false
+
+if barstate.isconfirmed
+    if na(m) and not na(chanHi) and not na(chanLo)
+        m := (chanHi + chanLo) / 2.0
+    if not na(m) and not na(eps) and eps > 0
+        int before = trendDir
+        if close > m + eps
+            // Objetivo: dejar la línea un epsilon por DEBAJO del precio. El avance se limita a
+            // maxSteps epsilons para que un hueco no la teletransporte.
+            float need = (close - eps) - m
+            m        := m + math.min(need, eps * maxSteps)
+            trendDir := 1
+        else if close < m - eps
+            float need = m - (close + eps)
+            m        := m - math.min(need, eps * maxSteps)
+            trendDir := -1
+        flipUp := trendDir == 1  and before != 1
+        flipDn := trendDir == -1 and before != -1
+
+bool warmedUp = bar_index > chanLen and not na(m)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ SCORE DE LA SEÑAL (0-100)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// [D7] El original trataba todas las señales por igual. Una ruptura con régimen limpio, volumen y
+// descuento no es la misma señal que una ruptura en mitad de un lateral sin volumen detrás.
+
+bool isBuy = flipUp
+
+// ▸ Régimen (25) — cuán limpia es la tendencia. Es el componente de mayor peso a propósito:
+//   es la premisa del indicador, y si no se cumple lo demás da igual.
+float scReg = math.min(25.0, er / math.max(erMin * 2.0, 0.01) * 25.0)
+
+// ▸ Posición en el canal (20) — [D4] comprar en descuento, vender en premium. La intención del
+//   "STRONG" original, medida sobre el cierre y con zona configurable.
+float posEdge = isBuy ? 1.0 - rangePos : rangePos
+float scPos   = math.max(0.0, math.min(20.0, (posEdge - (1.0 - strongZone)) / math.max(strongZone, 0.01) * 20.0))
+
+// ▸ Volumen (15) — sin volumen detrás, la ruptura de la banda es deriva, no decisión.
+float scVol = not hasVol ? 7.5 : math.min(15.0, volume / math.max(avgVol, 1.0) / volMult * 15.0)
+
+// ▸ Cuerpo de la vela (15) — la vela que rompe, ¿empuja o se arrastra?
+float scBody = math.min(15.0, bodySz / math.max(atr, 0.0001) * 15.0)
+
+// ▸ Alineación HTF (15)
+float scHtf = not useHTF ? 9.0 : htfBias == (isBuy ? 1 : -1) ? 15.0 : htfBias == 0 ? 9.0 : 0.0
+
+// ▸ Distancia a la línea (10) — entrar pegado a la línea da mejor precio Y stop más corto.
+float distAtr = na(m) or na(atr) or atr <= 0 ? 99.0 : math.abs(close - m) / atr
+float scDist  = math.max(0.0, math.min(10.0, (2.0 - distAtr) / 2.0 * 10.0))
+
+float score = scReg + scPos + scVol + scBody + scHtf + scDist
+
+bool rawSignal = (flipUp or flipDn) and warmedUp
+bool sigOK     = rawSignal and score >= minScore and regimeOK and inSess
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ RIESGO
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// [D6] El stop va al otro lado de la LÍNEA, no a una distancia inventada: la línea ES la tesis.
+// Si el precio la cruza de vuelta, la tendencia que motivó la entrada dejó de existir.
+
+float sigEntry = close
+float sigSL    = na
+float sigTP1   = na
+float sigTP2   = na
+
+if sigOK
+    sigSL := isBuy ? m - atr * slBufAtr : m + atr * slBufAtr
+
+float sigRisk = na(sigSL) ? na : math.abs(sigEntry - sigSL)
+
+if sigOK and not na(sigRisk) and sigRisk > 0
+    sigTP1 := isBuy ? sigEntry + sigRisk * tp1R : sigEntry - sigRisk * tp1R
+    sigTP2 := isBuy ? sigEntry + sigRisk * tp2R : sigEntry - sigRisk * tp2R
+
+int sigQty = na(sigRisk) or sigRisk <= 0 or tickSz <= 0 ? 0 : math.max(1, int(math.floor(riskTrade / math.max(sigRisk / tickSz * tickVal, 0.01))))
+bool sigValid = sigOK and not na(sigTP2) and sigRisk > 0
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ AUTO-ESTADÍSTICAS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Regla honesta: si SL y TP se tocan en la MISMA vela cuenta SL — el OHLC no dice cuál llegó antes
+// y la suposición pesimista es la única defendible. Las operaciones sin resolver caducan y cuentan
+// como fallo salvo que ya hubieran alcanzado TP1. El número mostrado es un SUELO, no un escaparate.
+
+int STAT_MAX_BARS = 120
+
+var array<Trade> trades   = array.new<Trade>()
+var int statWinTP1 = 0
+var int statWinTP2 = 0
+var int statLoss   = 0
+
+if showStats and barstate.isconfirmed and trades.size() > 0
+    for i = trades.size() - 1 to 0
+        Trade t = trades.get(i)
+        if not t.closed
+            bool slHit  = t.isBuy ? low  <= t.sl  : high >= t.sl
+            bool tp1Hit = t.isBuy ? high >= t.tp1 : low  <= t.tp1
+            bool tp2Hit = t.isBuy ? high >= t.tp2 : low  <= t.tp2
+            if slHit
+                if t.tp1Done
+                    statWinTP1 += 1
+                else
+                    statLoss += 1
+                t.closed := true
+            else
+                if tp1Hit and not t.tp1Done
+                    t.tp1Done := true
+                if tp2Hit
+                    statWinTP1 += 1
+                    statWinTP2 += 1
+                    t.closed   := true
+                else if (bar_index - t.openBar) > STAT_MAX_BARS
+                    if t.tp1Done
+                        statWinTP1 += 1
+                    else
+                        statLoss += 1
+                    t.closed := true
+        if t.closed
+            trades.remove(i)
+
+if sigValid and showStats
+    trades.push(Trade.new(isBuy, sigSL, sigTP1, sigTP2, false, false, bar_index))
+    if trades.size() > maxTracked
+        trades.shift()
+
+int   statTotal = statWinTP1 + statLoss
+float hitTP1    = statTotal > 0 ? statWinTP1 / float(statTotal) * 100.0 : na
+float hitTP2    = statTotal > 0 ? statWinTP2 / float(statTotal) * 100.0 : na
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ VISUALES
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+color trendCol = trendDir == 1 ? colBuy : trendDir == -1 ? colSell : color.gray
+// En régimen lateral la línea se atenúa: el indicador te avisa de que su propia premisa no se
+// cumple, en vez de seguir pintando una tendencia con la misma confianza de siempre.
+color lineCol  = regimeOK ? trendCol : color.new(trendCol, 60)
+
+plot(showLine and warmedUp ? m : na, "Línea de tendencia", color=lineCol, linewidth=3)
+plot(showBands and warmedUp ? m + eps : na, "Banda superior", color=color.new(trendCol, 72), linewidth=1)
+plot(showBands and warmedUp ? m - eps : na, "Banda inferior", color=color.new(trendCol, 72), linewidth=1)
+
+barcolor(colorBars ? (regimeOK ? trendCol : color.new(trendCol, 65)) : na, title="Velas de tendencia")
+
+bgcolor(showChan and rangePos <= strongZone ? color.new(colBuy, 94) : na,  title="Zona de descuento")
+bgcolor(showChan and rangePos >= 1 - strongZone ? color.new(colSell, 94) : na, title="Zona premium")
+
+// [D8] Labels dinámicos en lugar de 8 plotshape duplicados. Permiten mostrar el score y no
+// consumen presupuesto de plots.
+if rawSignal
+    color cS  = isBuy ? colBuy : colSell
+    bool  ok  = sigValid
+    string tag = (isBuy ? "▲ BUY" : "▼ SELL") + (rangePos <= strongZone and isBuy ? " 💎" : rangePos >= 1 - strongZone and not isBuy ? " 💎" : "")
+    string txt = ok ? tag + "\n" + str.tostring(math.round(score)) + "/100\n" + str.tostring(sigQty) + "c" : tag + "\n" + str.tostring(math.round(score)) + "/100 ✖"
+    label.new(bar_index, isBuy ? low : high, txt,
+              color=ok ? color.new(cS, 10) : color.new(cS, 75), textcolor=ok ? color.black : color.new(color.white, 30),
+              style=isBuy ? label.style_label_up : label.style_label_down, size=ok ? size.small : size.tiny)
+
+if sigValid
+    line.new(bar_index, sigSL,  bar_index + 16, sigSL,  color=color.new(#FF5252, 20), style=line.style_dashed, width=1)
+    line.new(bar_index, sigTP1, bar_index + 16, sigTP1, color=color.new(#26C6DA, 40), style=line.style_dotted, width=1)
+    line.new(bar_index, sigTP2, bar_index + 16, sigTP2, color=color.new(#26C6DA, 10), width=2)
+    alert('{"signal":"' + (isBuy ? "QTREND_BUY" : "QTREND_SELL") + '","ticker":"' + syminfo.ticker +
+          '","score":' + str.tostring(math.round(score)) + ',"entry":' + str.tostring(sigEntry, format.mintick) +
+          ',"sl":' + str.tostring(sigSL, format.mintick) + ',"tp1":' + str.tostring(sigTP1, format.mintick) +
+          ',"tp2":' + str.tostring(sigTP2, format.mintick) + ',"qty":' + str.tostring(sigQty) + '}',
+          alert.freq_once_per_bar_close)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+if showDash and barstate.islast
+    var table d = table.new(position.top_right, 2, 8, bgcolor=color.new(#0D1117, 6),
+              border_width=1, border_color=color.new(color.gray, 78))
+
+    string regTxt = er >= erMin * 1.6 ? "TENDENCIA FUERTE" : er >= erMin ? "TENDENCIA" : "LATERAL — no operar"
+    color  regCol = er >= erMin * 1.6 ? #39FF14 : er >= erMin ? #FFD700 : #FF5252
+    string posTxt = rangePos <= strongZone ? "DESCUENTO 💎" : rangePos >= 1 - strongZone ? "PREMIUM 💎" : "zona media"
+
+    table.cell(d, 0, 0, "Q-TREND PRO", text_color=#FFD700, bgcolor=#161B22, text_size=size.small)
+    table.cell(d, 1, 0, syminfo.ticker + " " + timeframe.period, text_color=color.white, bgcolor=#161B22, text_size=size.small)
+
+    table.cell(d, 0, 1, "Tendencia", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 1, trendDir == 1 ? "ALCISTA 🟢" : trendDir == -1 ? "BAJISTA 🔴" : "sin definir ⚪",
+               text_color=trendDir == 1 ? colBuy : trendDir == -1 ? colSell : color.gray, text_size=size.tiny)
+
+    table.cell(d, 0, 2, "Régimen (ER " + str.tostring(er, "#.##") + ")", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 2, regTxt, text_color=regCol, text_size=size.tiny)
+
+    table.cell(d, 0, 3, "Posición en canal", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 3, str.tostring(rangePos * 100, "#") + "%  ·  " + posTxt,
+               text_color=rangePos <= strongZone ? colBuy : rangePos >= 1 - strongZone ? colSell : color.new(color.white, 35), text_size=size.tiny)
+
+    table.cell(d, 0, 4, "Epsilon vigente", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 4, str.tostring(effMult, "#.##") + " × ATR" + (adaptEps and effMult > mult * 1.05 ? "  (ensanchado)" : ""),
+               text_color=color.new(color.white, 35), text_size=size.tiny)
+
+    table.cell(d, 0, 5, "Sesgo HTF (" + (useHTF ? htfUse : "off") + ")", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 5, not useHTF ? "—" : htfBias == 1 ? "ALCISTA 🟢" : htfBias == -1 ? "BAJISTA 🔴" : "NEUTRO ⚪",
+               text_color=htfBias == 1 ? colBuy : htfBias == -1 ? colSell : color.gray, text_size=size.tiny)
+
+    table.cell(d, 0, 6, "Distancia a la línea", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 6, na(m) ? "—" : str.tostring(distAtr, "#.##") + " ATR", text_color=color.new(color.white, 35), text_size=size.tiny)
+
+    table.cell(d, 0, 7, "Acierto real (n=" + str.tostring(statTotal) + ")", text_color=color.gray, text_size=size.tiny)
+    string stx = not showStats ? "desactivado" : statTotal < 5 ? "muestra insuficiente" : "TP1 " + str.tostring(hitTP1, "#") + "%  ·  TP2 " + str.tostring(hitTP2, "#") + "%"
+    table.cell(d, 1, 7, stx,
+               text_color=statTotal < 5 ? color.gray : hitTP1 >= 55 ? #39FF14 : hitTP1 >= 45 ? #FFD700 : #FF5252, text_size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ ALERTAS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+alertcondition(sigValid and isBuy,  title="🟢 Q-Trend Pro BUY",  message="{{ticker}} {{interval}} · Q-TREND PRO BUY — cambio de tendencia validado @ {{close}}")
+alertcondition(sigValid and not isBuy, title="🔴 Q-Trend Pro SELL", message="{{ticker}} {{interval}} · Q-TREND PRO SELL — cambio de tendencia validado @ {{close}}")
+alertcondition(sigValid, title="🎯 Cualquier señal validada", message="{{ticker}} {{interval}} · Q-Trend Pro: señal validada @ {{close}}")
+alertcondition(rawSignal and not sigValid, title="⚪ Giro filtrado (sin operar)", message="{{ticker}} {{interval}} · Q-Trend Pro: la línea giró pero la señal NO pasó los filtros")
+alertcondition(useRegime and er < erMin and er[1] >= erMin, title="⚠️ Entrada en régimen lateral", message="{{ticker}} {{interval}} · Q-Trend Pro: el mercado entró en LATERAL — el modelo deja de tener premisa")
