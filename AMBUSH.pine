@@ -120,8 +120,14 @@ f_touches(bool isHigh, float level, int len, float tol) =>
     int last = -99
     for i = 2 to len
         float px       = isHigh ? high[i] : low[i]
-        bool  localExt = isHigh ? (high[i] >= high[i + 1] and high[i] >= high[i - 1])
-                                : (low[i]  <= low[i + 1]  and low[i]  <= low[i - 1])
+        // if/else explícito en vez de un ternario partido en dos líneas: una línea de continuación
+        // que EMPIEZA por ":" no es reconocida por Pine, y con sangría múltiplo de 4 tampoco se
+        // interpreta como continuación. El if/else no tiene ese problema y además se lee mejor.
+        bool localExt = false
+        if isHigh
+            localExt := high[i] >= high[i + 1] and high[i] >= high[i - 1]
+        else
+            localExt := low[i] <= low[i + 1] and low[i] <= low[i - 1]
         if math.abs(px - level) <= tol and localExt and (i - last) >= 3
             c    += 1
             last := i
