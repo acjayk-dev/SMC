@@ -290,8 +290,32 @@
 //          estructura interna ICT (los swings MENORES dentro del leg externo), es una copia del leg externo
 //          que duplicaba etiquetas y doblaba el peso del evento. Ahora el estado interno avanza pero el
 //          evento no se reporta cuando el nivel interno coincide con el externo.
+// v6.33: PARIDAD FINAL CON LuxAlgo — las tres únicas cosas que allí seguían mejor resueltas.
+//        [A] TOLERANCIA DE EQH/EQL SOBRE ATR LARGO (eqUseLongAtr, default ON). Se medía contra el
+//          ATR(14). Un ATR corto se ENCOGE en compresión y se INFLA en expansión, de modo que la
+//          definición de "precios iguales" se movía con el régimen: en un tramo tranquilo todo parecía
+//          EQH y en expansión nada lo parecía. Un pool de liquidez no cambia de tamaño porque la vela
+//          de hoy sea grande. Ahora usa atrLong (ATR 50), que ya existía en el script.
+//        [B] FAIR VALUE GAPS DE MARCO SUPERIOR (showHtfFvg, default OFF). No existían: el indicador
+//          solo calculaba FVG del marco del gráfico y por tanto operaba ciego al POI que realmente
+//          manda. Un FVG de 15min en un gráfico de 1min lo dejó un desequilibrio de órdenes de grado
+//          muy superior. Lectura estrictamente sin repintado: solo velas HTF CERRADAS ([1],[2],[3]),
+//          el hueco nace cuando la tercera cierra. (LuxAlgo pide high[0]/low[0] de la vela HTF EN
+//          FORMACIÓN, así que sus FVG HTF pueden aparecer y desaparecer durante toda la vela.)
+//        [3.2] DOL CON PRIORIDAD AL POOL STRONG (dolPreferStrong, default ON · dolMaxAtr). El Draw on
+//          Liquidity elegía siempre el pool sin barrer MÁS CERCANO, pero la cercanía no es calidad: un
+//          extremo STRONG conserva sus órdenes intactas y es el imán de grado superior, mientras que un
+//          nivel cercano cualquiera puede ser un peldaño de camino. La asimetría es deliberada y se
+//          sigue de la definición: con estructura bajista el máximo es STRONG pero el mínimo es WEAK,
+//          así que solo el lado fuerte recibe el ascenso. dolMaxAtr evita que un extremo protegido muy
+//          lejano degrade el TP2 a un objetivo inalcanzable.
+//        NO SE PORTA, y por razones concretas: (1) el ancla del Order Block de LuxAlgo toma el EXTREMO
+//          del leg, no la última vela opuesta — no es la definición institucional, y la nuestra es
+//          correcta desde v6.5; (2) su "Confluence Filter" tiene un error de paréntesis,
+//          math.min(close, open - low) compara un PRECIO con un TAMAÑO DE MECHA y siempre devuelve
+//          open-low, de modo que `close` no interviene jamás (la intención era math.min(close,open)-low).
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.32 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.32", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.33 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.33", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -526,12 +550,19 @@ fvgMaxAge      = input.int(36, "FVG Max Age (bars)", minval=10, maxval=200, grou
 maxFVGs        = input.int(15, "Max Active FVGs", minval=3, maxval=30, group=gSMCo, tooltip="v6.27 [#3] antes hardcodeado en 15. Máx FVG vivos por lado; al superarlo se descarta el más viejo.")
 fvgRequireClose= input.bool(true,  "FVG exige cierre de desplazamiento", group=gSMCo, tooltip="v6.31 [2.3] ON (institucional): la 3ª vela debe además CERRAR más allá del gap (close[1] > high[2] alcista). Un gap creado por una mecha sin cierre desplazado no es un desequilibrio institucional. OFF = comportamiento previo (solo geometría).")
 fvgAutoThreshold= input.bool(false, "FVG umbral auto-adaptativo", group=gSMCo, tooltip="v6.31 [2.3] ON: el tamaño mínimo se mide contra el rango medio acumulado del símbolo (media de True Range desde el inicio) en vez del ATR(14). Más estable en cambios de régimen — el ATR se infla en expansión y oculta FVGs válidos. OFF (default): ATR(14).")
+showHtfFvg     = input.bool(false, "Mostrar FVG de marco SUPERIOR", group=gSMCo, tooltip="v6.33 [B] Un FVG de 15min visto en un gráfico de 1min es un POI de OTRA CATEGORÍA que un FVG de 1min: lo dejó un desequilibrio de órdenes de un grado muy superior, y el precio lo respeta en consecuencia. Hasta ahora el indicador solo calculaba FVG del marco del gráfico. Lectura SIN REPINTADO: solo se leen velas HTF ya CERRADAS ([1],[2],[3]) — el hueco aparece cuando la tercera vela HTF cierra, nunca antes. Se desactiva solo si el marco del gráfico es igual o mayor que el elegido.")
+htfFvgTf       = input.timeframe("15", "FVG HTF: marco", group=gSMCo, tooltip="Debe ser SUPERIOR al del gráfico. Regla práctica: 5× el marco operativo (1min→5 o 15 · 5min→30 o 60).")
+htfFvgMinSize  = input.float(0.5, "FVG HTF: tamaño mínimo (×ATR del gráfico)", minval=0.1, step=0.1, group=gSMCo)
+htfFvgMaxAge   = input.int(150, "FVG HTF: edad máxima (barras del gráfico)", minval=20, maxval=1000, group=gSMCo, tooltip="Cuenta en barras del GRÁFICO, no del marco superior. En 1min, 150 barras = 2h30.")
+maxHtfFvg      = input.int(6, "FVG HTF: máximo activos por lado", minval=1, maxval=20, group=gSMCo)
+htfFvgColor    = input.color(color.new(#7E57C2, 70), "FVG HTF Color", group=gSMCo)
 fvgInvalidateCE= input.bool(false, "Invalidar FVG en 50% CE (ICT estricto)", group=gSMCo, tooltip="v6.27 [#2] ON: el FVG se invalida (se elimina) al alcanzar su 50% = Consequent Encroachment (criterio ICT estricto). OFF (default): se mantiene como POI hasta el fill total y solo recolorea al 50%.")
 // ── Liquidity ──
 showEQH        = input.bool(true,  "Show EQH (Equal Highs)", group=gSMCl)
 showEQL        = input.bool(true,  "Show EQL (Equal Lows)",  group=gSMCl)
 eqTolerance    = input.float(0.15, "EQL Tolerance (×ATR)", minval=0.05, step=0.05, group=gSMCl)
 eqLookback     = input.int(24, "EQL Lookback Bars", minval=5, maxval=50, group=gSMCl)
+eqUseLongAtr   = input.bool(true, "EQH/EQL: tolerancia sobre ATR largo", group=gSMCl, tooltip="v6.33 [A] ON (recomendado): la tolerancia de 'precios iguales' se mide contra el ATR(50), no contra el ATR(14). Un ATR corto se ENCOGE en compresión y se INFLA en expansión, así que la definición de 'igual' se movía con el régimen: en un tramo tranquilo todo parecía EQH y en expansión nada lo parecía. Un pool de liquidez no cambia de tamaño porque la vela de hoy sea grande. OFF = comportamiento previo (ATR 14).")
 eqPivotMode    = input.bool(true, "EQH/EQL pivote-a-pivote", group=gSMCl, tooltip="v6.32 [4.1] ON (institucional): los Equal Highs/Lows son una relación entre PIVOTES de swing consecutivos — puntos donde el precio fue rechazado y dejó órdenes en reposo. OFF (legado): compara el pivote contra el high/low de CUALQUIER barra de la ventana, incluidas barras en mitad de un impulso donde nunca hubo rechazo ni, por tanto, pool de liquidez. Con ON el conteo pasa a ser el TAMAÑO DEL POOL (2 = doble techo, 3 = triple, 4+ = clúster).")
 eqMaxPivots    = input.int(8, "EQH/EQL pivotes en memoria", minval=3, maxval=20, group=gSMCl, tooltip="v6.32 [4.1] Profundidad de la serie de pivotes conservada para el scan pivote-a-pivote. 8 cubre un pool de hasta 8 toques.")
 colEQH         = input.color(color.new(#FF5252, 30), "EQH Color", group=gSMCl)
@@ -542,6 +573,8 @@ showSweepSignal= input.bool(true,  "Señal Sweep EQH/EQL",          group=gSMCl,
 showLiqRun         = input.bool(true, "Show Liquidity Run (EQH/EQL)", group=gSMCl, tooltip="Contrapartida del Sweep: el precio perfora el pool de liquidez y CIERRA MÁS ALLÁ en vez de recuperarlo — la liquidez no lo rechaza, lo alimenta. Evento de continuación, no de reversión. Solo contexto: no dispara señal de entrada con SL/TP.")
 showDOL            = input.bool(true,  "Show Draw on Liquidity (DOL)", group=gSMCl, tooltip="Dibuja el pool de liquidez sin barrer más cercano por encima y por debajo del precio — el imán hacia el que el mercado se está desplazando. Solo visual.")
 useDOLTarget       = input.bool(false, "Use DOL as TP2 target", group=gSMCl, tooltip="OFF por defecto: cambia el TP2 de TODAS las señales. Con ON, el TP2 deja de ser un R-múltiplo ciego y pasa a ser el DOL en la dirección del trade. TP1 sigue siendo el parcial de 0.5R. Si el DOL está más cerca que dolMinAtr o no supera al TP1, se mantiene el R-múltiplo.")
+dolPreferStrong    = input.bool(true, "DOL: priorizar el pool STRONG", group=gSMCl, tooltip="v6.33 [3.2] El DOL elegía siempre el pool SIN BARRER MÁS CERCANO. Pero no toda la liquidez vale lo mismo: un extremo STRONG —el que el precio intentó y NO logró romper— guarda órdenes intactas y es el imán real; un pool cercano cualquiera puede ser un nivel menor de camino. Con ON, si existe un extremo estructural STRONG en la dirección del trade y está dentro del alcance razonable, ése manda sobre el más cercano. El lado WEAK sigue usando los pools externos: su liquidez ya fue consumida.")
+dolMaxAtr          = input.float(8.0, "DOL Max Distance (×ATR)", minval=2.0, step=0.5, group=gSMCl, tooltip="v6.33 [3.2] Tope de distancia al pool STRONG. Sin él, priorizar un extremo protegido muy lejano produciría un TP2 inalcanzable. Más allá de este límite se vuelve al pool más cercano.")
 dolMinAtr          = input.float(1.0, "DOL Min Distance (×ATR)", minval=0.2, step=0.1, group=gSMCl, tooltip="Distancia mínima al DOL para admitirlo como objetivo. Evita que un pool pegado al precio degrade el TP2 a nada.")
 showLiqVoids    = input.bool(true,  "Show Liquidity Voids",        group=gSMCl)
 lvColor         = input.color(color.new(#B71C1C, 80), "Liq. Void Color", group=gSMCl)
@@ -714,6 +747,7 @@ showVWAPRev        := showVWAPRev        and ofEnabled
 
 showOB             := showOB             and smcEnabled
 showFVG            := showFVG            and smcEnabled
+showHtfFvg         := showHtfFvg         and smcEnabled
 showBOS            := showBOS            and smcEnabled
 showInternalStructure := showInternalStructure and smcEnabled
 showPD             := showPD             and smcEnabled
@@ -1185,6 +1219,26 @@ dolBear := f_dol_dn(dolBear, _pdl,   close)
 dolBear := f_dol_dn(dolBear, _pwl,   close)
 dolBear := f_dol_dn(dolBear, _pml,   close)
 dolBear := f_dol_dn(dolBear, orLow,  close)
+
+// ── v6.33 [3.2] PRIORIDAD AL POOL STRONG ─────────────────────────────────────
+// Hasta aquí el DOL era "el pool sin barrer MÁS CERCANO". Pero la cercanía no es calidad: un extremo
+// STRONG —el que el precio intentó y NO logró romper— conserva sus órdenes intactas y es el imán real
+// de grado superior, mientras que un nivel cercano cualquiera puede ser solo un peldaño de camino.
+// La asimetría es deliberada y se sigue de la propia definición: con estructura BAJISTA el máximo es
+// STRONG (liquidez protegida arriba) pero el mínimo es WEAK (ya barrido), así que solo el lado fuerte
+// recibe el ascenso; el lado débil sigue apuntando a los pools externos, que sí conservan liquidez.
+//
+// Nota técnica: structTrend y structureHigh/Low son `var` declaradas mucho antes de este bloque y el
+// motor de estructura las actualiza MÁS ABAJO en el script. Los valores leídos aquí son por tanto los
+// de la vela ANTERIOR ya cerrada — exactamente lo que se quiere: un objetivo que no se redefine con
+// el tick en curso. No es un efecto lateral aprovechado, es la razón de calcularlo en este punto.
+bool dolStrongHiOK = dolPreferStrong and structTrend == -1 and not na(structureHigh) and structureHigh > close
+bool dolStrongLoOK = dolPreferStrong and structTrend == 1  and not na(structureLow)  and structureLow  < close
+
+if dolStrongHiOK and (structureHigh - close) <= atr * dolMaxAtr
+    dolBull := structureHigh
+if dolStrongLoOK and (close - structureLow) <= atr * dolMaxAtr
+    dolBear := structureLow
 
 // Objetivo resuelto una sola vez por barra: todas las señales entran en `close`, así que el TP2 basado en
 // DOL es el mismo para cualquier señal alcista de la vela (idem bajista).
@@ -2216,9 +2270,12 @@ var int   lastEQLBar   = 0
 var int eqHighFromBar = 0
 var int eqLowFromBar  = 0
 
+// v6.33 [A] Referencia de volatilidad estable frente a cambios de régimen (ver tooltip del input).
+float eqVolRef = eqUseLongAtr and not na(atrLong) and atrLong > 0 ? atrLong : atr
+
 if isSwingHigh and barstate.isconfirmed
     float refHigh = high[effSwingLen]
-    float eqTol   = atr * eqTolerance
+    float eqTol   = eqVolRef * eqTolerance
     if eqPivotMode
         int nH = pivotHighLv.size()
         if nH >= 2
@@ -2248,7 +2305,7 @@ if isSwingHigh and barstate.isconfirmed
 
 if isSwingLow and barstate.isconfirmed
     float refLow = low[effSwingLen]
-    float eqTol  = atr * eqTolerance
+    float eqTol  = eqVolRef * eqTolerance
     if eqPivotMode
         int nL = pivotLowLv.size()
         if nL >= 2
@@ -2986,6 +3043,83 @@ if bearFVGs.size() > 0
                 box.set_bgcolor(_fvg.id, color.new(#FFEB3B, 85))
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ██ FVG DE MARCO SUPERIOR (v6.33 [B])
+// ══════════════════════════════════════════════════════════════════════════════
+// Un FVG de 15min visto en un gráfico de 1min no es "un FVG más": lo dejó un desequilibrio de órdenes
+// de un grado muy superior, y el precio lo respeta en consecuencia. El indicador solo sabía mirar el
+// marco del gráfico, así que operaba ciego al POI que realmente manda.
+//
+// ANTI-REPINTADO — el punto delicado de todo cálculo HTF. LuxAlgo pide high[0]/low[0] con lookahead_on,
+// es decir, el máximo y el mínimo de la vela HTF que TODAVÍA SE ESTÁ FORMANDO: ese FVG puede aparecer y
+// desaparecer durante los 15 minutos que dura la vela. Aquí se piden exclusivamente velas HTF CERRADAS
+// ([1], [2], [3]) y el hueco solo nace cuando la tercera cierra. lookahead_on es obligatorio en este
+// patrón y NO mira al futuro: con los offsets [n] su único efecto es alinear la vela ya cerrada con su
+// barra correcta del gráfico. Sin él, el dato llegaría con un retraso de una vela HTF entera.
+//   A = vela HTF hace 3 (primera del hueco) · B = hace 2 (desplazamiento) · C = hace 1 (recién cerrada)
+
+bool htfFvgUsable = showHtfFvg and timeframe.in_seconds() < timeframe.in_seconds(htfFvgTf)
+
+[htfHiA, htfLoA, htfHiC, htfLoC, htfClB] = request.security(syminfo.tickerid, htfFvgTf,
+     [high[3], low[3], high[1], low[1], close[2]], lookahead=barmerge.lookahead_on)
+
+var FVG[] htfFVGs = array.new<FVG>()
+
+// timeframe.change marca la primera barra del gráfico dentro de una vela HTF nueva: justo cuando la
+// vela C acaba de cerrar y el hueco queda definido para siempre.
+bool htfNewBar = timeframe.change(htfFvgTf)
+
+if htfFvgUsable and htfNewBar and barstate.isconfirmed and not na(htfHiA) and not na(htfLoC)
+    bool htfBull = htfLoC > htfHiA and htfClB > htfHiA and (htfLoC - htfHiA) > atr * htfFvgMinSize
+    bool htfBear = htfHiC < htfLoA and htfClB < htfLoA and (htfLoA - htfHiC) > atr * htfFvgMinSize
+    if htfBull or htfBear
+        float zTop = htfBull ? htfLoC : htfLoA
+        float zBot = htfBull ? htfHiA : htfHiC
+        // El hueco se formó a lo largo de las 3 velas HTF anteriores, que en el gráfico son
+        // 3 × (segundos HTF / segundos del gráfico) barras. Anclar la caja ahí la sitúa donde
+        // realmente ocurrió en vez de hacerla arrancar en la barra actual. Se acota a bar_index
+        // para que en un gráfico corto el índice no se vuelva negativo.
+        int htfSpan = math.max(1, math.min(bar_index, int(3 * timeframe.in_seconds(htfFvgTf) / math.max(timeframe.in_seconds(), 1))))
+        box nb = na
+        if showContext
+            nb := box.new(bar_index - htfSpan, zTop, bar_index + 10, zBot, border_color=color.new(htfFvgColor, 35),
+                     bgcolor=htfFvgColor, text="FVG " + htfFvgTf, text_color=color.new(#7E57C2, 10),
+                     text_size=size.tiny, text_halign=text.align_left)
+        htfFVGs.push(FVG.new(zTop, zBot, htfBull, bar_index, nb))
+        if htfFVGs.size() > maxHtfFvg * 2
+            FVG old = htfFVGs.shift()
+            if not na(old.id)
+                box.delete(old.id)
+
+// Ciclo de vida: se extiende mientras viva, muere al RELLENARSE por completo (el desequilibrio quedó
+// rebalanceado y deja de ser un imán) o al caducar. Recorrido por índice descendente para eliminar
+// exactamente el elemento evaluado.
+bool htfFvgTouchBull = false
+bool htfFvgTouchBear = false
+
+if htfFVGs.size() > 0
+    for _hi = htfFVGs.size() - 1 to 0
+        FVG hf = htfFVGs.get(_hi)
+        bool dropIt = false
+        if not na(hf.id)
+            box.set_right(hf.id, bar_index + 10)
+        if barstate.isconfirmed
+            if hf.isBullish and low <= hf.bottom
+                dropIt := true
+            if not hf.isBullish and high >= hf.top
+                dropIt := true
+            if (bar_index - hf.index) > htfFvgMaxAge
+                dropIt := true
+            if not dropIt and low <= hf.top and high >= hf.bottom
+                if hf.isBullish
+                    htfFvgTouchBull := true
+                else
+                    htfFvgTouchBear := true
+        if dropIt
+            if not na(hf.id)
+                box.delete(hf.id)
+            htfFVGs.remove(_hi)
+
+// ══════════════════════════════════════════════════════════════════════════════
 // ██ UNIFIED SIGNAL ENGINE
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -3598,7 +3732,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.32 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.33 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
@@ -3767,6 +3901,8 @@ alertcondition(isSqueeze and showSqueeze and barstate.isconfirmed, "ℹ️ CONTE
 alertcondition((lvBullGap or lvBearGap) and showLiqVoids and barstate.isconfirmed, "ℹ️ CONTEXTO: LV Gap", "🟥 Liquidity Void detected")
 alertcondition((eqhRunBull or eqlRunBear) and showLiqRun, "ℹ️ CONTEXTO: 🏃 LIQ RUN", "🏃 Liquidity Run — pool perforado y superado, continuación")
 alertcondition((dolBullReached or dolBearReached) and showDOL, "ℹ️ CONTEXTO: 🎯 DOL REACHED", "🎯 Draw on Liquidity alcanzado — el precio llegó al pool objetivo")
+alertcondition(htfFvgTouchBull, "ℹ️ CONTEXTO: 📐 FVG HTF alcista tocado", "📐 El precio entró en un Fair Value Gap ALCISTA del marco superior — POI de grado mayor")
+alertcondition(htfFvgTouchBear, "ℹ️ CONTEXTO: 📐 FVG HTF bajista tocado", "📐 El precio entró en un Fair Value Gap BAJISTA del marco superior — POI de grado mayor")
 alertcondition(nearKeyLevelEnter and showPDLevels, "ℹ️ CONTEXTO: NEAR KEY LEVEL", "📍 Precio entrando cerca de PDH/PDL/PWH/PWL")
 alertcondition(oteZoneEnter and showOTE, "ℹ️ CONTEXTO: OTE ZONE", "🎯 Precio entrando en zona OTE")
 
