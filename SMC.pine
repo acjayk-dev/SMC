@@ -262,8 +262,36 @@
 //          el mercado hizo con él: STRONG = no lo rompió (liquidez PROTEGIDA, imán real); WEAK = ya barrido
 //          (liquidez consumida, pozo vacío). Se opera EN DIRECCIÓN del extremo Strong. Expone isStrongHigh /
 //          isStrongLow para consumo posterior del motor de objetivos (DOL).
+// v6.32: MÁQUINA DE ESTADOS DE LEGS + FLAG 'crossed' (Fase 1) · EQH/EQL PIVOTE-A-PIVOTE + GUARD
+//        INTERNO≠SWING (Fase 4).
+//        [1a] LEG STATE MACHINE. legState alterna con cada pivote confirmado (-1 = el último fue un máximo,
+//          +1 = un mínimo) y alimenta una SERIE DE PIVOTES (pivotHighLv/Br, pivotLowLv/Br, tope eqMaxPivots).
+//          El motor solo conocía "el último swing", sin memoria de la secuencia: no sabía si entre dos
+//          máximos hubo un mínimo en medio, así que un clúster del mismo techo contaba como pivotes
+//          independientes. Ahora un pivote del mismo signo sin alternancia y a menos de legMinPivotGap
+//          barras EXTIENDE el pivote existente hasta su extremo en vez de abrir uno nuevo.
+//        [1b] FLAG 'crossed' POR NIVEL (useCrossedFlag, default ON). El criterio antiguo de ruptura era
+//          close > nivel AND close[1] <= nivel: un cruce que solo existe en UNA vela. Si esa vela caía en el
+//          cooldown de BOS, o si strictStructFlip la rechazaba por débil, el evento se PERDÍA para siempre
+//          (en la vela siguiente close[1] ya estaba por encima), dejando el motor con un structTrend
+//          obsoleto hasta que naciera un swing nuevo. Ahora el nivel conserva su evento pendiente hasta
+//          reportarlo y solo se rearma al registrarse un nivel estructural nuevo. Aplicado también a la
+//          capa de estructura interna, que tenía el mismo defecto.
+//        [4.1] EQH/EQL PIVOTE-A-PIVOTE (eqPivotMode, default ON). Los Equal Highs/Lows son una relación
+//          entre PIVOTES consecutivos — puntos de rechazo donde quedaron órdenes en reposo. El scan anterior
+//          comparaba el pivote contra el high/low de CUALQUIER barra de la ventana, incluidas barras en
+//          mitad de un impulso donde nunca hubo rechazo ni, por tanto, pool que barrer; el separador de
+//          3 barras cableado era un parche contra el sobreconteo de ese mismo defecto. Además el pool exige
+//          toques CONSECUTIVOS (la cadena termina en cuanto un pivote rompe la igualdad). El conteo pasa a
+//          ser el TAMAÑO DEL POOL (2 = doble techo, 3 = triple, 4+ = clúster) y la línea abarca el pool real.
+//        [4.2] GUARD INTERNO ≠ SWING (internalDupTol, default 0.25×ATR). Todo pivote de dos lados sobre la
+//          ventana MAYOR es por construcción pivote sobre la ventana MENOR centrada en la misma vela: cada
+//          BOS/CHoCH externo se re-reportaba como iBOS/iCHoCH en el mismo nivel y la misma vela. Eso no es
+//          estructura interna ICT (los swings MENORES dentro del leg externo), es una copia del leg externo
+//          que duplicaba etiquetas y doblaba el peso del evento. Ahora el estado interno avanza pero el
+//          evento no se reporta cuando el nivel interno coincide con el externo.
 // ─────────────────────────────────────────────────────────
-indicator("SMC Pro v6.31 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.31", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("SMC Pro v6.32 · MES/MNQ Multi-TF Auto", shorttitle="SMC v6.32", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 max_bars_back(time, 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -472,6 +500,9 @@ atrMult          = input.float(0.8, "Displacement (×ATR)",      group=gSMCs, mi
 volMultStructural= input.float(1.2, "Volume Confirm (×Avg)",    group=gSMCs, minval=1.0, step=0.1, tooltip="5min: 1.2 — volumen MES/MNQ más distribuido")
 bosCooldown      = input.int(3, "Min Bars Between BOS", minval=1, maxval=10, group=gSMCs, tooltip="5min: 3 = 15min cooldown.")
 useMultiBarDispBreak = input.bool(true,  "Break: contar desplazamiento multi-barra como fuerte", group=gSMCs, tooltip="v6.26 [#2] Una ruptura por desplazamiento de 2-3 velas (ninguna gigante) es institucionalmente válida. Con ON, isDisplacementBull/Bear también califica el break como FUERTE (crea OB, resetea leg OTE), no solo el cuerpo de la vela de ruptura.")
+useCrossedFlag   = input.bool(true,  "Estructura: flag 'crossed' por nivel", group=gSMCs, tooltip="v6.32 [1] ON (recomendado): un nivel estructural dispara su BOS/CHoCH UNA vez y queda marcado como roto hasta que se registre un nivel nuevo. OFF: criterio antiguo close[1] <= nivel (cruce en una sola vela), que PIERDE el evento para siempre si esa vela cae dentro del cooldown o si el modo estricto rechaza la ruptura por débil — el nivel quedaba roto de facto pero inalcanzable para el motor.")
+internalDupTol   = input.float(0.25, "Internal ≠ Swing Tolerance (×ATR)", minval=0.0, step=0.05, group=gSMCs, tooltip="v6.32 [4.2] Todo pivote de la ventana MAYOR es también pivote de la ventana MENOR, así que cada BOS/CHoCH externo se re-reportaba como iBOS/iCHoCH en el mismo nivel: duplicación visual y doble conteo. Si el nivel interno está a menos de este ×ATR del externo, el evento interno NO se reporta (el estado interno sí avanza). 0 = desactivado.")
+legMinPivotGap   = input.int(0, "Leg: separación mínima entre pivotes (0=auto)", minval=0, maxval=30, group=gSMCs, tooltip="v6.32 [1] Distancia mínima en barras para considerar dos pivotes del MISMO signo como pivotes distintos y no como el mismo clúster. 0 = usa el swing length efectivo (auto-calibrado). Solo se aplica cuando el leg NO ha alternado; si hubo un pivote opuesto en medio, el nuevo pivote siempre cuenta.")
 strictStructFlip = input.bool(false, "Estructura: voltear solo con ruptura fuerte", group=gSMCs, tooltip="v6.26 [#1] OFF (default): cualquier cierre más allá del nivel voltea trend/structTrend (marca wBOS/wCHoCH si es débil). ON (estricto): una ruptura DÉBIL (sin desplazamiento) solo dibuja la etiqueta wBOS/wCHoCH pero NO voltea la estructura ni consume el cooldown — el régimen solo cambia con desplazamiento real.")
 // ── Order Blocks & FVG ──
 showOB         = input.bool(true,  "Show Order Blocks",       group=gSMCo)
@@ -501,6 +532,8 @@ showEQH        = input.bool(true,  "Show EQH (Equal Highs)", group=gSMCl)
 showEQL        = input.bool(true,  "Show EQL (Equal Lows)",  group=gSMCl)
 eqTolerance    = input.float(0.15, "EQL Tolerance (×ATR)", minval=0.05, step=0.05, group=gSMCl)
 eqLookback     = input.int(24, "EQL Lookback Bars", minval=5, maxval=50, group=gSMCl)
+eqPivotMode    = input.bool(true, "EQH/EQL pivote-a-pivote", group=gSMCl, tooltip="v6.32 [4.1] ON (institucional): los Equal Highs/Lows son una relación entre PIVOTES de swing consecutivos — puntos donde el precio fue rechazado y dejó órdenes en reposo. OFF (legado): compara el pivote contra el high/low de CUALQUIER barra de la ventana, incluidas barras en mitad de un impulso donde nunca hubo rechazo ni, por tanto, pool de liquidez. Con ON el conteo pasa a ser el TAMAÑO DEL POOL (2 = doble techo, 3 = triple, 4+ = clúster).")
+eqMaxPivots    = input.int(8, "EQH/EQL pivotes en memoria", minval=3, maxval=20, group=gSMCl, tooltip="v6.32 [4.1] Profundidad de la serie de pivotes conservada para el scan pivote-a-pivote. 8 cubre un pool de hasta 8 toques.")
 colEQH         = input.color(color.new(#FF5252, 30), "EQH Color", group=gSMCl)
 colEQL         = input.color(color.new(#00E676, 30), "EQL Color", group=gSMCl)
 showIDM        = input.bool(false, "Show Inducement (IDM)", group=gSMCl)
@@ -1772,6 +1805,76 @@ localSwingHigh = ta.highest(high, effSwingLen * 2 + 1)
 obLbVal        = ta.lowestbars(low,   effSwingLen * 2 + 1)
 obHbVal        = ta.highestbars(high, effSwingLen * 2 + 1)
 
+// ──────────────────────────────────────────────────────────────────────────────
+// v6.32 [1] LEG STATE MACHINE + SERIE DE PIVOTES
+// El motor trabajaba con "el último swing" sin memoria de la SECUENCIA. Dos consecuencias reales:
+//   (a) no sabía si entre dos máximos hubo un mínimo en medio, así que un clúster de velas del mismo techo
+//       (un doble techo apretado, una consolidación) se trataba como pivotes independientes;
+//   (b) EQH/EQL no tenía una serie de pivotes contra la que comparar y recurría a un scan barra-a-barra con
+//       un separador de 3 barras cableado (ver FASE 4.1 más abajo).
+// legState alterna: -1 = el último pivote confirmado fue un MÁXIMO (leg bajista en curso), +1 = fue un MÍNIMO.
+// Un pivote del mismo signo sin alternancia y demasiado cerca NO abre pivote nuevo: extiende el existente
+// hasta su extremo (es el mismo cúmulo de liquidez, no dos).
+var int legState = 0
+var array<float> pivotHighLv = array.new<float>()
+var array<int>   pivotHighBr = array.new<int>()
+var array<float> pivotLowLv  = array.new<float>()
+var array<int>   pivotLowBr  = array.new<int>()
+
+int legGap = legMinPivotGap > 0 ? legMinPivotGap : effSwingLen
+
+// Nota de implementación: Pine NO garantiza cortocircuito en and/or ni en el operador ternario, así que el
+// acceso al último elemento se hace dentro de un if explícito — un array.get sobre un array vacío es un
+// error de runtime, no un na.
+if isSwingHigh and barstate.isconfirmed
+    int   pvBar = bar_index - effSwingLen
+    float pvLv  = high[effSwingLen]
+    int   nPH   = pivotHighBr.size()
+    bool  fresh = true
+    if nPH > 0 and legState == -1
+        fresh := (pvBar - pivotHighBr.get(nPH - 1)) >= legGap
+    if fresh
+        pivotHighLv.push(pvLv)
+        pivotHighBr.push(pvBar)
+        if pivotHighLv.size() > eqMaxPivots
+            pivotHighLv.shift()
+            pivotHighBr.shift()
+    else
+        // mismo cúmulo de liquidez: el pivote válido es el extremo, no dos pivotes distintos
+        if pvLv > pivotHighLv.get(nPH - 1)
+            pivotHighLv.set(nPH - 1, pvLv)
+            pivotHighBr.set(nPH - 1, pvBar)
+    legState := -1
+
+if isSwingLow and barstate.isconfirmed
+    int   pvBar = bar_index - effSwingLen
+    float pvLv  = low[effSwingLen]
+    int   nPL   = pivotLowBr.size()
+    bool  fresh = true
+    if nPL > 0 and legState == 1
+        fresh := (pvBar - pivotLowBr.get(nPL - 1)) >= legGap
+    if fresh
+        pivotLowLv.push(pvLv)
+        pivotLowBr.push(pvBar)
+        if pivotLowLv.size() > eqMaxPivots
+            pivotLowLv.shift()
+            pivotLowBr.shift()
+    else
+        if pvLv < pivotLowLv.get(nPL - 1)
+            pivotLowLv.set(nPL - 1, pvLv)
+            pivotLowBr.set(nPL - 1, pvBar)
+    legState := 1
+
+// v6.32 [1] FLAG 'crossed' POR NIVEL.
+// El criterio antiguo de ruptura era close > nivel AND close[1] <= nivel: un CRUCE que ocurre en una sola
+// vela. Si esa vela caía dentro del cooldown de BOS, o si strictStructFlip la rechazaba por débil, el evento
+// se PERDÍA para siempre: en la vela siguiente close[1] ya estaba por encima del nivel, así que la condición
+// no podía volver a cumplirse aunque el nivel estuviera roto de facto. El motor se quedaba con un structTrend
+// obsoleto hasta que naciera un swing nuevo. Con el flag, el nivel conserva su evento pendiente hasta que
+// efectivamente se reporta, y solo se rearma cuando se registra un nivel estructural NUEVO.
+var bool structHighCrossed = false
+var bool structLowCrossed  = false
+
 // v6.17 [FIX-A2] REPINTADO: isSwingHigh/Low dependen de ta.highest/ta.lowest sobre una ventana que incluye
 // la vela EN CURSO. En un tick temprano la condición puede ser true y latchear structureHigh; si después el
 // precio hace un máximo superior dentro de la misma vela, isSwingHigh pasa a false pero el nivel latcheado
@@ -1780,11 +1883,13 @@ if isSwingHigh and barstate.isconfirmed
     float swH = high[effSwingLen]
     if trend == 1
         if na(lastConfirmedHigh) or swH > lastConfirmedHigh
-            structureHigh     := swH
-            lastConfirmedHigh := swH
+            structureHigh      := swH
+            lastConfirmedHigh  := swH
+            structHighCrossed  := false   // v6.32 [1] nivel nuevo → evento rearmado
     else
-        structureHigh     := swH
-        lastConfirmedHigh := swH
+        structureHigh      := swH
+        lastConfirmedHigh  := swH
+        structHighCrossed  := false
 
 if isSwingLow and barstate.isconfirmed
     float swL = low[effSwingLen]
@@ -1792,9 +1897,11 @@ if isSwingLow and barstate.isconfirmed
         if na(lastConfirmedLow) or swL < lastConfirmedLow
             structureLow      := swL
             lastConfirmedLow  := swL
+            structLowCrossed  := false    // v6.32 [1] nivel nuevo → evento rearmado
     else
         structureLow      := swL
         lastConfirmedLow  := swL
+        structLowCrossed  := false
 
 bool bosUp         = false
 bool bosDown       = false
@@ -1812,7 +1919,13 @@ bool strongBearMove = (bodySize > atr * effAtrMult and isBearC and volume > avgV
 
 bool bosCooldownOK = (bar_index - lastBOSBar) >= effBosCooldown
 
-if barstate.isconfirmed and not na(structureHigh) and close > structureHigh and close[1] <= structureHigh and bosCooldownOK
+// v6.32 [1] La ruptura se evalúa contra el flag del nivel (evento pendiente) o, en modo legado, contra el
+// cruce en una sola vela. Nótese que el flag se marca DENTRO del bloque, después de pasar el cooldown: si el
+// cooldown bloquea la vela, el evento sigue vivo y se reporta en cuanto expire, en vez de perderse.
+bool rawBreakUp   = not na(structureHigh) and close > structureHigh and (useCrossedFlag ? not structHighCrossed : close[1] <= structureHigh)
+bool rawBreakDown = not na(structureLow)  and close < structureLow  and (useCrossedFlag ? not structLowCrossed  : close[1] >= structureLow)
+
+if barstate.isconfirmed and rawBreakUp and bosCooldownOK
     if strongBullMove
         if structTrend == 1
             bosUp   := true
@@ -1825,13 +1938,14 @@ if barstate.isconfirmed and not na(structureHigh) and close > structureHigh and 
             chochWeakUp := true
     // v6.26 [#1] en modo estricto, una ruptura DÉBIL marca la etiqueta pero NO voltea la estructura ni
     // consume el cooldown; el régimen solo cambia con desplazamiento real.
+    structHighCrossed := true   // v6.32 [1] el nivel ya gastó su evento (fuerte o débil): no se repite
     if strongBullMove or not strictStructFlip
         structTrend := 1
         trend       := 1
         lastBOSBar := bar_index
         lastConfirmedLow := structureLow
 
-if barstate.isconfirmed and not na(structureLow) and close < structureLow and close[1] >= structureLow and bosCooldownOK
+if barstate.isconfirmed and rawBreakDown and bosCooldownOK
     if strongBearMove
         if structTrend == -1
             bosDown   := true
@@ -1843,6 +1957,7 @@ if barstate.isconfirmed and not na(structureLow) and close < structureLow and cl
         else
             chochWeakDown := true
     // v6.26 [#1] ver nota en el bloque alcista.
+    structLowCrossed := true    // v6.32 [1] ver nota en el bloque alcista
     if strongBearMove or not strictStructFlip
         structTrend := -1
         trend       := -1
@@ -1935,6 +2050,11 @@ if barstate.islast and showStrongWeak and showContext and not na(structureHigh) 
 isInternalSwingHigh = high[internalSwingLen] == ta.highest(high, internalSwingLen * 2 + 1)
 isInternalSwingLow  = low[internalSwingLen]  == ta.lowest(low,   internalSwingLen * 2 + 1)
 
+// v6.32 [1] el flag 'crossed' se aplica también a la capa interna: el mismo evento perdido por cooldown
+// (ver nota extensa en el motor de estructura mayor).
+var bool intHighCrossed = false
+var bool intLowCrossed  = false
+
 // v6.17 [FIX-N4] La capa de Estructura Interna replicó el latcheo intrabar de [FIX-A2]. Mismo remedio.
 if isInternalSwingHigh and barstate.isconfirmed
     float iSwH = high[internalSwingLen]
@@ -1942,9 +2062,11 @@ if isInternalSwingHigh and barstate.isconfirmed
         if na(lastConfirmedInternalHigh) or iSwH > lastConfirmedInternalHigh
             internalStructureHigh     := iSwH
             lastConfirmedInternalHigh := iSwH
+            intHighCrossed            := false   // v6.32 [1]
     else
         internalStructureHigh     := iSwH
         lastConfirmedInternalHigh := iSwH
+        intHighCrossed            := false
 
 if isInternalSwingLow and barstate.isconfirmed
     float iSwL = low[internalSwingLen]
@@ -1952,9 +2074,11 @@ if isInternalSwingLow and barstate.isconfirmed
         if na(lastConfirmedInternalLow) or iSwL < lastConfirmedInternalLow
             internalStructureLow      := iSwL
             lastConfirmedInternalLow  := iSwL
+            intLowCrossed             := false   // v6.32 [1]
     else
         internalStructureLow      := iSwL
         lastConfirmedInternalLow  := iSwL
+        intLowCrossed             := false
 
 bool iBosUp     = false
 bool iBosDown   = false
@@ -1963,20 +2087,37 @@ bool iChochDown = false
 
 bool iBosCooldownOK = (bar_index - lastInternalBOSBar) >= effBosCooldown
 
-if barstate.isconfirmed and not na(internalStructureHigh) and close > internalStructureHigh and close[1] <= internalStructureHigh and iBosCooldownOK
-    if internalTrend == 1
-        iBosUp   := true
-    else
-        iChochUp := true
+// v6.32 [4.2] GUARD INTERNO ≠ SWING. Un pivote de dos lados sobre la ventana MAYOR (effSwingLen) es, por
+// construcción geométrica, también pivote sobre la ventana MENOR (internalSwingLen) centrada en la misma
+// vela. Es decir: TODO máximo estructural externo era además un máximo estructural interno, así que cada
+// BOS/CHoCH se re-reportaba como iBOS/iCHoCH en el MISMO nivel y la misma vela. Eso no es "estructura
+// interna" en el sentido ICT — la estructura interna son los swings MENORES que viven DENTRO del leg
+// externo, no una copia del leg externo. Duplicaba etiquetas y doblaba el peso del evento en la lectura.
+// El estado interno sí avanza (trend, cooldown, nivel consumido); lo que se suprime es el REPORTE.
+bool internalIsDupHigh = internalDupTol > 0 and not na(structureHigh) and not na(internalStructureHigh) and math.abs(internalStructureHigh - structureHigh) <= atr * internalDupTol
+bool internalIsDupLow  = internalDupTol > 0 and not na(structureLow)  and not na(internalStructureLow)  and math.abs(internalStructureLow  - structureLow)  <= atr * internalDupTol
+
+bool rawIBreakUp   = not na(internalStructureHigh) and close > internalStructureHigh and (useCrossedFlag ? not intHighCrossed : close[1] <= internalStructureHigh)
+bool rawIBreakDown = not na(internalStructureLow)  and close < internalStructureLow  and (useCrossedFlag ? not intLowCrossed  : close[1] >= internalStructureLow)
+
+if barstate.isconfirmed and rawIBreakUp and iBosCooldownOK
+    if not internalIsDupHigh
+        if internalTrend == 1
+            iBosUp   := true
+        else
+            iChochUp := true
+    intHighCrossed := true
     internalTrend := 1
     lastInternalBOSBar := bar_index
     lastConfirmedInternalLow := internalStructureLow
 
-if barstate.isconfirmed and not na(internalStructureLow) and close < internalStructureLow and close[1] >= internalStructureLow and iBosCooldownOK
-    if internalTrend == -1
-        iBosDown   := true
-    else
-        iChochDown := true
+if barstate.isconfirmed and rawIBreakDown and iBosCooldownOK
+    if not internalIsDupLow
+        if internalTrend == -1
+            iBosDown   := true
+        else
+            iChochDown := true
+    intLowCrossed := true
     internalTrend := -1
     lastInternalBOSBar := bar_index
     lastConfirmedInternalHigh := internalStructureHigh
@@ -2063,27 +2204,77 @@ var int   lastEQLBar   = 0
 // v6.24 [NO-REPAINT] Gate barstate.isconfirmed, consistente con el motor de estructura (FIX-A2): isSwingHigh
 // usa una ventana que incluye la vela EN CURSO, así que sin este candado un tick intrabar podía latchear
 // lastEQHLevel y no revertirlo al invalidarse el swing — y de ese pool dependen Sweep, Wyckoff y el bonus POI.
+// v6.32 [4.1] MODO PIVOTE-A-PIVOTE.
+// Los Equal Highs/Lows son una relación entre PIVOTES DE SWING consecutivos: puntos donde el precio fue
+// rechazado y dejó órdenes en reposo justo por encima/debajo. El scan anterior comparaba el pivote contra
+// el high/low de CUALQUIER barra de la ventana — incluidas barras en mitad de un impulso, donde nunca hubo
+// rechazo y por tanto no hay pool de liquidez que barrer. El separador de 3 barras cableado era un parche
+// contra el sobreconteo de ese mismo defecto; con la serie de pivotes de la leg machine deja de hacer falta.
+// Además el pool exige toques CONSECUTIVOS: en cuanto un pivote anterior rompe la igualdad, la cadena
+// termina — un nivel tocado, abandonado y retomado 30 barras después no es un doble techo.
+// El conteo pasa a ser el TAMAÑO DEL POOL (2 = doble techo, 3 = triple, 4+ = clúster), no un número de velas.
+var int eqHighFromBar = 0
+var int eqLowFromBar  = 0
+
 if isSwingHigh and barstate.isconfirmed
     float refHigh = high[effSwingLen]
     float eqTol   = atr * eqTolerance
-    int lastEqHighMatch = -999
-    for i = effSwingLen + 1 to effSwingLen + eqLookback
-        if not na(high[i]) and math.abs(high[i] - refHigh) <= eqTol and (i - lastEqHighMatch) >= 3
-            eqHighLevel    := refHigh
-            eqHighDetected := true
-            eqHighCount    += 1
-            lastEqHighMatch := i
+    if eqPivotMode
+        int nH = pivotHighLv.size()
+        if nH >= 2
+            int   cnt     = 0
+            int   fromBar = bar_index - effSwingLen
+            bool  chainOn = true
+            for j = nH - 2 to 0
+                if chainOn and math.abs(pivotHighLv.get(j) - refHigh) <= eqTol and (bar_index - effSwingLen - pivotHighBr.get(j)) <= eqLookback * 2
+                    cnt     += 1
+                    fromBar := pivotHighBr.get(j)
+                else
+                    chainOn := false
+            if cnt > 0
+                eqHighLevel    := refHigh
+                eqHighDetected := true
+                eqHighCount    := cnt + 1
+                eqHighFromBar  := fromBar
+    else
+        int lastEqHighMatch = -999
+        for i = effSwingLen + 1 to effSwingLen + eqLookback
+            if not na(high[i]) and math.abs(high[i] - refHigh) <= eqTol and (i - lastEqHighMatch) >= 3
+                eqHighLevel    := refHigh
+                eqHighDetected := true
+                eqHighCount    += 1
+                lastEqHighMatch := i
+                eqHighFromBar  := bar_index - i
 
 if isSwingLow and barstate.isconfirmed
     float refLow = low[effSwingLen]
     float eqTol  = atr * eqTolerance
-    int lastEqLowMatch = -999
-    for i = effSwingLen + 1 to effSwingLen + eqLookback
-        if not na(low[i]) and math.abs(low[i] - refLow) <= eqTol and (i - lastEqLowMatch) >= 3
-            eqLowLevel    := refLow
-            eqLowDetected := true
-            eqLowCount    += 1
-            lastEqLowMatch := i
+    if eqPivotMode
+        int nL = pivotLowLv.size()
+        if nL >= 2
+            int   cnt     = 0
+            int   fromBar = bar_index - effSwingLen
+            bool  chainOn = true
+            for j = nL - 2 to 0
+                if chainOn and math.abs(pivotLowLv.get(j) - refLow) <= eqTol and (bar_index - effSwingLen - pivotLowBr.get(j)) <= eqLookback * 2
+                    cnt     += 1
+                    fromBar := pivotLowBr.get(j)
+                else
+                    chainOn := false
+            if cnt > 0
+                eqLowLevel    := refLow
+                eqLowDetected := true
+                eqLowCount    := cnt + 1
+                eqLowFromBar  := fromBar
+    else
+        int lastEqLowMatch = -999
+        for i = effSwingLen + 1 to effSwingLen + eqLookback
+            if not na(low[i]) and math.abs(low[i] - refLow) <= eqTol and (i - lastEqLowMatch) >= 3
+                eqLowLevel    := refLow
+                eqLowDetected := true
+                eqLowCount    += 1
+                lastEqLowMatch := i
+                eqLowFromBar  := bar_index - i
 
 // v6.17 [FIX-A5] Se persisten también los CONTEOS. eqHighCount/eqLowCount solo existen en la vela exacta en
 // que se confirma el swing, así que eqBonusH/eqBonusL valían 1.0 el 99% del tiempo.
@@ -2107,13 +2298,17 @@ bool eqlAlive = not na(lastEQLLevel) and (bar_index - lastEQLBar) <= eqValidBars
 if eqHighDetected and showEQH and showContext
     int eqHWidth = eqHighCount >= 3 ? 3 : eqHighCount == 2 ? 2 : 1
     string eqHLabel = eqHighCount >= 4 ? "EQH4+ 🏦🏦" : eqHighCount == 3 ? "EQH3 🏦" : "EQH 🏦"
-    line.new(bar_index - effSwingLen - eqLookback, eqHighLevel, bar_index - effSwingLen, eqHighLevel, color=colEQH, width=eqHWidth, style=line.style_dotted)
+    // v6.32 [4.1] la línea abarca el pool REAL (del primer pivote igual al último), no una ventana fija.
+    int eqHFrom = eqPivotMode ? eqHighFromBar : bar_index - effSwingLen - eqLookback
+    line.new(eqHFrom, eqHighLevel, bar_index - effSwingLen, eqHighLevel, color=colEQH, width=eqHWidth, style=line.style_dotted)
     label.new(bar_index - effSwingLen, eqHighLevel, eqHLabel, color=color.new(colEQH, 0), textcolor=color.black, style=label.style_label_down, size=size.tiny)
 
 if eqLowDetected and showEQL and showContext
     int eqLWidth = eqLowCount >= 3 ? 3 : eqLowCount == 2 ? 2 : 1
     string eqLLabel = eqLowCount >= 4 ? "EQL4+ 💰💰" : eqLowCount == 3 ? "EQL3 💰" : "EQL 💰"
-    line.new(bar_index - effSwingLen - eqLookback, eqLowLevel, bar_index - effSwingLen, eqLowLevel, color=colEQL, width=eqLWidth, style=line.style_dotted)
+    // v6.32 [4.1] ver nota en el bloque EQH.
+    int eqLFrom = eqPivotMode ? eqLowFromBar : bar_index - effSwingLen - eqLookback
+    line.new(eqLFrom, eqLowLevel, bar_index - effSwingLen, eqLowLevel, color=colEQL, width=eqLWidth, style=line.style_dotted)
     label.new(bar_index - effSwingLen, eqLowLevel, eqLLabel, color=color.new(colEQL, 0), textcolor=color.black, style=label.style_label_up, size=size.tiny)
 
 float eqBonusH = lastEQHCount >= 4 ? 3.0 : lastEQHCount == 3 ? 2.0 : 1.0
@@ -3403,7 +3598,7 @@ if showDash and barstate.islast
 
     int dashRows = showMTFDash ? 19 : 13
     var table dash = table.new(position.top_right, 2, dashRows, border_color=color.new(#37474F, 0), border_width=1)
-    table.cell(dash, 0, 0,  "SMC v6.31 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
+    table.cell(dash, 0, 0,  "SMC v6.32 · Multi-TF", text_color=color.white, bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 1, 0,  "MES/MNQ",  text_color=#FFD700,     bgcolor=#1A237E, text_size=dSize, text_halign=text.align_center)
     table.cell(dash, 0, 1,  "Auto-Calib",     text_color=color.silver,  bgcolor=#263238, text_size=dSize)
     table.cell(dash, 1, 1,  calibStr,         text_color=calibCol,      bgcolor=#263238, text_size=dSize)
