@@ -1,7 +1,7 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MSB-OB PRO v1.1 — Market Structure Break & Order Blocks (reingeniería institucional)
+// MSB-OB PRO v1.2 — Market Structure Break & Order Blocks (reingeniería institucional)
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Reescritura completa del concepto original "Market Structure Break & Order Block" de © EmreKb
 // (MPL-2.0, Pine v5). Se conserva la TESIS —pivotes zigzag → ruptura de estructura → Order Block,
@@ -61,10 +61,19 @@
 // Las velas se colorean en tres niveles: opaco = señal ejecutable · atenuado = patrón válido al que
 // le faltó zona/sesión/HTF (permite ver POR QUÉ no salió la señal) · sin pintar = sin información.
 //
+// ── v1.2 — PALETA PROPIA PARA EL COLOREADO DE VELAS ───────────────────────────────────────────
+// El coloreado reutilizaba el verde/rojo de los bordes de zona, así que la vela de señal se fundía
+// visualmente con la caja sobre la que se imprime — justo el momento en que más falta hace
+// distinguirla. Ahora tiene su propia paleta configurable: verde flúor #39FF14 para compra y
+// magenta flúor #FF00FF para venta. El magenta se eligió a propósito frente al rojo: el rojo ya lo
+// llevan las velas bajistas normales y las zonas bajistas, así que un rojo más no distingue nada;
+// el magenta no aparece en ningún otro elemento del indicador. La transparencia del nivel atenuado
+// también es configurable.
+//
 // Licencia MPL-2.0 heredada del trabajo original de © EmreKb.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("MSB-OB Pro v1.1 · Market Structure & Order Blocks", shorttitle="MSB-OB Pro",
+indicator("MSB-OB Pro v1.2 · Market Structure & Order Blocks", shorttitle="MSB-OB Pro",
      overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -144,6 +153,9 @@ usePatRbi     = input.bool(true, "🚫 RBI / GBI (Velez) · peso 1.5", group=gPA
 usePatShav    = input.bool(true, "✂️ Vela rasurada / Marubozu (PA) · peso 1.0", group=gPA, tooltip="Cierra pegada a su extremo (mecha ≤ 10% del rango): cero rechazo al cierre. Convicción pura, aunque por sí sola no es una reversión.")
 usePatVbs     = input.bool(true, "📏 VBS / VSS — retroceso a SMA20 (Velez) · peso 1.0", group=gPA, tooltip="Velez Buy/Sell Setup: el retroceso muere en la media de 20 y rebota. Confluencia clásica: si la zona institucional coincide con la SMA20, dos escuelas señalan el mismo precio.")
 showMA20      = input.bool(false, "Dibujar la SMA 20", group=gPA)
+paBarBuyCol   = input.color(#39FF14, "Color vela BUY  (verde flúor)",    group=gPA, inline="pabar", tooltip="Color de las velas que confirman señal de COMPRA por Price Action / Velez. Por defecto verde flúor #39FF14: máxima saturación para que la vela de entrada salte a la vista sobre el fondo del gráfico y no se confunda con el verde de las cajas de zona.")
+paBarSellCol  = input.color(#FF00FF, "Color vela SELL (magenta flúor)",  group=gPA, inline="pabar", tooltip="Color de las velas que confirman señal de VENTA. Por defecto magenta flúor #FF00FF. Se eligió magenta y no rojo a propósito: el rojo ya lo usan las velas bajistas normales y las zonas bajistas, así que un rojo más no distingue nada. El magenta no aparece en ningún otro elemento del indicador.")
+paBarDimTrans = input.int(55, "Transparencia del patrón sin señal", minval=0, maxval=95, group=gPA, tooltip="Cuánto se atenúan las velas que cumplen el patrón pero SIN zona/sesión/HTF. 55 las deja visibles sin competir con la señal ejecutable. 0 = igual de intensas que la señal (no recomendado: se pierde la jerarquía). 95 = casi invisibles.")
 showPatBars   = input.bool(true, "Colorear también los patrones sin señal", group=gPA, tooltip="ON: las velas que cumplen el patrón PA/Velez pero SIN zona o contexto se pintan atenuadas. Sirve para leer el vocabulario del mercado y entender por qué una señal no salió. OFF: solo se pintan las velas de señal ejecutable.")
 
 // ── ④ Señales y riesgo ────────────────────────────────────────────────────────────────────────
@@ -716,15 +728,18 @@ if buySignal or sellSignal
 // El veto por agotamiento (3-5-8) también apaga el atenuado: una 5ª vela verde consecutiva no es
 // una oportunidad de compra por muchos patrones que acumule, y pintarla sería mentir.
 
+// El coloreado usa su PROPIA paleta (paBarBuyCol / paBarSellCol), no la de las cajas de zona: si
+// reutilizara el verde/rojo de las zonas, la vela de señal se fundiría visualmente con el fondo de
+// la caja sobre la que se imprime, que es justo el momento en que más necesitas distinguirla.
 color barCol = na
 if buySignal
-    barCol := colBullBr
+    barCol := paBarBuyCol
 else if sellSignal
-    barCol := colBearBr
+    barCol := paBarSellCol
 else if showPatBars and paBull >= minPAScore and paBull >= paBear and not paVetoBull
-    barCol := color.new(colBullBr, 55)
+    barCol := color.new(paBarBuyCol, paBarDimTrans)
 else if showPatBars and paBear >= minPAScore and not paVetoBear
-    barCol := color.new(colBearBr, 55)
+    barCol := color.new(paBarSellCol, paBarDimTrans)
 
 barcolor(barCol, title="Velas PA / Velez")
 
@@ -787,7 +802,7 @@ if showDash and barstate.islast
                 if zd.hasFVG
                     uniZones += 1
 
-    table.cell(dash, 0, 0, "MSB-OB PRO v1.1", text_color=#FFD700, bgcolor=#161B22, text_size=size.small)
+    table.cell(dash, 0, 0, "MSB-OB PRO v1.2", text_color=#FFD700, bgcolor=#161B22, text_size=size.small)
     table.cell(dash, 1, 0, syminfo.ticker + " " + timeframe.period, text_color=color.white, bgcolor=#161B22, text_size=size.small)
 
     table.cell(dash, 0, 1, "Estructura", text_color=color.gray, text_size=size.tiny)
