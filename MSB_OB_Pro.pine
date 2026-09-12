@@ -1,7 +1,7 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MSB-OB PRO v1.0 — Market Structure Break & Order Blocks (reingeniería institucional)
+// MSB-OB PRO v1.1 — Market Structure Break & Order Blocks (reingeniería institucional)
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Reescritura completa del concepto original "Market Structure Break & Order Block" de © EmreKb
 // (MPL-2.0, Pine v5). Se conserva la TESIS —pivotes zigzag → ruptura de estructura → Order Block,
@@ -48,10 +48,23 @@
 //       umbral medio 50% (mean threshold ICT), conversión OB→Breaker, señales con SL/TP y sizing,
 //       dashboard y payload JSON para automatización.
 //
+// ── v1.1 — CONFIRMACIÓN PRICE ACTION / OLIVER VELEZ EN LA SEÑAL ───────────────────────────────
+// La señal exigía `isBullBar`: cualquier vela verde dentro de una zona alcista bastaba. Eso incluye
+// una vela minúscula, un doji ligeramente verde o una vela con mecha superior enorme —un rechazo
+// BAJISTA disfrazado de vela alcista—. Estar DENTRO del POI no es lo mismo que haber sido rechazado
+// POR el POI: la zona dice dónde mirar, la vela dice si de verdad ocurrió algo.
+// Ahora la vela de retesteo debe ser una vela de reversión reconocible. Se puntúan 8 patrones con
+// pesos según cuánta evidencia aportan —Elefante 3.0 y Bottoming Tail 2.5 son prueba directa de
+// absorción; Rasurada 1.0 y SMA20 1.0 son confluencias—, más bonus por volumen y por agotamiento
+// del bando contrario. La regla 3-5-8 de Velez actúa como VETO DURO: comprar la 5ª vela verde
+// consecutiva es comprar lo extendido, y ningún score debería poder justificarlo.
+// Las velas se colorean en tres niveles: opaco = señal ejecutable · atenuado = patrón válido al que
+// le faltó zona/sesión/HTF (permite ver POR QUÉ no salió la señal) · sin pintar = sin información.
+//
 // Licencia MPL-2.0 heredada del trabajo original de © EmreKb.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("MSB-OB Pro v1.0 · Market Structure & Order Blocks", shorttitle="MSB-OB Pro",
+indicator("MSB-OB Pro v1.1 · Market Structure & Order Blocks", shorttitle="MSB-OB Pro",
      overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -81,10 +94,11 @@ type Zone
 
 gStr = "① 📐 ESTRUCTURA (ZigZag · BOS/CHoCH)"
 gZon = "② 📦 ZONAS (OB · Breaker · Mitigation)"
-gSig = "③ 🎯 SEÑALES Y RIESGO"
-gCtx = "④ 🧭 CONTEXTO (HTF · Sesión)"
-gVis = "⑤ 🎨 VISUAL"
-gAlr = "⑥ 🔔 ALERTAS"
+gPA  = "③ 🕯️ CONFIRMACIÓN PRICE ACTION / VELEZ"
+gSig = "④ 🎯 SEÑALES Y RIESGO"
+gCtx = "⑤ 🧭 CONTEXTO (HTF · Sesión)"
+gVis = "⑥ 🎨 VISUAL"
+gAlr = "⑦ 🔔 ALERTAS"
 
 // ── ① Estructura ──────────────────────────────────────────────────────────────────────────────
 pivLen        = input.int(9, "ZigZag Length (pivote)", minval=2, maxval=50, group=gStr, tooltip="Barras a cada lado que debe dominar una vela para ser pivote. 9 en 5min ≈ 45min de confirmación por lado. Bajarlo da más estructura (y más ruido); subirlo deja solo los giros mayores.")
@@ -110,7 +124,29 @@ zoneMaxAge    = input.int(120, "Edad máxima de zona (barras)", minval=0, maxval
 maxZones      = input.int(12, "Máx. zonas activas", minval=2, maxval=40, group=gZon, tooltip="Tope global. Al superarlo se descarta la más antigua no mitigada.")
 tagUnicorn    = input.bool(true, "Marcar Unicorn (zona con FVG solapado)", group=gZon, tooltip="Modelo Unicorn de ICT: un Order Block que CONTIENE un Fair Value Gap. La confluencia de desequilibrio de órdenes + desequilibrio de precio es el POI de mayor probabilidad del modelo.")
 
-// ── ③ Señales y riesgo ────────────────────────────────────────────────────────────────────────
+// ── ③ Confirmación Price Action / Oliver Velez ────────────────────────────────────────────────
+usePAConfirm  = input.bool(true, "Exigir confirmación PA/Velez en la señal", group=gPA, tooltip="El filtro que más cambia la calidad de la señal. SIN él, cualquier vela verde dentro de una zona alcista dispara un BUY — incluida una vela minúscula, indecisa o de mecha superior larga (que es justo lo contrario de lo que quieres ver). CON él, la vela de retesteo debe ser una vela de REVERSIÓN reconocible: el mercado tiene que MOSTRARTE que está comprando en la zona, no solo estar dentro de ella.")
+minPAScore    = input.float(2.0, "Score PA mínimo", minval=0.5, maxval=10.0, step=0.5, group=gPA, tooltip="Umbral de confirmación. Con 2.0 basta UN patrón fuerte (Elefante 3.0 · Bottoming Tail 2.5 · Vela 180 2.0 · Envolvente 2.0). Con 3.5 exiges un patrón fuerte MÁS una confluencia (volumen, agotamiento, SMA20). Con 5.0+ solo pasa la vela de manual — muy pocas señales, casi todas buenas.")
+paVolMult     = input.float(1.3, "Volumen de confirmación (× media)", minval=1.0, step=0.1, group=gPA, tooltip="Una vela de reversión SIN volumen es una opinión; con volumen es una transacción. Suma 1.0 al score. Se auto-ignora si el feed no publica volumen.")
+useExhVeto    = input.bool(true, "Veto por agotamiento (regla 3-5-8 de Velez)", group=gPA, tooltip="Velez: tras 3, 5 y sobre todo 8 velas consecutivas del mismo color el movimiento está AGOTADO. Comprar la 5ª verde seguida es comprar lo extendido: el recorrido ya se hizo y tú pagas el final. Con ON, ese caso se VETA por mucho score que tenga. El reverso suma: N velas rojas seguidas ENTRANDO a una zona de demanda = vendedores agotados, y eso puntúa a favor del BUY.")
+exhBars       = input.int(5, "Velas consecutivas = agotamiento", minval=3, maxval=10, group=gPA)
+// Patrones individuales — cada uno se puede apagar sin tocar el resto.
+usePatEle     = input.bool(true, "🐘 Elephant Bar (Velez)  · peso 3.0", group=gPA, tooltip="La huella institucional. Cuerpo ≥ ×ATR, mechas mínimas y ARRASA el rango de las 2 velas previas. No es 'una vela grande': es una vela que no deja dudas sobre quién tenía el control. En un POI significa que la institución está posicionándose ahí.")
+eleBodyAtr    = input.float(0.8, "     Elefante: cuerpo mínimo (× ATR)", minval=0.2, step=0.1, group=gPA)
+eleBodyPct    = input.float(0.65, "     Elefante: cuerpo / rango mínimo", minval=0.3, maxval=1.0, step=0.05, group=gPA, tooltip="Proporción del rango que debe ser cuerpo. 0.65 = como máximo un 35% de mechas. Una vela con cuerpo grande PERO mechas enormes no es un elefante: es una batalla, no una victoria.")
+usePatTail    = input.bool(true, "🔨 Bottoming / Topping Tail (Velez) · peso 2.5", group=gPA, tooltip="La señal estrella de Velez. Una mecha inferior larga en una zona de demanda es la prueba VISIBLE de que alguien absorbió toda la oferta: el precio bajó, encontró compra y fue devuelto dentro de la misma vela. Es rechazo demostrado, no supuesto.")
+tailMult      = input.float(2.0, "     Tail: mecha / cuerpo mínimo", minval=1.0, step=0.25, group=gPA)
+tailMinAtr    = input.float(0.30, "     Tail: mecha mínima (× ATR)", minval=0.05, step=0.05, group=gPA, tooltip="Evita contar como rechazo la mecha diminuta de una vela doji: proporcionalmente cumple, pero en precio no rechazó nada.")
+usePat180     = input.bool(true, "🔄 Vela 180 (Velez) · peso 2.0", group=gPA, tooltip="La vela gira 180°: abre continuando la vela anterior, se da la vuelta y cierra recuperando su cuerpo entero, en el 30% superior de su propio rango. Un cambio de control dentro de una sola vela.")
+usePatEng     = input.bool(true, "🫸 Envolvente (Price Action) · peso 2.0", group=gPA, tooltip="El cuerpo envuelve por completo al de la vela anterior y es mayor. La demanda no solo apareció: borró todo el trabajo del bando contrario.")
+usePatOut     = input.bool(true, "📤 Outside Bar (Price Action) · peso 1.5", group=gPA, tooltip="Máximo más alto Y mínimo más bajo que la vela previa, cerrando en el extremo a favor. Barrió las dos liquidezes y eligió lado.")
+usePatRbi     = input.bool(true, "🚫 RBI / GBI (Velez) · peso 1.5", group=gPA, tooltip="Red Bar Ignored: la vela cierra por ENCIMA del máximo de la roja anterior — el mercado 'ignoró' la vela bajista. Señal de continuación con el control claramente de un lado.")
+usePatShav    = input.bool(true, "✂️ Vela rasurada / Marubozu (PA) · peso 1.0", group=gPA, tooltip="Cierra pegada a su extremo (mecha ≤ 10% del rango): cero rechazo al cierre. Convicción pura, aunque por sí sola no es una reversión.")
+usePatVbs     = input.bool(true, "📏 VBS / VSS — retroceso a SMA20 (Velez) · peso 1.0", group=gPA, tooltip="Velez Buy/Sell Setup: el retroceso muere en la media de 20 y rebota. Confluencia clásica: si la zona institucional coincide con la SMA20, dos escuelas señalan el mismo precio.")
+showMA20      = input.bool(false, "Dibujar la SMA 20", group=gPA)
+showPatBars   = input.bool(true, "Colorear también los patrones sin señal", group=gPA, tooltip="ON: las velas que cumplen el patrón PA/Velez pero SIN zona o contexto se pintan atenuadas. Sirve para leer el vocabulario del mercado y entender por qué una señal no salió. OFF: solo se pintan las velas de señal ejecutable.")
+
+// ── ④ Señales y riesgo ────────────────────────────────────────────────────────────────────────
 showSignals   = input.bool(true, "Señales de entrada en retesteo", group=gSig, tooltip="Dispara cuando el precio retorna a una zona VIVA alineada con la estructura y la vela de retesteo cierra a favor. Es la entrada del modelo: la ruptura identifica el POI, el retesteo lo opera.")
 requireMeanTouch= input.bool(false, "Exigir toque del 50% de la zona", group=gSig, tooltip="ON: solo entra si el precio alcanzó el Consequent Encroachment. Menos señales, mejor precio medio y SL más ajustado.")
 requireUnicorn= input.bool(false, "Solo operar zonas Unicorn", group=gSig, tooltip="ON: descarta toda zona sin FVG solapado. Muy restrictivo — pensado para quien prioriza precisión sobre frecuencia.")
@@ -217,6 +253,108 @@ int    htfBias = useHTF ? nz(htfBiasRaw) : 0
 
 bool inSession = not useSession or not na(time(timeframe.period, sessWindow, "America/New_York"))
 bgcolor(showSessBG and inSession ? color.new(#FFD700, 95) : na, title="Sesión")
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ MOTOR DE CONFIRMACIÓN PRICE ACTION / OLIVER VELEZ
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// PROBLEMA QUE RESUELVE: la señal solo exigía `isBullBar` — una vela verde cualquiera dentro de la
+// zona. Eso incluye una vela minúscula, un doji ligeramente verde o una vela con mecha superior
+// enorme (rechazo BAJISTA disfrazado de vela alcista). Estar dentro del POI no es lo mismo que
+// haber sido rechazado POR el POI: la zona dice DÓNDE mirar, la vela dice SI ocurrió algo.
+//
+// Aquí el precio tiene que DEMOSTRAR la reversión con un patrón reconocible. Los pesos reflejan
+// cuánta información aporta cada uno: el Elefante y el Bottoming Tail son evidencia directa de
+// absorción institucional; la vela rasurada o la SMA20 son confluencias, no pruebas.
+
+float rngBar   = high - low
+float upWick   = high - math.max(close, open)
+float dnWick   = math.min(close, open) - low
+float bodyPct  = rngBar > 0 ? bodySz / rngBar : 0.0
+float closePos = rngBar > 0 ? (close - low) / rngBar : 0.5
+float ma20     = ta.sma(close, 20)
+bool  volSurge = hasVol and volume > avgVol * paVolMult
+
+// Regla 3-5-8: contadores de velas consecutivas del mismo color. Solo mutan en vela CERRADA — en
+// la vela viva el color puede cambiar varias veces y latchearía un conteo falso.
+var int consUp = 0
+var int consDn = 0
+if barstate.isconfirmed
+    consUp := isBullBar ? consUp + 1 : 0
+    consDn := isBearBar ? consDn + 1 : 0
+
+// ── 🐘 ELEPHANT BAR — la huella institucional. Arrasa el rango de las 2 velas previas.
+bool eleBull = isBullBar and bodySz >= atr * eleBodyAtr and bodyPct >= eleBodyPct and close > math.max(high[1], high[2]) and (not hasVol or volSurge)
+bool eleBear = isBearBar and bodySz >= atr * eleBodyAtr and bodyPct >= eleBodyPct and close < math.min(low[1], low[2])  and (not hasVol or volSurge)
+
+// ── 🔨 BOTTOMING / TOPPING TAIL — absorción VISIBLE: el precio fue devuelto dentro de la vela.
+bool btBull = dnWick >= bodySz * tailMult and dnWick >= atr * tailMinAtr and upWick <= dnWick * 0.40 and closePos >= 0.60
+bool ttBear = upWick >= bodySz * tailMult and upWick >= atr * tailMinAtr and dnWick <= upWick * 0.40 and closePos <= 0.40
+
+// ── 🔄 VELA 180 — cambio de control dentro de una sola vela: recupera el cuerpo anterior entero.
+bool v180Bull = isBullBar and isBearBar[1] and closePos >= 0.70 and close >= open[1]
+bool v180Bear = isBearBar and isBullBar[1] and closePos <= 0.30 and close <= open[1]
+
+// ── 🫸 ENVOLVENTE — el cuerpo borra por completo el trabajo del bando contrario.
+bool engBull = isBullBar and isBearBar[1] and close >= open[1] and open <= close[1] and bodySz > bodySz[1]
+bool engBear = isBearBar and isBullBar[1] and close <= open[1] and open >= close[1] and bodySz > bodySz[1]
+
+// ── 📤 OUTSIDE BAR — barre las dos liquidezes y elige lado en el cierre.
+bool obarBull = high > high[1] and low < low[1] and isBullBar and closePos >= 0.65
+bool obarBear = high > high[1] and low < low[1] and isBearBar and closePos <= 0.35
+
+// ── 🚫 RBI / GBI — cierra más allá del extremo de la vela contraria: la "ignoró".
+bool rbiBull = isBearBar[1] and isBullBar and close > high[1]
+bool gbiBear = isBullBar[1] and isBearBar and close < low[1]
+
+// ── ✂️ RASURADA / MARUBOZU — cero rechazo al cierre. Convicción, no reversión.
+bool shavBull = isBullBar and bodyPct >= 0.65 and (high - close) <= rngBar * 0.10
+bool shavBear = isBearBar and bodyPct >= 0.65 and (close - low) <= rngBar * 0.10
+
+// ── 📏 VBS / VSS — el retroceso muere en la SMA20 y rebota.
+bool vbsBull = not na(ma20) and low  <= ma20 + atr * 0.30 and close > ma20
+bool vssBear = not na(ma20) and high >= ma20 - atr * 0.30 and close < ma20
+
+// ── 3️⃣5️⃣8️⃣ AGOTAMIENTO. [n-1] a propósito: cuenta las velas consecutivas ANTERIORES a ésta,
+// porque la vela de reversión ya reinició el contador de su propio color.
+bool exhDnDone   = nz(consDn[1]) >= exhBars      // vendedores agotados → a favor del BUY
+bool exhUpDone   = nz(consUp[1]) >= exhBars
+bool exhVetoBull = consUp >= exhBars             // comprar la N-ésima verde = comprar lo extendido
+bool exhVetoBear = consDn >= exhBars
+
+float paBull = 0.0
+paBull += (usePatEle  and eleBull)  ? 3.0 : 0.0
+paBull += (usePatTail and btBull)   ? 2.5 : 0.0
+paBull += (usePat180  and v180Bull) ? 2.0 : 0.0
+paBull += (usePatEng  and engBull)  ? 2.0 : 0.0
+paBull += (usePatOut  and obarBull) ? 1.5 : 0.0
+paBull += (usePatRbi  and rbiBull)  ? 1.5 : 0.0
+paBull += (usePatShav and shavBull) ? 1.0 : 0.0
+paBull += (usePatVbs  and vbsBull)  ? 1.0 : 0.0
+paBull += exhDnDone ? 1.0 : 0.0
+paBull += volSurge  ? 1.0 : 0.0
+
+float paBear = 0.0
+paBear += (usePatEle  and eleBear)  ? 3.0 : 0.0
+paBear += (usePatTail and ttBear)   ? 2.5 : 0.0
+paBear += (usePat180  and v180Bear) ? 2.0 : 0.0
+paBear += (usePatEng  and engBear)  ? 2.0 : 0.0
+paBear += (usePatOut  and obarBear) ? 1.5 : 0.0
+paBear += (usePatRbi  and gbiBear)  ? 1.5 : 0.0
+paBear += (usePatShav and shavBear) ? 1.0 : 0.0
+paBear += (usePatVbs  and vssBear)  ? 1.0 : 0.0
+paBear += exhUpDone ? 1.0 : 0.0
+paBear += volSurge  ? 1.0 : 0.0
+
+bool paVetoBull = useExhVeto and exhVetoBull
+bool paVetoBear = useExhVeto and exhVetoBear
+bool paOKBull   = not usePAConfirm or (paBull >= minPAScore and not paVetoBull)
+bool paOKBear   = not usePAConfirm or (paBear >= minPAScore and not paVetoBear)
+
+// Nombre del patrón dominante (mayor peso primero) para etiqueta y dashboard.
+string paTagBull = (usePatEle and eleBull) ? "🐘 Elefante" : (usePatTail and btBull) ? "🔨 Bottoming Tail" : (usePat180 and v180Bull) ? "🔄 Vela 180" : (usePatEng and engBull) ? "🫸 Envolvente" : (usePatOut and obarBull) ? "📤 Outside" : (usePatRbi and rbiBull) ? "🚫 RBI" : (usePatShav and shavBull) ? "✂️ Rasurada" : (usePatVbs and vbsBull) ? "📏 VBS" : "—"
+string paTagBear = (usePatEle and eleBear) ? "🐘 Elefante" : (usePatTail and ttBear) ? "🔨 Topping Tail"  : (usePat180 and v180Bear) ? "🔄 Vela 180" : (usePatEng and engBear) ? "🫸 Envolvente" : (usePatOut and obarBear) ? "📤 Outside" : (usePatRbi and gbiBear) ? "🚫 GBI" : (usePatShav and shavBear) ? "✂️ Rasurada" : (usePatVbs and vssBear) ? "📏 VSS" : "—"
+
+plot(showMA20 ? ma20 : na, "SMA 20 (Velez)", color=color.new(#FFA726, 25), linewidth=1)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ MOTOR DE PIVOTES (ZigZag confirmado — sin repintado)
@@ -536,8 +674,11 @@ bool htfOKBear = not useHTF or htfBias <= 0
 bool meanOK    = not requireMeanTouch or sigZoneMean
 bool uniOK     = not requireUnicorn or sigZoneUni
 
-bool buySignal  = showSignals and barstate.isconfirmed and zoneEnterBull and isBullBar and inSession and htfOKBull and meanOK and uniOK and sigCoolOK
-bool sellSignal = showSignals and barstate.isconfirmed and zoneEnterBear and isBearBar and inSession and htfOKBear and meanOK and uniOK and sigCoolOK
+// v1.1 — `isBullBar` (cualquier vela verde) se sustituye por paOKBull: la vela de retesteo debe
+// ser una vela de REVERSIÓN reconocible por Price Action / Velez, no solo una vela del color
+// correcto dentro de la zona. Se mantiene isBullBar como requisito mínimo de dirección del cierre.
+bool buySignal  = showSignals and barstate.isconfirmed and zoneEnterBull and isBullBar and paOKBull and inSession and htfOKBull and meanOK and uniOK and sigCoolOK
+bool sellSignal = showSignals and barstate.isconfirmed and zoneEnterBear and isBearBar and paOKBear and inSession and htfOKBear and meanOK and uniOK and sigCoolOK
 
 if buySignal or sellSignal
     lastSigBar := bar_index
@@ -553,14 +694,47 @@ int   sigQty   = na(sigRisk) or sigRisk <= 0 or tickSizeIn <= 0 ? 0 :
 
 if buySignal or sellSignal
     color cSig = buySignal ? colBullBr : colBearBr
-    label.new(bar_index, buySignal ? low : high,
-              (buySignal ? "▲ BUY" : "▼ SELL") + (sigZoneUni ? " 🦄" : "") + "\n" + str.tostring(sigQty) + "c",
+    string sigHead = (buySignal ? "▲ BUY" : "▼ SELL") + (sigZoneUni ? " 🦄" : "")
+    string sigPat  = buySignal ? paTagBull : paTagBear
+    string sigFoot = str.tostring(sigQty) + "c  ·  PA " + str.tostring(buySignal ? paBull : paBear, "#.#")
+    label.new(bar_index, buySignal ? low : high, sigHead + "\n" + sigPat + "\n" + sigFoot,
               color=color.new(cSig, 12), textcolor=color.white,
               style=buySignal ? label.style_label_up : label.style_label_down, size=size.small)
     line.new(bar_index, sigSL,  bar_index + 14, sigSL,  color=color.new(#FF5252, 25), style=line.style_dashed, width=1)
     line.new(bar_index, sigTP1, bar_index + 14, sigTP1, color=color.new(#00E676, 45), style=line.style_dotted, width=1)
     line.new(bar_index, sigTP2, bar_index + 14, sigTP2, color=color.new(#00E676, 25), width=1)
     alert(f_payload(buySignal ? "MSBOB_BUY" : "MSBOB_SELL", sigEntry, sigSL, sigTP1, sigTP2, sigQty), alert.freq_once_per_bar_close)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ COLOREADO DE VELAS (Price Action / Velez)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Tres niveles de lectura, de más a menos exigente:
+//   · OPACO       — señal ejecutable: zona + estructura + contexto + patrón confirmado.
+//   · ATENUADO    — la vela ES un patrón válido, pero le faltó zona, sesión, HTF o cooldown.
+//                   Sirve para entender POR QUÉ no salió la señal en vez de quedarte a ciegas.
+//   · SIN PINTAR  — la vela no aporta información de reversión.
+// El veto por agotamiento (3-5-8) también apaga el atenuado: una 5ª vela verde consecutiva no es
+// una oportunidad de compra por muchos patrones que acumule, y pintarla sería mentir.
+
+color barCol = na
+if buySignal
+    barCol := colBullBr
+else if sellSignal
+    barCol := colBearBr
+else if showPatBars and paBull >= minPAScore and paBull >= paBear and not paVetoBull
+    barCol := color.new(colBullBr, 55)
+else if showPatBars and paBear >= minPAScore and not paVetoBear
+    barCol := color.new(colBearBr, 55)
+
+barcolor(barCol, title="Velas PA / Velez")
+
+// Marca de agotamiento: la vela que alcanza el umbral 3-5-8. Aviso, no señal.
+// Dos llamadas separadas a propósito: el parámetro `location` de plotshape no admite una serie,
+// solo un valor constante, así que no puede resolverse con un ternario.
+plotshape(useExhVeto and exhVetoBull and barstate.isconfirmed, title="Agotamiento alcista 3-5-8",
+     style=shape.xcross, size=size.tiny, location=location.abovebar, color=color.new(#FFA726, 20))
+plotshape(useExhVeto and exhVetoBear and barstate.isconfirmed, title="Agotamiento bajista 3-5-8",
+     style=shape.xcross, size=size.tiny, location=location.belowbar, color=color.new(#FFA726, 20))
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ VISUALES DE ESTRUCTURA
@@ -602,7 +776,7 @@ if barstate.islast and showStrongWeak and not na(h0) and not na(l0)
 
 if showDash and barstate.islast
     var table dash = table.new(dashPos == "Arriba derecha" ? position.top_right : dashPos == "Abajo derecha" ? position.bottom_right : position.bottom_left,
-                               2, 7, bgcolor=color.new(#0D1117, 8), border_width=1, border_color=color.new(color.gray, 75))
+                               2, 8, bgcolor=color.new(#0D1117, 8), border_width=1, border_color=color.new(color.gray, 75))
     int liveZones = 0
     int uniZones  = 0
     if zones.size() > 0
@@ -613,7 +787,7 @@ if showDash and barstate.islast
                 if zd.hasFVG
                     uniZones += 1
 
-    table.cell(dash, 0, 0, "MSB-OB PRO", text_color=#FFD700, bgcolor=#161B22, text_size=size.small)
+    table.cell(dash, 0, 0, "MSB-OB PRO v1.1", text_color=#FFD700, bgcolor=#161B22, text_size=size.small)
     table.cell(dash, 1, 0, syminfo.ticker + " " + timeframe.period, text_color=color.white, bgcolor=#161B22, text_size=size.small)
 
     table.cell(dash, 0, 1, "Estructura", text_color=color.gray, text_size=size.tiny)
@@ -639,6 +813,15 @@ if showDash and barstate.islast
     table.cell(dash, 0, 6, "Sesión", text_color=color.gray, text_size=size.tiny)
     table.cell(dash, 1, 6, not useSession ? "sin filtro" : inSession ? "ACTIVA 🟢" : "fuera ⚪",
                text_color=inSession ? #00E676 : color.gray, text_size=size.tiny)
+
+    bool   paVetoNow = paVetoBull or paVetoBear
+    float  paTop     = math.max(paBull, paBear)
+    string paTxt     = paVetoNow ? "AGOTADO 3-5-8 ✖" : paTop < minPAScore ? "sin patrón" :
+                       (paBull >= paBear ? paTagBull : paTagBear) + "  " + str.tostring(paTop, "#.#")
+    table.cell(dash, 0, 7, "Vela PA/Velez", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 7, paTxt,
+               text_color=paVetoNow ? #FFA726 : paTop < minPAScore ? color.gray : paBull >= paBear ? #00E676 : #FF5252,
+               text_size=size.tiny)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ ALERTAS
