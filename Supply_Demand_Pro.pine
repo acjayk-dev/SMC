@@ -106,7 +106,8 @@ baseBodyAtr   = input.float(0.35, "Base: cuerpo máximo (×ATR)", minval=0.05, s
 baseMaxBack   = input.int(6, "Base: búsqueda máxima (barras)", minval=1, maxval=20, group=gDet)
 maxZoneAtr    = input.float(1.5, "Altura máxima de zona (×ATR)", minval=0.3, step=0.1, group=gDet, tooltip="[D3] Al recortar se conserva el borde PROXIMAL —el que mira al precio—, porque ahí está la primera orden. El original recortaba por los dos lados a la vez y conservaba el centro, así que el precio giraba 'fuera' de la zona dibujada.")
 minBarsBetween= input.int(5, "Barras mínimas entre zonas del mismo tipo", minval=1, maxval=50, group=gDet)
-maxZonesPerTf = input.int(12, "Zonas en memoria por tipo y marco", minval=3, maxval=30, group=gDet)
+maxZonesPerTf = input.int(8, "Zonas en memoria por tipo y marco", minval=3, maxval=30, group=gDet)
+histDepth     = input.string("Normal", "Historial procesado", options=["Corto", "Normal", "Largo"], group=gDet, tooltip="EL PARÁMETRO QUE DECIDE SI EL SCRIPT CABE EN MEMORIA. request.security devuelve un ARRAY DE OBJETOS y Pine guarda una copia por cada barra del histórico: en un gráfico de 1min con 20.000 velas y 3 marcos activos eso son cientos de miles de objetos vivos, y TradingView aborta con 'Memory limits exceeded'. Con esta ventana, las zonas solo se detectan en las últimas N barras y el resto del histórico devuelve arrays VACÍOS, que no pesan nada. Corto=300 · Normal=800 · Largo=2000. Si ves el error de memoria, baja un escalón.")
 
 minZoneScore  = input.int(45, "Score mínimo para dibujar", minval=0, maxval=100, group=gQal, tooltip="Filtra las zonas flojas antes de que ensucien el gráfico. El score combina desplazamiento (25), volumen de salida (25), frescura (20), estrechez (10) y confluencia multi-marco (20).")
 maxTouchesShow= input.int(2, "Toques máximos antes de descartar", minval=1, maxval=6, group=gQal, tooltip="[D4] En Supply & Demand la zona MÁS FRESCA es la de mayor probabilidad: cada visita consume las órdenes que quedaban. Con 2, la zona desaparece tras su segundo retesteo. El original hacía lo contrario — ocultaba las zonas hasta que tenían 10 barras de antigüedad, es decir, escondía justo las mejores.")
@@ -119,7 +120,7 @@ showBreaks    = input.bool(false, "Marcar roturas", group=gAct, inline="ra")
 retestCooldown= input.int(5, "Barras entre retesteos de la MISMA zona", minval=1, maxval=50, group=gAct, tooltip="[D5] El cooldown del original era GLOBAL por tipo: un retesteo en cualquier zona de demanda bloqueaba todas las demás durante 5 barras. Aquí es por zona.")
 invalidBy     = input.string("Cierre", "Invalidación de la zona", options=["Cierre", "Mecha"], group=gAct, tooltip="Cierre (institucional): una mecha que atraviesa la zona y vuelve dentro es un barrido de liquidez, no una invalidación. Mecha: más conservador.")
 
-maxRenderZones= input.int(20, "Máximo de zonas dibujadas", minval=4, maxval=40, group=gVis, tooltip="[D7] Los objetos se PRE-ASIGNAN una vez y solo se mueven sus coordenadas. El original borraba y recreaba cientos de cajas en cada barra.")
+maxRenderZones= input.int(15, "Máximo de zonas dibujadas", minval=4, maxval=40, group=gVis, tooltip="[D7] Los objetos se PRE-ASIGNAN una vez y solo se mueven sus coordenadas. El original borraba y recreaba cientos de cajas en cada barra.")
 colDemand     = input.color(color.new(#089981, 82), "Demanda", group=gVis, inline="c")
 colSupply     = input.color(color.new(#F23645, 82), "Oferta",  group=gVis, inline="c")
 colText       = input.color(color.new(#FFFFFF, 20), "Texto", group=gVis)
@@ -130,6 +131,11 @@ showDash      = input.bool(true, "Dashboard", group=gVis)
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ CÁLCULOS BASE (se evalúan en CADA contexto temporal, incluidos los de request.security)
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Solo se detectan zonas dentro de esta ventana. Fuera de ella los arrays quedan vacíos y las
+// copias que request.security guarda por barra no ocupan prácticamente nada.
+int  histBars = histDepth == "Corto" ? 300 : histDepth == "Normal" ? 800 : 2000
+bool inRange  = bar_index > last_bar_index - histBars
 
 float atrV   = ta.atr(14)
 float avgVol = ta.sma(volume, 20)
@@ -208,8 +214,8 @@ float impulseVol = math.sum(volume, impulseBars)
 
 bool  volOK   = not useVolConfirm or not hasVol or impulseVol >= avgVol * impulseBars * volMult
 
-bool newDemand = impUp and netOK and volOK and barstate.isconfirmed and (bar_index - lastDemandBar) > minBarsBetween
-bool newSupply = impDn and netOK and volOK and barstate.isconfirmed and (bar_index - lastSupplyBar) > minBarsBetween
+bool newDemand = inRange and impUp and netOK and volOK and barstate.isconfirmed and (bar_index - lastDemandBar) > minBarsBetween
+bool newSupply = inRange and impDn and netOK and volOK and barstate.isconfirmed and (bar_index - lastSupplyBar) > minBarsBetween
 
 // Score base 0-70, fijo al nacer la zona: desplazamiento (25) + volumen de salida (25) + estrechez
 // (20). La frescura y la confluencia multi-marco se suman después, porque cambian con el tiempo.
@@ -256,7 +262,7 @@ if newDemand or newSupply
             supplyList.pop()
 
 // Invalidación dentro del propio contexto.
-if barstate.isconfirmed
+if barstate.isconfirmed and inRange
     if demandList.size() > 0
         for i = 0 to demandList.size() - 1
             ZoneInfo zd = demandList.get(i)
@@ -279,9 +285,21 @@ if barstate.isconfirmed
 // para reconstruir aquí. Las tres llamadas van al ámbito global y sin lookahead: el valor por
 // defecto (lookahead_off) es el correcto — no se adelanta ningún dato del marco superior.
 
-[dem1, sup1] = request.security(syminfo.tickerid, tf1, [demandList, supplyList])
-[dem2, sup2] = request.security(syminfo.tickerid, tf2, [demandList, supplyList])
-[dem3, sup3] = request.security(syminfo.tickerid, tf3, [demandList, supplyList])
+// Cada llamada mantiene su propia copia por barra, así que un marco DESACTIVADO que igualmente se
+// pidiera costaría exactamente lo mismo que uno activo. Con los marcos 2 y 3 apagados por defecto,
+// pedir los tres incondicionalmente triplicaba la memoria sin aportar una sola zona.
+f_reqZones(string tf, bool enabled) =>
+    array<ZoneInfo> d = na
+    array<ZoneInfo> s = na
+    if enabled
+        [dd, ss] = request.security(syminfo.tickerid, tf, [demandList, supplyList])
+        d := dd
+        s := ss
+    [d, s]
+
+[dem1, sup1] = f_reqZones(tf1, tf1On)
+[dem2, sup2] = f_reqZones(tf2, tf2On)
+[dem3, sup3] = f_reqZones(tf3, tf3On)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ FRESCURA — memoria de toques por zona (solo en el contexto del GRÁFICO)
@@ -394,7 +412,7 @@ if barstate.isconfirmed
                     breakLvl    := z.top
 
     // Los mapas solo crecen; se vacían al desbordar para que no se acumulen indefinidamente.
-    if touchCount.size() > 800
+    if touchCount.size() > 250
         touchCount.clear()
         wasInside.clear()
         lastRetest.clear()
