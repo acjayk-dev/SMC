@@ -199,7 +199,14 @@ for i = 0 to impulseBars - 1
 
 float netMove = math.abs(close - open[impulseBars - 1])
 bool  netOK   = netMove >= atrV * impulseNetAtr
-bool  volOK   = not useVolConfirm or not hasVol or math.sum(volume, impulseBars) >= avgVol * impulseBars * volMult
+
+// math.sum mantiene una ventana deslizante interna, así que arrastra estado histórico: si solo se
+// evaluase en las barras donde hace falta, esa ventana quedaría incompleta y el total dejaría de
+// ser el de las últimas `impulseBars` velas. Por eso se calcula aquí, en el ámbito global y de
+// forma incondicional, y los dos puntos que lo necesitan leen esta variable.
+float impulseVol = math.sum(volume, impulseBars)
+
+bool  volOK   = not useVolConfirm or not hasVol or impulseVol >= avgVol * impulseBars * volMult
 
 bool newDemand = impUp and netOK and volOK and barstate.isconfirmed and (bar_index - lastDemandBar) > minBarsBetween
 bool newSupply = impDn and netOK and volOK and barstate.isconfirmed and (bar_index - lastSupplyBar) > minBarsBetween
@@ -226,8 +233,7 @@ if newDemand or newSupply
         else
             zTop := zBot + atrV * maxZoneAtr
 
-    float volSum = math.sum(volume, impulseBars)
-    float bScore = f_baseScore(netMove, atrV, volSum, avgVol, hasVol, zTop - zBot)
+    float bScore = f_baseScore(netMove, atrV, impulseVol, avgVol, hasVol, zTop - zBot)
     // guid único: los tiempos de barra distan ≥ 60000 ms, así que el desplazamiento por marco y
     // tipo (10..35) nunca puede colisionar con el de otra barra.
     // El desplazamiento por marco lo aplica f_collect; aquí solo se separan demanda y oferta,
