@@ -1,0 +1,851 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// MSB-OB PRO v1.2 — Market Structure Break & Order Blocks (reingeniería institucional)
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// Reescritura completa del concepto original "Market Structure Break & Order Block" de © EmreKb
+// (MPL-2.0, Pine v5). Se conserva la TESIS —pivotes zigzag → ruptura de estructura → Order Block,
+// Breaker y Mitigation Block— y se reconstruye toda la implementación.
+//
+// TF óptimo: 1 / 2 / 5 min intradía · Activo objetivo: futuros MNQ / MES (funciona en cualquier
+// instrumento con volumen real; los filtros de volumen se auto-desactivan si el feed no lo trae).
+//
+// ── QUÉ SE CORRIGIÓ RESPECTO DEL ORIGINAL ─────────────────────────────────────────────────────
+//  [R1] REPINTADO TOTAL. `to_up = high >= ta.highest(zigzag_len)` incluye la vela EN CURSO, así que
+//       `trend` volteaba intrabar y volvía atrás; ningún estado estaba tras barstate.isconfirmed.
+//       Pivotes, líneas, cajas y el propio MSB se redibujaban tick a tick. Aquí TODO el estado
+//       persistente muta solo en vela cerrada, y los pivotes usan ta.pivothigh/low (confirmación
+//       de dos lados) que por construcción no puede revisarse hacia atrás.
+//  [R2] ARRAYS SEMILLA. `array.new_float(5)` NO crea un array vacío: crea 5 elementos en na/0. Con
+//       menos de 2 pivotes reales, f_get_high/f_get_low devolvían na o 0, y `l0i = 0` alimentaba
+//       `for i = h1i to l0i[zigzag_len]` con rangos de miles de barras — origen del clásico error
+//       "loop is too long" y de cajas ancladas en la barra 0. Aquí los arrays nacen vacíos y todo
+//       acceso está protegido por un if explícito (Pine NO garantiza cortocircuito en and/or, y un
+//       array.get fuera de rango es error de runtime, no na).
+//  [R3] BORRADO DE LA CAJA EQUIVOCADA. `f_delete_box` hacía array.shift() — elimina SIEMPRE el
+//       elemento 0, no el que disparó la condición. Y se llamaba DENTRO de `for x in arr`, mutando
+//       el array que se estaba recorriendo. Aquí se recorre por índice descendente y se elimina
+//       exactamente el índice evaluado.
+//  [R4] FUGA DE CAJAS. Con "Delete Old/Broken Boxes" en OFF, el original hacía array.shift() sin
+//       box.delete(): la caja salía del array pero seguía viva en el gráfico, sin nadie que la
+//       gestionara, hasta que max_boxes_count descartaba en silencio la más antigua. Aquí el ciclo
+//       de vida es explícito: extender → 50% → mitigar → (breaker | expirar) → destruir.
+//  [R5] RAMA `else if` PERDIDA. En el bucle bajista faltaba el `else`: con close > top la caja se
+//       borraba Y ADEMÁS alertaba (close > top implica close > bottom). Asimétrico con las otras 3.
+//  [R6] SPAM DE ALERTAS. `alert()` dentro del bucle se disparaba en CADA barra mientras el precio
+//       estuviera en la zona. Aquí cada zona alerta una vez por entrada, con cooldown configurable.
+//  [R7] TODO ERA "MSB". El original no distinguía continuación de reversión. BOS y CHoCH significan
+//       cosas OPUESTAS: BOS confirma el régimen, CHoCH advierte de que se acabó. Se clasifican.
+//  [R8] SEÑAL TARDÍA. El `market` del original volteaba comparando PIVOTES (h0 vs h1), así que el
+//       MSB aparecía ~zigzag_len barras DESPUÉS de la ruptura real. Aquí la ruptura se evalúa sobre
+//       el CIERRE contra el nivel del pivote confirmado: mismo rigor, pivLen barras antes.
+//  [R9] COMPARACIÓN DE FLOATS PARA RECUPERAR ÍNDICES. `ta.barssince(low_val == low)` es frágil
+//       (igualdad exacta entre floats y ambigüedad si el valor se repite). Los pivotes guardan su
+//       bar_index real en el momento de confirmarse.
+// [R10] ORDER BLOCK SIN CRITERIO. Tomaba la última vela de color opuesto, fuese un doji sin cuerpo
+//       o una vela climática de pánico. Se añaden filtros de cuerpo mínimo y de rango máximo.
+// [R11] SIN CONTEXTO NI GESTIÓN. Se añaden: sesgo HTF sin repintado, filtro de sesión/Kill Zone,
+//       umbral medio 50% (mean threshold ICT), conversión OB→Breaker, señales con SL/TP y sizing,
+//       dashboard y payload JSON para automatización.
+//
+// ── v1.1 — CONFIRMACIÓN PRICE ACTION / OLIVER VELEZ EN LA SEÑAL ───────────────────────────────
+// La señal exigía `isBullBar`: cualquier vela verde dentro de una zona alcista bastaba. Eso incluye
+// una vela minúscula, un doji ligeramente verde o una vela con mecha superior enorme —un rechazo
+// BAJISTA disfrazado de vela alcista—. Estar DENTRO del POI no es lo mismo que haber sido rechazado
+// POR el POI: la zona dice dónde mirar, la vela dice si de verdad ocurrió algo.
+// Ahora la vela de retesteo debe ser una vela de reversión reconocible. Se puntúan 8 patrones con
+// pesos según cuánta evidencia aportan —Elefante 3.0 y Bottoming Tail 2.5 son prueba directa de
+// absorción; Rasurada 1.0 y SMA20 1.0 son confluencias—, más bonus por volumen y por agotamiento
+// del bando contrario. La regla 3-5-8 de Velez actúa como VETO DURO: comprar la 5ª vela verde
+// consecutiva es comprar lo extendido, y ningún score debería poder justificarlo.
+// Las velas se colorean en tres niveles: opaco = señal ejecutable · atenuado = patrón válido al que
+// le faltó zona/sesión/HTF (permite ver POR QUÉ no salió la señal) · sin pintar = sin información.
+//
+// ── v1.2 — PALETA PROPIA PARA EL COLOREADO DE VELAS ───────────────────────────────────────────
+// El coloreado reutilizaba el verde/rojo de los bordes de zona, así que la vela de señal se fundía
+// visualmente con la caja sobre la que se imprime — justo el momento en que más falta hace
+// distinguirla. Ahora tiene su propia paleta configurable: verde flúor #39FF14 para compra y
+// magenta flúor #FF00FF para venta. El magenta se eligió a propósito frente al rojo: el rojo ya lo
+// llevan las velas bajistas normales y las zonas bajistas, así que un rojo más no distingue nada;
+// el magenta no aparece en ningún otro elemento del indicador. La transparencia del nivel atenuado
+// también es configurable.
+//
+// Licencia MPL-2.0 heredada del trabajo original de © EmreKb.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+indicator("MSB-OB Pro v1.2 · Market Structure & Order Blocks", shorttitle="MSB-OB Pro",
+     overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ TIPOS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Una Zone es cualquier POI rectangular nacido de una ruptura de estructura: Order Block, Breaker
+// Block o Mitigation Block. Comparten ciclo de vida, así que comparten tipo y un único array.
+type Zone
+    box    id
+    line   mid
+    float  top
+    float  bottom
+    float  mean
+    bool   isBull          // dirección OPERATIVA actual — un breaker la invierte respecto al nacimiento
+    int    birthBar
+    string kind            // "OB" · "BB" · "MB"
+    bool   mitigated
+    bool   halfHit
+    bool   flipped         // ya se convirtió en breaker una vez (no se vuelve a voltear)
+    bool   hasFVG          // hay un FVG solapado = modelo Unicorn de ICT
+    int    lastAlertBar
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+gStr = "① 📐 ESTRUCTURA (ZigZag · BOS/CHoCH)"
+gZon = "② 📦 ZONAS (OB · Breaker · Mitigation)"
+gPA  = "③ 🕯️ CONFIRMACIÓN PRICE ACTION / VELEZ"
+gSig = "④ 🎯 SEÑALES Y RIESGO"
+gCtx = "⑤ 🧭 CONTEXTO (HTF · Sesión)"
+gVis = "⑥ 🎨 VISUAL"
+gAlr = "⑦ 🔔 ALERTAS"
+
+// ── ① Estructura ──────────────────────────────────────────────────────────────────────────────
+pivLen        = input.int(9, "ZigZag Length (pivote)", minval=2, maxval=50, group=gStr, tooltip="Barras a cada lado que debe dominar una vela para ser pivote. 9 en 5min ≈ 45min de confirmación por lado. Bajarlo da más estructura (y más ruido); subirlo deja solo los giros mayores.")
+showZigZag    = input.bool(true, "Mostrar ZigZag", group=gStr)
+breakBufferFib= input.float(0.10, "Buffer de ruptura (× rango del leg)", minval=0.0, maxval=1.0, step=0.01, group=gStr, tooltip="El cierre debe superar el nivel del pivote por al menos esta fracción del rango del leg. Filtra el pinchazo marginal. NOTA: el original usaba 0.33, pero medía PIVOTE contra PIVOTE (varias barras después); sobre un modelo de ruptura por cierre ese valor es desproporcionado. 0.10 es el equivalente razonable. 0 = solo exige el cierre más allá.")
+useDisplacement= input.bool(true, "Exigir desplazamiento en la ruptura", group=gStr, tooltip="La vela que rompe debe tener cuerpo ≥ (× ATR) y cerrar a favor. Una ruptura institucional se produce con expansión, no por deriva lenta. Separa el BOS real del goteo.")
+dispAtrMult   = input.float(0.7, "Desplazamiento (× ATR)", minval=0.1, step=0.1, group=gStr)
+useVolBreak   = input.bool(true, "Exigir volumen en la ruptura", group=gStr, tooltip="La vela de ruptura debe superar el volumen medio × el factor. Se auto-ignora si el feed del símbolo no publica volumen.")
+volBreakMult  = input.float(1.2, "Volumen ruptura (× media)", minval=1.0, step=0.1, group=gStr)
+bosCooldown   = input.int(3, "Barras mínimas entre rupturas", minval=0, maxval=50, group=gStr, tooltip="Evita una ráfaga de BOS encadenados dentro del mismo impulso.")
+showStrongWeak= input.bool(true, "Mostrar Strong / Weak High-Low", group=gStr, tooltip="Clasifica el extremo estructural vigente por lo que el mercado HIZO con él. STRONG = no logró romperlo → liquidez PROTEGIDA, el imán real. WEAK = ya barrido → liquidez consumida. Se opera EN DIRECCIÓN del extremo Strong.")
+
+// ── ② Zonas ───────────────────────────────────────────────────────────────────────────────────
+showZones     = input.bool(true, "Mostrar zonas", group=gZon)
+obSearchBars  = input.int(20, "Búsqueda del origen (barras)", minval=3, maxval=60, group=gZon, tooltip="Cuántas barras hacia atrás desde la ruptura se buscan para anclar el Order Block en la última vela de color OPUESTO al impulso.")
+obMinBodyAtr  = input.float(0.20, "Origen: cuerpo mínimo (× ATR)", minval=0.0, step=0.05, group=gZon, tooltip="La vela de origen debe tener CUERPO real. Un Order Block nace de un desequilibrio de órdenes y un doji no lo representa: si la opuesta más cercana es un doji, se salta y se busca la siguiente. 0 = desactivado (comportamiento del original).")
+obMaxRangeAtr = input.float(2.0, "Origen: rango máximo (× ATR)", minval=0.0, step=0.5, group=gZon, tooltip="La vela de origen no puede ser CLIMÁTICA. Un rango extremo es capitulación —liquidación de posiciones—, no colocación institucional; anclar ahí produce una zona enorme y difusa que el precio 'mitiga' de inmediato. 0 = desactivado.")
+mitByWick     = input.bool(false, "Mitigar por mecha (no por cierre)", group=gZon, tooltip="OFF (institucional): la zona solo se invalida si el precio CIERRA más allá — una mecha que la perfora y vuelve dentro es un BARRIDO de liquidez, no una invalidación. ON: cualquier mecha la invalida (más conservador, menos zonas vivas).")
+showMean      = input.bool(true, "Marcar umbral medio (50% CE)", group=gZon, tooltip="Consequent Encroachment de ICT: el 50% de la zona es el punto de entrada de mayor calidad dentro del POI.")
+enableBreaker = input.bool(true, "Convertir zona violada en Breaker", group=gZon, tooltip="Una zona rota mientras la estructura va en contra no muere: invierte su papel (soporte→resistencia). Es el Breaker Block real de ICT. OFF: la zona violada se marca como mitigada y punto.")
+removeMitig   = input.bool(false, "Borrar zonas mitigadas", group=gZon, tooltip="OFF: la zona mitigada se atenúa pero permanece como referencia histórica. ON: se elimina del gráfico.")
+zoneMaxAge    = input.int(120, "Edad máxima de zona (barras)", minval=0, maxval=1000, group=gZon, tooltip="En 5min, 120 barras = 10 horas. Una zona sin tocar durante toda una sesión ya no representa órdenes vivas. 0 = sin caducidad.")
+maxZones      = input.int(12, "Máx. zonas activas", minval=2, maxval=40, group=gZon, tooltip="Tope global. Al superarlo se descarta la más antigua no mitigada.")
+tagUnicorn    = input.bool(true, "Marcar Unicorn (zona con FVG solapado)", group=gZon, tooltip="Modelo Unicorn de ICT: un Order Block que CONTIENE un Fair Value Gap. La confluencia de desequilibrio de órdenes + desequilibrio de precio es el POI de mayor probabilidad del modelo.")
+
+// ── ③ Confirmación Price Action / Oliver Velez ────────────────────────────────────────────────
+usePAConfirm  = input.bool(true, "Exigir confirmación PA/Velez en la señal", group=gPA, tooltip="El filtro que más cambia la calidad de la señal. SIN él, cualquier vela verde dentro de una zona alcista dispara un BUY — incluida una vela minúscula, indecisa o de mecha superior larga (que es justo lo contrario de lo que quieres ver). CON él, la vela de retesteo debe ser una vela de REVERSIÓN reconocible: el mercado tiene que MOSTRARTE que está comprando en la zona, no solo estar dentro de ella.")
+minPAScore    = input.float(2.0, "Score PA mínimo", minval=0.5, maxval=10.0, step=0.5, group=gPA, tooltip="Umbral de confirmación. Con 2.0 basta UN patrón fuerte (Elefante 3.0 · Bottoming Tail 2.5 · Vela 180 2.0 · Envolvente 2.0). Con 3.5 exiges un patrón fuerte MÁS una confluencia (volumen, agotamiento, SMA20). Con 5.0+ solo pasa la vela de manual — muy pocas señales, casi todas buenas.")
+paVolMult     = input.float(1.3, "Volumen de confirmación (× media)", minval=1.0, step=0.1, group=gPA, tooltip="Una vela de reversión SIN volumen es una opinión; con volumen es una transacción. Suma 1.0 al score. Se auto-ignora si el feed no publica volumen.")
+useExhVeto    = input.bool(true, "Veto por agotamiento (regla 3-5-8 de Velez)", group=gPA, tooltip="Velez: tras 3, 5 y sobre todo 8 velas consecutivas del mismo color el movimiento está AGOTADO. Comprar la 5ª verde seguida es comprar lo extendido: el recorrido ya se hizo y tú pagas el final. Con ON, ese caso se VETA por mucho score que tenga. El reverso suma: N velas rojas seguidas ENTRANDO a una zona de demanda = vendedores agotados, y eso puntúa a favor del BUY.")
+exhBars       = input.int(5, "Velas consecutivas = agotamiento", minval=3, maxval=10, group=gPA)
+// Patrones individuales — cada uno se puede apagar sin tocar el resto.
+usePatEle     = input.bool(true, "🐘 Elephant Bar (Velez)  · peso 3.0", group=gPA, tooltip="La huella institucional. Cuerpo ≥ ×ATR, mechas mínimas y ARRASA el rango de las 2 velas previas. No es 'una vela grande': es una vela que no deja dudas sobre quién tenía el control. En un POI significa que la institución está posicionándose ahí.")
+eleBodyAtr    = input.float(0.8, "     Elefante: cuerpo mínimo (× ATR)", minval=0.2, step=0.1, group=gPA)
+eleBodyPct    = input.float(0.65, "     Elefante: cuerpo / rango mínimo", minval=0.3, maxval=1.0, step=0.05, group=gPA, tooltip="Proporción del rango que debe ser cuerpo. 0.65 = como máximo un 35% de mechas. Una vela con cuerpo grande PERO mechas enormes no es un elefante: es una batalla, no una victoria.")
+usePatTail    = input.bool(true, "🔨 Bottoming / Topping Tail (Velez) · peso 2.5", group=gPA, tooltip="La señal estrella de Velez. Una mecha inferior larga en una zona de demanda es la prueba VISIBLE de que alguien absorbió toda la oferta: el precio bajó, encontró compra y fue devuelto dentro de la misma vela. Es rechazo demostrado, no supuesto.")
+tailMult      = input.float(2.0, "     Tail: mecha / cuerpo mínimo", minval=1.0, step=0.25, group=gPA)
+tailMinAtr    = input.float(0.30, "     Tail: mecha mínima (× ATR)", minval=0.05, step=0.05, group=gPA, tooltip="Evita contar como rechazo la mecha diminuta de una vela doji: proporcionalmente cumple, pero en precio no rechazó nada.")
+usePat180     = input.bool(true, "🔄 Vela 180 (Velez) · peso 2.0", group=gPA, tooltip="La vela gira 180°: abre continuando la vela anterior, se da la vuelta y cierra recuperando su cuerpo entero, en el 30% superior de su propio rango. Un cambio de control dentro de una sola vela.")
+usePatEng     = input.bool(true, "🫸 Envolvente (Price Action) · peso 2.0", group=gPA, tooltip="El cuerpo envuelve por completo al de la vela anterior y es mayor. La demanda no solo apareció: borró todo el trabajo del bando contrario.")
+usePatOut     = input.bool(true, "📤 Outside Bar (Price Action) · peso 1.5", group=gPA, tooltip="Máximo más alto Y mínimo más bajo que la vela previa, cerrando en el extremo a favor. Barrió las dos liquidezes y eligió lado.")
+usePatRbi     = input.bool(true, "🚫 RBI / GBI (Velez) · peso 1.5", group=gPA, tooltip="Red Bar Ignored: la vela cierra por ENCIMA del máximo de la roja anterior — el mercado 'ignoró' la vela bajista. Señal de continuación con el control claramente de un lado.")
+usePatShav    = input.bool(true, "✂️ Vela rasurada / Marubozu (PA) · peso 1.0", group=gPA, tooltip="Cierra pegada a su extremo (mecha ≤ 10% del rango): cero rechazo al cierre. Convicción pura, aunque por sí sola no es una reversión.")
+usePatVbs     = input.bool(true, "📏 VBS / VSS — retroceso a SMA20 (Velez) · peso 1.0", group=gPA, tooltip="Velez Buy/Sell Setup: el retroceso muere en la media de 20 y rebota. Confluencia clásica: si la zona institucional coincide con la SMA20, dos escuelas señalan el mismo precio.")
+showMA20      = input.bool(false, "Dibujar la SMA 20", group=gPA)
+paBarBuyCol   = input.color(#39FF14, "Color vela BUY  (verde flúor)",    group=gPA, inline="pabar", tooltip="Color de las velas que confirman señal de COMPRA por Price Action / Velez. Por defecto verde flúor #39FF14: máxima saturación para que la vela de entrada salte a la vista sobre el fondo del gráfico y no se confunda con el verde de las cajas de zona.")
+paBarSellCol  = input.color(#FF00FF, "Color vela SELL (magenta flúor)",  group=gPA, inline="pabar", tooltip="Color de las velas que confirman señal de VENTA. Por defecto magenta flúor #FF00FF. Se eligió magenta y no rojo a propósito: el rojo ya lo usan las velas bajistas normales y las zonas bajistas, así que un rojo más no distingue nada. El magenta no aparece en ningún otro elemento del indicador.")
+paBarDimTrans = input.int(55, "Transparencia del patrón sin señal", minval=0, maxval=95, group=gPA, tooltip="Cuánto se atenúan las velas que cumplen el patrón pero SIN zona/sesión/HTF. 55 las deja visibles sin competir con la señal ejecutable. 0 = igual de intensas que la señal (no recomendado: se pierde la jerarquía). 95 = casi invisibles.")
+showPatBars   = input.bool(true, "Colorear también los patrones sin señal", group=gPA, tooltip="ON: las velas que cumplen el patrón PA/Velez pero SIN zona o contexto se pintan atenuadas. Sirve para leer el vocabulario del mercado y entender por qué una señal no salió. OFF: solo se pintan las velas de señal ejecutable.")
+
+// ── ④ Señales y riesgo ────────────────────────────────────────────────────────────────────────
+showSignals   = input.bool(true, "Señales de entrada en retesteo", group=gSig, tooltip="Dispara cuando el precio retorna a una zona VIVA alineada con la estructura y la vela de retesteo cierra a favor. Es la entrada del modelo: la ruptura identifica el POI, el retesteo lo opera.")
+requireMeanTouch= input.bool(false, "Exigir toque del 50% de la zona", group=gSig, tooltip="ON: solo entra si el precio alcanzó el Consequent Encroachment. Menos señales, mejor precio medio y SL más ajustado.")
+requireUnicorn= input.bool(false, "Solo operar zonas Unicorn", group=gSig, tooltip="ON: descarta toda zona sin FVG solapado. Muy restrictivo — pensado para quien prioriza precisión sobre frecuencia.")
+slBufferAtr   = input.float(0.25, "Colchón de SL (× ATR)", minval=0.0, step=0.05, group=gSig, tooltip="Distancia extra por debajo (compra) o encima (venta) del borde de la zona. Protege contra el barrido de stops pegado al borde exacto.")
+tp1R          = input.float(1.0, "TP1 (R múltiplo)", minval=0.3, step=0.1, group=gSig)
+tp2R          = input.float(2.0, "TP2 (R múltiplo)", minval=0.5, step=0.1, group=gSig)
+sigCooldown   = input.int(5, "Barras mínimas entre señales", minval=0, maxval=100, group=gSig)
+riskPerTrade  = input.float(200.0, "Riesgo por operación ($)", minval=1.0, step=25.0, group=gSig, tooltip="Para calcular el tamaño sugerido en el payload de alerta.")
+tickValue     = input.float(0.50, "Valor del tick ($)", minval=0.01, step=0.01, group=gSig, tooltip="MNQ = 0.50 $ por tick de 0.25. MES = 1.25 $ por tick de 0.25. Ajústalo a tu instrumento.")
+tickSizeIn    = input.float(0.25, "Tamaño del tick", minval=0.0001, step=0.01, group=gSig)
+
+// ── ④ Contexto ────────────────────────────────────────────────────────────────────────────────
+useHTF        = input.bool(true, "Filtrar por sesgo HTF", group=gCtx, tooltip="Solo admite señales a favor de la tendencia del marco superior. El sesgo se lee con [1] + lookahead_on: el patrón canónico ANTI-REPINTADO (toma la vela HTF ya CERRADA, nunca la que está formándose).")
+htfMode       = input.string("Auto", "Marco superior", options=["Auto", "Manual"], group=gCtx)
+htfManual     = input.timeframe("60", "HTF manual", group=gCtx)
+useSession    = input.bool(true, "Filtrar por sesión", group=gCtx, tooltip="Restringe las señales a la ventana horaria de mayor participación institucional. Fuera de ella el flujo es de creadores de mercado y los POI fallan más.")
+sessWindow    = input.session("0830-1130", "Sesión (hora de Nueva York)", group=gCtx, tooltip="0830-1130 NY = solape Londres/NY + primera hora de NY (Kill Zone). 0200-0500 para la sesión de Londres.")
+showSessBG    = input.bool(false, "Sombrear la sesión", group=gCtx)
+
+// ── ⑤ Visual ──────────────────────────────────────────────────────────────────────────────────
+colBull       = input.color(color.new(#00E676, 78), "Zona alcista", group=gVis, inline="cb")
+colBullBr     = input.color(#00E676, "Borde alcista", group=gVis, inline="cb")
+colBear       = input.color(color.new(#FF5252, 78), "Zona bajista", group=gVis, inline="cs")
+colBearBr     = input.color(#FF5252, "Borde bajista", group=gVis, inline="cs")
+colMitig      = input.color(color.new(#78909C, 90), "Zona mitigada", group=gVis)
+colZZ         = input.color(color.new(#90A4AE, 35), "ZigZag", group=gVis)
+txtSize       = input.string(size.tiny, "Tamaño de texto", options=[size.tiny, size.small, size.normal], group=gVis)
+showDash      = input.bool(true, "Mostrar dashboard", group=gVis)
+dashPos       = input.string("Arriba derecha", "Posición", options=["Arriba derecha", "Abajo derecha", "Abajo izquierda"], group=gVis)
+
+// ── ⑥ Alertas ─────────────────────────────────────────────────────────────────────────────────
+alertOnZone   = input.bool(true, "Alertar al entrar en una zona", group=gAlr)
+zoneAlertGap  = input.int(10, "Barras mínimas entre alertas de la misma zona", minval=1, maxval=200, group=gAlr)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ FUNCIONES
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Ancla institucional del Order Block: la ÚLTIMA vela de color OPUESTO al impulso antes de la
+// ruptura — no el extremo del swing. Debe tener cuerpo real (no un doji: un OB nace de un
+// desequilibrio de órdenes) y no ser climática (un rango extremo es capitulación, no acumulación).
+// Si no encuentra ninguna válida en la ventana devuelve el fallback (el extremo del leg).
+// Recibe atrVal por parámetro porque una función en Pine solo puede leer globales ya declaradas.
+f_originOffset(bool bullish, int maxBars, int fallback, float minBodyAtr, float maxRangeAtr, float atrVal) =>
+    int idx = fallback
+    for k = 1 to maxBars
+        bool opposite    = bullish ? close[k] < open[k] : close[k] > open[k]
+        bool realBody    = math.abs(close[k] - open[k]) >= atrVal * minBodyAtr
+        bool notClimactic= maxRangeAtr <= 0 or (high[k] - low[k]) < atrVal * maxRangeAtr
+        if opposite and realBody and notClimactic
+            idx := k
+            break
+    idx
+
+f_htfBias() =>
+    float ef = ta.ema(close, 21)
+    float es = ta.ema(close, 50)
+    close > ef and ef > es ? 1 : close < ef and ef < es ? -1 : 0
+
+f_payload(string name, float entry, float sl, float tp1, float tp2, int qty) =>
+    '{"signal":"' + name + '","ticker":"' + syminfo.ticker + '","tf":"' + timeframe.period +
+      '","entry":' + str.tostring(entry, format.mintick) + ',"sl":' + str.tostring(sl, format.mintick) +
+      ',"tp1":' + str.tostring(tp1, format.mintick) + ',"tp2":' + str.tostring(tp2, format.mintick) +
+      ',"qty":' + str.tostring(qty) + '}'
+
+// ── Métodos de Zone ───────────────────────────────────────────────────────────────────────────
+method extendTo(Zone z, int rightBar) =>
+    if not na(z.id)
+        box.set_right(z.id, rightBar)
+    if not na(z.mid)
+        line.set_x2(z.mid, rightBar)
+
+method destroy(Zone z) =>
+    if not na(z.id)
+        box.delete(z.id)
+    if not na(z.mid)
+        line.delete(z.mid)
+
+method tagText(Zone z) =>
+    string core = z.kind == "BB" ? "BB" : z.kind == "MB" ? "MB" : "OB"
+    string dir  = z.isBull ? "Bull " : "Bear "
+    string uni  = z.hasFVG and tagUnicorn ? " 🦄" : ""
+    string flip = z.flipped ? " ⇄" : ""
+    dir + core + uni + flip
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ CÁLCULOS BASE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+float atr    = ta.atr(14)
+float avgVol = ta.sma(volume, 20)
+bool  hasVol = not na(avgVol) and avgVol > 0        // feeds sin volumen (algunos índices/forex)
+float bodySz = math.abs(close - open)
+bool  isBullBar = close > open
+bool  isBearBar = close < open
+
+// Sesgo HTF — patrón canónico anti-repintado: se pide la vela HTF YA CERRADA ([1]) y se permite
+// lookahead para que esa vela cerrada llegue a su barra correcta del gráfico. Sin el [1],
+// lookahead_on sí sería mirar al futuro; con él, es el único modo de no repintar el sesgo.
+string htfAuto = not timeframe.isintraday ? "W" : timeframe.multiplier <= 1 ? "15" : timeframe.multiplier <= 5 ? "60" : timeframe.multiplier <= 15 ? "240" : "D"
+string htfUse  = htfMode == "Auto" ? htfAuto : htfManual
+htfBiasRaw     = request.security(syminfo.tickerid, htfUse, f_htfBias()[1], lookahead=barmerge.lookahead_on)
+int    htfBias = useHTF ? nz(htfBiasRaw) : 0
+
+bool inSession = not useSession or not na(time(timeframe.period, sessWindow, "America/New_York"))
+bgcolor(showSessBG and inSession ? color.new(#FFD700, 95) : na, title="Sesión")
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ MOTOR DE CONFIRMACIÓN PRICE ACTION / OLIVER VELEZ
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// PROBLEMA QUE RESUELVE: la señal solo exigía `isBullBar` — una vela verde cualquiera dentro de la
+// zona. Eso incluye una vela minúscula, un doji ligeramente verde o una vela con mecha superior
+// enorme (rechazo BAJISTA disfrazado de vela alcista). Estar dentro del POI no es lo mismo que
+// haber sido rechazado POR el POI: la zona dice DÓNDE mirar, la vela dice SI ocurrió algo.
+//
+// Aquí el precio tiene que DEMOSTRAR la reversión con un patrón reconocible. Los pesos reflejan
+// cuánta información aporta cada uno: el Elefante y el Bottoming Tail son evidencia directa de
+// absorción institucional; la vela rasurada o la SMA20 son confluencias, no pruebas.
+
+float rngBar   = high - low
+float upWick   = high - math.max(close, open)
+float dnWick   = math.min(close, open) - low
+float bodyPct  = rngBar > 0 ? bodySz / rngBar : 0.0
+float closePos = rngBar > 0 ? (close - low) / rngBar : 0.5
+float ma20     = ta.sma(close, 20)
+bool  volSurge = hasVol and volume > avgVol * paVolMult
+
+// Regla 3-5-8: contadores de velas consecutivas del mismo color. Solo mutan en vela CERRADA — en
+// la vela viva el color puede cambiar varias veces y latchearía un conteo falso.
+var int consUp = 0
+var int consDn = 0
+if barstate.isconfirmed
+    consUp := isBullBar ? consUp + 1 : 0
+    consDn := isBearBar ? consDn + 1 : 0
+
+// ── 🐘 ELEPHANT BAR — la huella institucional. Arrasa el rango de las 2 velas previas.
+bool eleBull = isBullBar and bodySz >= atr * eleBodyAtr and bodyPct >= eleBodyPct and close > math.max(high[1], high[2]) and (not hasVol or volSurge)
+bool eleBear = isBearBar and bodySz >= atr * eleBodyAtr and bodyPct >= eleBodyPct and close < math.min(low[1], low[2])  and (not hasVol or volSurge)
+
+// ── 🔨 BOTTOMING / TOPPING TAIL — absorción VISIBLE: el precio fue devuelto dentro de la vela.
+bool btBull = dnWick >= bodySz * tailMult and dnWick >= atr * tailMinAtr and upWick <= dnWick * 0.40 and closePos >= 0.60
+bool ttBear = upWick >= bodySz * tailMult and upWick >= atr * tailMinAtr and dnWick <= upWick * 0.40 and closePos <= 0.40
+
+// ── 🔄 VELA 180 — cambio de control dentro de una sola vela: recupera el cuerpo anterior entero.
+bool v180Bull = isBullBar and isBearBar[1] and closePos >= 0.70 and close >= open[1]
+bool v180Bear = isBearBar and isBullBar[1] and closePos <= 0.30 and close <= open[1]
+
+// ── 🫸 ENVOLVENTE — el cuerpo borra por completo el trabajo del bando contrario.
+bool engBull = isBullBar and isBearBar[1] and close >= open[1] and open <= close[1] and bodySz > bodySz[1]
+bool engBear = isBearBar and isBullBar[1] and close <= open[1] and open >= close[1] and bodySz > bodySz[1]
+
+// ── 📤 OUTSIDE BAR — barre las dos liquidezes y elige lado en el cierre.
+bool obarBull = high > high[1] and low < low[1] and isBullBar and closePos >= 0.65
+bool obarBear = high > high[1] and low < low[1] and isBearBar and closePos <= 0.35
+
+// ── 🚫 RBI / GBI — cierra más allá del extremo de la vela contraria: la "ignoró".
+bool rbiBull = isBearBar[1] and isBullBar and close > high[1]
+bool gbiBear = isBullBar[1] and isBearBar and close < low[1]
+
+// ── ✂️ RASURADA / MARUBOZU — cero rechazo al cierre. Convicción, no reversión.
+bool shavBull = isBullBar and bodyPct >= 0.65 and (high - close) <= rngBar * 0.10
+bool shavBear = isBearBar and bodyPct >= 0.65 and (close - low) <= rngBar * 0.10
+
+// ── 📏 VBS / VSS — el retroceso muere en la SMA20 y rebota.
+bool vbsBull = not na(ma20) and low  <= ma20 + atr * 0.30 and close > ma20
+bool vssBear = not na(ma20) and high >= ma20 - atr * 0.30 and close < ma20
+
+// ── 3️⃣5️⃣8️⃣ AGOTAMIENTO. [n-1] a propósito: cuenta las velas consecutivas ANTERIORES a ésta,
+// porque la vela de reversión ya reinició el contador de su propio color.
+bool exhDnDone   = nz(consDn[1]) >= exhBars      // vendedores agotados → a favor del BUY
+bool exhUpDone   = nz(consUp[1]) >= exhBars
+bool exhVetoBull = consUp >= exhBars             // comprar la N-ésima verde = comprar lo extendido
+bool exhVetoBear = consDn >= exhBars
+
+float paBull = 0.0
+paBull += (usePatEle  and eleBull)  ? 3.0 : 0.0
+paBull += (usePatTail and btBull)   ? 2.5 : 0.0
+paBull += (usePat180  and v180Bull) ? 2.0 : 0.0
+paBull += (usePatEng  and engBull)  ? 2.0 : 0.0
+paBull += (usePatOut  and obarBull) ? 1.5 : 0.0
+paBull += (usePatRbi  and rbiBull)  ? 1.5 : 0.0
+paBull += (usePatShav and shavBull) ? 1.0 : 0.0
+paBull += (usePatVbs  and vbsBull)  ? 1.0 : 0.0
+paBull += exhDnDone ? 1.0 : 0.0
+paBull += volSurge  ? 1.0 : 0.0
+
+float paBear = 0.0
+paBear += (usePatEle  and eleBear)  ? 3.0 : 0.0
+paBear += (usePatTail and ttBear)   ? 2.5 : 0.0
+paBear += (usePat180  and v180Bear) ? 2.0 : 0.0
+paBear += (usePatEng  and engBear)  ? 2.0 : 0.0
+paBear += (usePatOut  and obarBear) ? 1.5 : 0.0
+paBear += (usePatRbi  and gbiBear)  ? 1.5 : 0.0
+paBear += (usePatShav and shavBear) ? 1.0 : 0.0
+paBear += (usePatVbs  and vssBear)  ? 1.0 : 0.0
+paBear += exhUpDone ? 1.0 : 0.0
+paBear += volSurge  ? 1.0 : 0.0
+
+bool paVetoBull = useExhVeto and exhVetoBull
+bool paVetoBear = useExhVeto and exhVetoBear
+bool paOKBull   = not usePAConfirm or (paBull >= minPAScore and not paVetoBull)
+bool paOKBear   = not usePAConfirm or (paBear >= minPAScore and not paVetoBear)
+
+// Nombre del patrón dominante (mayor peso primero) para etiqueta y dashboard.
+string paTagBull = (usePatEle and eleBull) ? "🐘 Elefante" : (usePatTail and btBull) ? "🔨 Bottoming Tail" : (usePat180 and v180Bull) ? "🔄 Vela 180" : (usePatEng and engBull) ? "🫸 Envolvente" : (usePatOut and obarBull) ? "📤 Outside" : (usePatRbi and rbiBull) ? "🚫 RBI" : (usePatShav and shavBull) ? "✂️ Rasurada" : (usePatVbs and vbsBull) ? "📏 VBS" : "—"
+string paTagBear = (usePatEle and eleBear) ? "🐘 Elefante" : (usePatTail and ttBear) ? "🔨 Topping Tail"  : (usePat180 and v180Bear) ? "🔄 Vela 180" : (usePatEng and engBear) ? "🫸 Envolvente" : (usePatOut and obarBear) ? "📤 Outside" : (usePatRbi and gbiBear) ? "🚫 GBI" : (usePatShav and shavBear) ? "✂️ Rasurada" : (usePatVbs and vssBear) ? "📏 VSS" : "—"
+
+plot(showMA20 ? ma20 : na, "SMA 20 (Velez)", color=color.new(#FFA726, 25), linewidth=1)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ MOTOR DE PIVOTES (ZigZag confirmado — sin repintado)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ta.pivothigh(src, left, right) devuelve el valor del pivote en la barra [right] SOLO cuando las
+// `right` barras posteriores ya lo confirmaron. Es una confirmación de DOS LADOS: a diferencia del
+// `high >= ta.highest(len)` del original, no puede ser cierta en un tick y falsa en el siguiente.
+// El candado barstate.isconfirmed cierra el hueco restante: la última de esas `right` barras es la
+// vela en curso, y su high todavía puede crecer dentro de la misma vela.
+
+float pvH = ta.pivothigh(high, pivLen, pivLen)
+float pvL = ta.pivotlow(low,  pivLen, pivLen)
+
+var float h0  = na          // último pivote alto confirmado
+var float h1  = na          // el anterior
+var int   h0i = na
+var int   h1i = na
+var float l0  = na
+var float l1  = na
+var int   l0i = na
+var int   l1i = na
+var int   zzDir = 0         // -1 = el último pivote fue un MÁXIMO · +1 = fue un MÍNIMO
+var line  zzSeg = na
+
+bool newHigh = false
+bool newLow  = false
+
+if not na(pvH) and barstate.isconfirmed
+    int pIdx = bar_index - pivLen
+    if zzDir == -1
+        // Dos máximos seguidos sin mínimo en medio: no son dos pivotes, es el mismo cúmulo de
+        // liquidez. Regla zigzag → nos quedamos con el extremo y estiramos el segmento vigente.
+        if pvH > h0
+            h0  := pvH
+            h0i := pIdx
+            if showZigZag and not na(zzSeg)
+                line.set_xy2(zzSeg, pIdx, pvH)
+    else
+        h1  := h0
+        h1i := h0i
+        h0  := pvH
+        h0i := pIdx
+        zzDir := -1
+        newHigh := true
+        if showZigZag and not na(l0i)
+            zzSeg := line.new(l0i, l0, pIdx, pvH, color=colZZ, width=1)
+
+if not na(pvL) and barstate.isconfirmed
+    int pIdx = bar_index - pivLen
+    if zzDir == 1
+        if pvL < l0
+            l0  := pvL
+            l0i := pIdx
+            if showZigZag and not na(zzSeg)
+                line.set_xy2(zzSeg, pIdx, pvL)
+    else
+        l1  := l0
+        l1i := l0i
+        l0  := pvL
+        l0i := pIdx
+        zzDir := 1
+        newLow := true
+        if showZigZag and not na(h0i)
+            zzSeg := line.new(h0i, h0, pIdx, pvL, color=colZZ, width=1)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ RUPTURA DE ESTRUCTURA (BOS / CHoCH)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// [R7] El original llamaba "MSB" a todo. BOS y CHoCH son eventos OPUESTOS:
+//   · BOS   (Break of Structure)     — el precio rompe en la MISMA dirección del régimen vigente.
+//                                      Confirma continuación. Se opera a favor.
+//   · CHoCH (Change of Character)    — rompe CONTRA el régimen. Es el primer aviso de que la
+//                                      tendencia terminó. Se opera la reversión, con más cautela.
+// [R8] La ruptura se evalúa sobre el CIERRE contra el nivel del pivote ya confirmado, no esperando
+// al pivote siguiente: el evento llega pivLen barras antes sin perder un gramo de rigor.
+// El flag `crossed` sustituye al truco de comparar floats con ta.valuewhen: un nivel gasta su
+// evento UNA vez y se rearma solo cuando nace un nivel estructural nuevo. Si la ruptura llega
+// durante el cooldown o sin desplazamiento, el evento queda PENDIENTE en vez de perderse.
+
+var int  structTrend = 0
+var bool hiCrossed   = false
+var bool loCrossed   = false
+var int  lastBreakBar= -999
+
+if newHigh
+    hiCrossed := false
+if newLow
+    loCrossed := false
+
+float legRange = not na(h0) and not na(l0) ? math.abs(h0 - l0) : na
+
+bool bufferUp = na(legRange) or legRange <= 0 or breakBufferFib <= 0 ? true : (close - h0) >= legRange * breakBufferFib
+bool bufferDn = na(legRange) or legRange <= 0 or breakBufferFib <= 0 ? true : (l0 - close) >= legRange * breakBufferFib
+bool dispUp   = not useDisplacement or (bodySz >= atr * dispAtrMult and isBullBar)
+bool dispDn   = not useDisplacement or (bodySz >= atr * dispAtrMult and isBearBar)
+bool volOK    = not useVolBreak or not hasVol or volume >= avgVol * volBreakMult
+bool coolOK   = (bar_index - lastBreakBar) >= bosCooldown
+
+bool breakUp = barstate.isconfirmed and not na(h0) and close > h0 and not hiCrossed and bufferUp and dispUp and volOK and coolOK
+bool breakDn = barstate.isconfirmed and not na(l0) and close < l0 and not loCrossed and bufferDn and dispDn and volOK and coolOK
+
+bool bosUp   = false
+bool bosDn   = false
+bool chochUp = false
+bool chochDn = false
+
+// El leg que FALLÓ decide la naturaleza de la zona que nace del CHoCH:
+//   · si el mínimo del leg barrió el mínimo anterior (l0 < l1) hubo toma de liquidez → BREAKER.
+//   · si no lo barrió (mínimo más alto, fracaso al extender) → MITIGATION BLOCK.
+// Es la distinción ICT que el original insinuaba con `text = l0 < l1 ? "Bu-BB" : "Bu-MB"`.
+string newZoneKind = "OB"
+
+if breakUp
+    if structTrend == 1
+        bosUp := true
+    else
+        chochUp := true
+        newZoneKind := (not na(l1) and not na(l0) and l0 < l1) ? "BB" : "MB"
+    structTrend  := 1
+    hiCrossed    := true
+    lastBreakBar := bar_index
+
+if breakDn
+    if structTrend == -1
+        bosDn := true
+    else
+        chochDn := true
+        newZoneKind := (not na(h1) and not na(h0) and h0 > h1) ? "BB" : "MB"
+    structTrend  := -1
+    loCrossed    := true
+    lastBreakBar := bar_index
+
+// ── Strong / Weak High-Low ────────────────────────────────────────────────────────────────────
+// No toda la liquidez vale lo mismo. STRONG HIGH = máximo que el precio intentó y NO rompió
+// (estructura bajista): las órdenes acumuladas encima siguen intactas, es el imán real. WEAK HIGH
+// = máximo ya barrido (estructura alcista): su liquidez fue consumida, perseguirlo es perseguir un
+// pozo vacío. Regla operativa: se opera EN DIRECCIÓN del extremo Strong.
+bool isStrongHigh = structTrend == -1
+bool isStrongLow  = structTrend == 1
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ FVG (solo para etiquetar zonas Unicorn)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Se exige que la vela de desplazamiento CIERRE más allá del hueco: un gap abierto por una mecha
+// sin cierre desplazado es ruido de subasta, no un desequilibrio de precio que deba rebalancearse.
+bool fvgBull = low > high[2] and close[1] > high[2] and (low - high[2]) > atr * 0.15
+bool fvgBear = high < low[2] and close[1] < low[2]  and (low[2] - high) > atr * 0.15
+var float fvgBullTop = na
+var float fvgBullBot = na
+var float fvgBearTop = na
+var float fvgBearBot = na
+if fvgBull and barstate.isconfirmed
+    fvgBullTop := low
+    fvgBullBot := high[2]
+if fvgBear and barstate.isconfirmed
+    fvgBearTop := low[2]
+    fvgBearBot := high
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ CREACIÓN DE ZONAS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+var array<Zone> zones = array.new<Zone>()
+
+f_zoneColors(bool isBull) =>
+    [isBull ? colBull : colBear, isBull ? colBullBr : colBearBr]
+
+if (breakUp or breakDn) and showZones
+    bool  bull     = breakUp
+    // Fallback: el extremo del leg (el pivote opuesto). Si aún no existe, la barra anterior.
+    // El fallback se acota a la ventana de búsqueda: un pivote muy antiguo produciría un
+    // high[off] fuera del historial accesible (max_bars_back) y una caja absurdamente ancha.
+    int   fbRaw    = bull ? (na(l0i) ? 1 : bar_index - l0i) : (na(h0i) ? 1 : bar_index - h0i)
+    int   fbIdx    = math.min(obSearchBars, math.max(1, fbRaw))
+    int   off      = f_originOffset(bull, obSearchBars, fbIdx, obMinBodyAtr, obMaxRangeAtr, atr)
+    float zTop     = high[off]
+    float zBot     = low[off]
+    float zMean    = (zTop + zBot) / 2.0
+
+    // Unicorn: ¿el FVG vivo del mismo lado SOLAPA realmente la zona? (intersección, no vecindad)
+    bool uni = false
+    if bull and not na(fvgBullTop)
+        uni := fvgBullBot <= zTop and fvgBullTop >= zBot
+    if not bull and not na(fvgBearTop)
+        uni := fvgBearBot <= zTop and fvgBearTop >= zBot
+
+    [bg, br] = f_zoneColors(bull)
+    // Constructor con argumentos nombrados: los campos de objeto (box/line) quedan en na por
+    // defecto y se rellenan justo después, sin depender del orden posicional de los campos.
+    Zone z = Zone.new(top = zTop, bottom = zBot, mean = zMean, isBull = bull, birthBar = bar_index,
+                      kind = newZoneKind, mitigated = false, halfHit = false, flipped = false,
+                      hasFVG = uni, lastAlertBar = -999)
+    z.id  := box.new(bar_index - off, zTop, bar_index + 10, zBot, bgcolor=bg, border_color=br,
+                     text=z.tagText(), text_color=br, text_halign=text.align_right, text_size=txtSize)
+    if showMean
+        z.mid := line.new(bar_index - off, zMean, bar_index + 10, zMean, color=color.new(br, 45), style=line.style_dotted, width=1)
+    zones.push(z)
+
+    // Tope global: se descarta la más antigua. Se prefiere sacrificar una ya mitigada.
+    if zones.size() > maxZones
+        int victim = 0
+        for vi = 0 to zones.size() - 1
+            Zone zv = zones.get(vi)
+            if zv.mitigated
+                victim := vi
+                break
+        Zone dead = zones.get(victim)
+        dead.destroy()
+        zones.remove(victim)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ CICLO DE VIDA DE LAS ZONAS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// [R3] Se recorre por ÍNDICE DESCENDENTE y se elimina exactamente el índice evaluado. El original
+// iteraba con `for x in arr` y llamaba array.shift() — borraba el elemento 0, no el evaluado, y
+// además mutaba el array que estaba recorriendo.
+// [R4] Toda salida pasa por destroy(): la caja y su línea media se eliminan juntas. Nunca queda un
+// objeto huérfano vivo en el gráfico.
+
+bool  zoneEnterBull = false
+bool  zoneEnterBear = false
+float sigZoneTop    = na
+float sigZoneBot    = na
+bool  sigZoneUni    = false
+bool  sigZoneMean   = false
+
+if zones.size() > 0
+    for i = zones.size() - 1 to 0
+        Zone z = zones.get(i)
+        bool drop = false
+
+        // ── Caducidad: una zona que nadie tocó en toda la sesión ya no representa órdenes vivas.
+        if zoneMaxAge > 0 and not z.mitigated and (bar_index - z.birthBar) > zoneMaxAge
+            drop := true
+
+        if not drop and barstate.isconfirmed
+            bool violated = z.isBull ? (mitByWick ? low < z.bottom : close < z.bottom)
+                                     : (mitByWick ? high > z.top   : close > z.top)
+
+            if violated and not z.mitigated
+                // [R11] Breaker: la zona rota mientras la estructura va EN CONTRA no muere —
+                // invierte su papel. Un soporte perforado con estructura bajista es resistencia.
+                if enableBreaker and not z.flipped and (z.isBull ? structTrend == -1 : structTrend == 1)
+                    z.isBull  := not z.isBull
+                    z.flipped := true
+                    z.kind    := "BB"
+                    z.halfHit := false
+                    z.lastAlertBar := -999
+                    [nbg, nbr] = f_zoneColors(z.isBull)
+                    if not na(z.id)
+                        box.set_bgcolor(z.id, nbg)
+                        box.set_border_color(z.id, nbr)
+                        box.set_text(z.id, z.tagText())
+                        box.set_text_color(z.id, nbr)
+                    if not na(z.mid)
+                        line.set_color(z.mid, color.new(nbr, 45))
+                else
+                    z.mitigated := true
+                    if removeMitig
+                        drop := true
+                    else if not na(z.id)
+                        box.set_bgcolor(z.id, colMitig)
+                        box.set_border_color(z.id, color.new(colMitig, 40))
+                        box.set_text(z.id, z.tagText() + " ✖")
+                        box.set_text_color(z.id, color.new(colMitig, 20))
+
+            // ── Contacto con el umbral medio (Consequent Encroachment, 50%)
+            if not z.mitigated and not z.halfHit and showMean
+                if z.isBull ? low <= z.mean : high >= z.mean
+                    z.halfHit := true
+                    if not na(z.mid)
+                        line.set_width(z.mid, 2)
+
+            // ── Entrada del precio en la zona (para señal y alerta)
+            if not z.mitigated
+                bool inside = low <= z.top and high >= z.bottom
+                bool closeOK= z.isBull ? close > z.bottom : close < z.top
+                if inside and closeOK
+                    bool alignOK = z.isBull ? structTrend == 1 : structTrend == -1
+                    if alignOK
+                        if z.isBull and not zoneEnterBull
+                            zoneEnterBull := true
+                            sigZoneTop  := z.top
+                            sigZoneBot  := z.bottom
+                            sigZoneUni  := z.hasFVG
+                            sigZoneMean := z.halfHit
+                        if not z.isBull and not zoneEnterBear
+                            zoneEnterBear := true
+                            sigZoneTop  := z.top
+                            sigZoneBot  := z.bottom
+                            sigZoneUni  := z.hasFVG
+                            sigZoneMean := z.halfHit
+                    // [R6] Una alerta por ENTRADA, no una por barra dentro de la zona.
+                    if alertOnZone and (bar_index - z.lastAlertBar) >= zoneAlertGap
+                        z.lastAlertBar := bar_index
+                        alert("MSB-OB Pro · precio en zona " + z.tagText() + " (" +
+                              str.tostring(z.bottom, format.mintick) + " – " + str.tostring(z.top, format.mintick) + ")",
+                              alert.freq_once_per_bar_close)
+
+        if drop
+            z.destroy()
+            zones.remove(i)
+        else
+            z.extendTo(bar_index + 10)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ SEÑALES DE ENTRADA
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Modelo: la RUPTURA identifica el POI, el RETESTEO lo opera. Entrar en la vela de ruptura es
+// perseguir precio; el retorno a la zona ofrece un stop definido y estructuralmente defendible.
+
+var int lastSigBar = -999
+bool sigCoolOK = (bar_index - lastSigBar) >= sigCooldown
+
+bool htfOKBull = not useHTF or htfBias >= 0
+bool htfOKBear = not useHTF or htfBias <= 0
+bool meanOK    = not requireMeanTouch or sigZoneMean
+bool uniOK     = not requireUnicorn or sigZoneUni
+
+// v1.1 — `isBullBar` (cualquier vela verde) se sustituye por paOKBull: la vela de retesteo debe
+// ser una vela de REVERSIÓN reconocible por Price Action / Velez, no solo una vela del color
+// correcto dentro de la zona. Se mantiene isBullBar como requisito mínimo de dirección del cierre.
+bool buySignal  = showSignals and barstate.isconfirmed and zoneEnterBull and isBullBar and paOKBull and inSession and htfOKBull and meanOK and uniOK and sigCoolOK
+bool sellSignal = showSignals and barstate.isconfirmed and zoneEnterBear and isBearBar and paOKBear and inSession and htfOKBear and meanOK and uniOK and sigCoolOK
+
+if buySignal or sellSignal
+    lastSigBar := bar_index
+
+float sigEntry = close
+float sigSL    = buySignal  ? math.min(sigZoneBot, low)  - atr * slBufferAtr :
+                 sellSignal ? math.max(sigZoneTop, high) + atr * slBufferAtr : na
+float sigRisk  = na(sigSL) ? na : math.abs(sigEntry - sigSL)
+float sigTP1   = na(sigRisk) ? na : buySignal ? sigEntry + sigRisk * tp1R : sigEntry - sigRisk * tp1R
+float sigTP2   = na(sigRisk) ? na : buySignal ? sigEntry + sigRisk * tp2R : sigEntry - sigRisk * tp2R
+int   sigQty   = na(sigRisk) or sigRisk <= 0 or tickSizeIn <= 0 ? 0 :
+                 math.max(1, int(math.floor(riskPerTrade / math.max(sigRisk / tickSizeIn * tickValue, 0.01))))
+
+if buySignal or sellSignal
+    color cSig = buySignal ? colBullBr : colBearBr
+    string sigHead = (buySignal ? "▲ BUY" : "▼ SELL") + (sigZoneUni ? " 🦄" : "")
+    string sigPat  = buySignal ? paTagBull : paTagBear
+    string sigFoot = str.tostring(sigQty) + "c  ·  PA " + str.tostring(buySignal ? paBull : paBear, "#.#")
+    label.new(bar_index, buySignal ? low : high, sigHead + "\n" + sigPat + "\n" + sigFoot,
+              color=color.new(cSig, 12), textcolor=color.white,
+              style=buySignal ? label.style_label_up : label.style_label_down, size=size.small)
+    line.new(bar_index, sigSL,  bar_index + 14, sigSL,  color=color.new(#FF5252, 25), style=line.style_dashed, width=1)
+    line.new(bar_index, sigTP1, bar_index + 14, sigTP1, color=color.new(#00E676, 45), style=line.style_dotted, width=1)
+    line.new(bar_index, sigTP2, bar_index + 14, sigTP2, color=color.new(#00E676, 25), width=1)
+    alert(f_payload(buySignal ? "MSBOB_BUY" : "MSBOB_SELL", sigEntry, sigSL, sigTP1, sigTP2, sigQty), alert.freq_once_per_bar_close)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ COLOREADO DE VELAS (Price Action / Velez)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Tres niveles de lectura, de más a menos exigente:
+//   · OPACO       — señal ejecutable: zona + estructura + contexto + patrón confirmado.
+//   · ATENUADO    — la vela ES un patrón válido, pero le faltó zona, sesión, HTF o cooldown.
+//                   Sirve para entender POR QUÉ no salió la señal en vez de quedarte a ciegas.
+//   · SIN PINTAR  — la vela no aporta información de reversión.
+// El veto por agotamiento (3-5-8) también apaga el atenuado: una 5ª vela verde consecutiva no es
+// una oportunidad de compra por muchos patrones que acumule, y pintarla sería mentir.
+
+// El coloreado usa su PROPIA paleta (paBarBuyCol / paBarSellCol), no la de las cajas de zona: si
+// reutilizara el verde/rojo de las zonas, la vela de señal se fundiría visualmente con el fondo de
+// la caja sobre la que se imprime, que es justo el momento en que más necesitas distinguirla.
+color barCol = na
+if buySignal
+    barCol := paBarBuyCol
+else if sellSignal
+    barCol := paBarSellCol
+else if showPatBars and paBull >= minPAScore and paBull >= paBear and not paVetoBull
+    barCol := color.new(paBarBuyCol, paBarDimTrans)
+else if showPatBars and paBear >= minPAScore and not paVetoBear
+    barCol := color.new(paBarSellCol, paBarDimTrans)
+
+barcolor(barCol, title="Velas PA / Velez")
+
+// Marca de agotamiento: la vela que alcanza el umbral 3-5-8. Aviso, no señal.
+// Dos llamadas separadas a propósito: el parámetro `location` de plotshape no admite una serie,
+// solo un valor constante, así que no puede resolverse con un ternario.
+plotshape(useExhVeto and exhVetoBull and barstate.isconfirmed, title="Agotamiento alcista 3-5-8",
+     style=shape.xcross, size=size.tiny, location=location.abovebar, color=color.new(#FFA726, 20))
+plotshape(useExhVeto and exhVetoBear and barstate.isconfirmed, title="Agotamiento bajista 3-5-8",
+     style=shape.xcross, size=size.tiny, location=location.belowbar, color=color.new(#FFA726, 20))
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ VISUALES DE ESTRUCTURA
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+if bosUp
+    line.new(h0i, h0, bar_index, h0, color=colBullBr, width=2)
+    label.new(int(math.avg(h0i, bar_index)), h0, "BOS", color=color.new(color.black, 100), textcolor=colBullBr, style=label.style_label_down, size=size.small)
+if bosDn
+    line.new(l0i, l0, bar_index, l0, color=colBearBr, width=2)
+    label.new(int(math.avg(l0i, bar_index)), l0, "BOS", color=color.new(color.black, 100), textcolor=colBearBr, style=label.style_label_up, size=size.small)
+if chochUp
+    line.new(h0i, h0, bar_index, h0, color=colBullBr, width=2, style=line.style_dashed)
+    label.new(int(math.avg(h0i, bar_index)), h0, "CHoCH", color=color.new(colBullBr, 15), textcolor=color.black, style=label.style_label_down, size=size.small)
+if chochDn
+    line.new(l0i, l0, bar_index, l0, color=colBearBr, width=2, style=line.style_dashed)
+    label.new(int(math.avg(l0i, bar_index)), l0, "CHoCH", color=color.new(colBearBr, 15), textcolor=color.black, style=label.style_label_up, size=size.small)
+
+var line  swHiLn = na
+var line  swLoLn = na
+var label swHiLb = na
+var label swLoLb = na
+
+if barstate.islast and showStrongWeak and not na(h0) and not na(l0)
+    line.delete(swHiLn)
+    line.delete(swLoLn)
+    label.delete(swHiLb)
+    label.delete(swLoLb)
+    color cHi = isStrongHigh ? color.white : color.new(#787B86, 25)
+    color cLo = isStrongLow  ? color.white : color.new(#787B86, 25)
+    swHiLn := line.new(bar_index - 45, h0, bar_index + 10, h0, color=cHi, width=1, style=isStrongHigh ? line.style_solid : line.style_dotted)
+    swLoLn := line.new(bar_index - 45, l0, bar_index + 10, l0, color=cLo, width=1, style=isStrongLow  ? line.style_solid : line.style_dotted)
+    swHiLb := label.new(bar_index + 10, h0, isStrongHigh ? "STRONG HIGH" : "weak high", color=color.new(color.black, 100), textcolor=cHi, style=label.style_label_left, size=size.tiny)
+    swLoLb := label.new(bar_index + 10, l0, isStrongLow  ? "STRONG LOW"  : "weak low",  color=color.new(color.black, 100), textcolor=cLo, style=label.style_label_left, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+if showDash and barstate.islast
+    var table dash = table.new(dashPos == "Arriba derecha" ? position.top_right : dashPos == "Abajo derecha" ? position.bottom_right : position.bottom_left,
+                               2, 8, bgcolor=color.new(#0D1117, 8), border_width=1, border_color=color.new(color.gray, 75))
+    int liveZones = 0
+    int uniZones  = 0
+    if zones.size() > 0
+        for di = 0 to zones.size() - 1
+            Zone zd = zones.get(di)
+            if not zd.mitigated
+                liveZones += 1
+                if zd.hasFVG
+                    uniZones += 1
+
+    table.cell(dash, 0, 0, "MSB-OB PRO v1.2", text_color=#FFD700, bgcolor=#161B22, text_size=size.small)
+    table.cell(dash, 1, 0, syminfo.ticker + " " + timeframe.period, text_color=color.white, bgcolor=#161B22, text_size=size.small)
+
+    table.cell(dash, 0, 1, "Estructura", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 1, structTrend == 1 ? "ALCISTA 🟢" : structTrend == -1 ? "BAJISTA 🔴" : "SIN DEFINIR ⚪",
+               text_color=structTrend == 1 ? #00E676 : structTrend == -1 ? #FF5252 : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 2, "Sesgo HTF (" + (useHTF ? htfUse : "off") + ")", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 2, not useHTF ? "—" : htfBias == 1 ? "ALCISTA 🟢" : htfBias == -1 ? "BAJISTA 🔴" : "NEUTRO ⚪",
+               text_color=htfBias == 1 ? #00E676 : htfBias == -1 ? #FF5252 : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "Zonas vivas", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 3, str.tostring(liveZones) + " / " + str.tostring(zones.size()) + (uniZones > 0 ? "  🦄" + str.tostring(uniZones) : ""),
+               text_color=color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 4, "Máximo estructural", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 4, na(h0) ? "—" : str.tostring(h0, format.mintick) + (isStrongHigh ? "  STRONG" : "  weak"),
+               text_color=isStrongHigh ? color.white : color.new(color.gray, 20), text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "Mínimo estructural", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 5, na(l0) ? "—" : str.tostring(l0, format.mintick) + (isStrongLow ? "  STRONG" : "  weak"),
+               text_color=isStrongLow ? color.white : color.new(color.gray, 20), text_size=size.tiny)
+
+    table.cell(dash, 0, 6, "Sesión", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 6, not useSession ? "sin filtro" : inSession ? "ACTIVA 🟢" : "fuera ⚪",
+               text_color=inSession ? #00E676 : color.gray, text_size=size.tiny)
+
+    bool   paVetoNow = paVetoBull or paVetoBear
+    float  paTop     = math.max(paBull, paBear)
+    string paTxt     = paVetoNow ? "AGOTADO 3-5-8 ✖" : paTop < minPAScore ? "sin patrón" :
+                       (paBull >= paBear ? paTagBull : paTagBear) + "  " + str.tostring(paTop, "#.#")
+    table.cell(dash, 0, 7, "Vela PA/Velez", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 7, paTxt,
+               text_color=paVetoNow ? #FFA726 : paTop < minPAScore ? color.gray : paBull >= paBear ? #00E676 : #FF5252,
+               text_size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ ALERTAS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+alertcondition(bosUp,   title="BOS alcista",    message="{{ticker}} {{interval}} · BOS ALCISTA — continuación confirmada @ {{close}}")
+alertcondition(bosDn,   title="BOS bajista",    message="{{ticker}} {{interval}} · BOS BAJISTA — continuación confirmada @ {{close}}")
+alertcondition(chochUp, title="CHoCH alcista",  message="{{ticker}} {{interval}} · CHoCH ALCISTA — posible fin de la tendencia bajista @ {{close}}")
+alertcondition(chochDn, title="CHoCH bajista",  message="{{ticker}} {{interval}} · CHoCH BAJISTA — posible fin de la tendencia alcista @ {{close}}")
+alertcondition(breakUp or breakDn, title="Cualquier ruptura de estructura", message="{{ticker}} {{interval}} · Ruptura de estructura @ {{close}}")
+alertcondition(buySignal,  title="🎯 BUY (retesteo de zona)",  message="{{ticker}} {{interval}} · BUY en retesteo de zona @ {{close}}")
+alertcondition(sellSignal, title="🎯 SELL (retesteo de zona)", message="{{ticker}} {{interval}} · SELL en retesteo de zona @ {{close}}")

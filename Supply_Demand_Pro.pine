@@ -1,0 +1,815 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// SUPPLY & DEMAND PRO v1.1 — Zonas institucionales + confirmación Velez / Price Action
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// Reingeniería de "Supply & Demand (MTF)" de © fluxchart (MPL-2.0, Pine v5).
+// TF óptimo: 1 / 5 / 15 min · Activo: MNQ / MES y cualquier instrumento con volumen real.
+//
+// ── QUÉ SE CONSERVA ───────────────────────────────────────────────────────────────────────────
+// La arquitectura multi-marco del original es buena y poco común: en vez de leer OHLC de un marco
+// superior y aproximar, ejecuta la DETECCIÓN COMPLETA dentro de cada contexto temporal y devuelve
+// los arrays de zonas ya construidos. Eso da zonas HTF exactas, no reconstruidas. Se mantiene.
+//
+// ── LOS 10 DEFECTOS DEL ORIGINAL ──────────────────────────────────────────────────────────────
+//  [D1] LA ZONA NO ES LA BASE. El original ancla la zona en `high[momentumSpan+1]/low[...]`: la
+//       vela que esté 5 barras atrás, sea cual sea. La metodología de Supply & Demand dice otra
+//       cosa: la zona es la BASE —la vela pequeña o de color opuesto donde el precio se detuvo
+//       ANTES de salir disparado— porque ahí es donde quedaron las órdenes sin ejecutar. Anclar en
+//       "la vela de hace 5" puede dibujar una zona de demanda encima de una vela alcista enorme,
+//       que es justo lo contrario de una base.
+//  [D2] "MOMENTUM" DEMASIADO PERMISIVO. `bodySize >= averageBodySize * 0.5` — medio cuerpo medio.
+//       Cuatro velas seguidas con medio cuerpo no son un impulso institucional, son una subida
+//       tranquila. Aquí el impulso se mide contra el ATR y además se exige DESPLAZAMIENTO NETO.
+//  [D3] EL RECORTE DE ZONA DESTRUYE EL BORDE ÚTIL. `clampSDZone` recorta la zona por los DOS lados
+//       (top -= diff/2, bottom += diff/2), conservando el centro. Pero en S&D el borde que importa
+//       es el PROXIMAL —el que mira al precio—, porque es donde está la primera orden. Recortar por
+//       ahí desplaza el borde y el precio gira "fuera" de la zona dibujada. Aquí se recorta solo
+//       por el lado DISTAL.
+//  [D4] LAS ZONAS FRESCAS SON INVISIBLES. `if zoneSize < timeframe.in_seconds * minZoneSize * 1000`
+//       no dibuja una zona hasta que tiene 10 barras de antigüedad. En S&D la zona MÁS FRESCA es la
+//       de mayor probabilidad: el original oculta justo las mejores y muestra las ya gastadas.
+//       Invierte la metodología. Aquí se dibujan desde que nacen y se PUNTÚA la frescura.
+//  [D5] EL RETESTEO NO COMPRUEBA QUE EL PRECIO ESTÉ EN LA ZONA. `if high > curZone.info.bottom`
+//       para una zona de oferta es cierto con el precio MUY POR ENCIMA de toda la zona — no hay
+//       cota superior. Se emitían retesteos con el precio a kilómetros. Aquí se exige intersección
+//       real, y el cooldown es POR ZONA, no global para todas las de un tipo.
+//  [D6] ATR DE CONTEXTO EQUIVOCADO. `combineSDsFunc` llama a `clampSDZone`, que usa el ATR del
+//       GRÁFICO, sobre zonas que vienen de un marco SUPERIOR. Una zona de 30min recortada a 1.5×
+//       el ATR de 1min queda reducida a una raya. Aquí cada zona guarda el ATR de su contexto.
+//  [D7] BORRAR Y RECREAR TODO EN CADA BARRA. `handleSDZonesFinal` hace safeDeleteSDZone sobre cada
+//       zona y reconstruye desde cero: cientos de delete + create por barra. Aquí los objetos se
+//       PRE-ASIGNAN una vez y solo se mueven sus coordenadas.
+//  [D8] ARITMÉTICA MUERTA EN EL CAMINO CALIENTE. `areaOfSD` calcula
+//       sqrt((XA2-XA1)² + (YA2-YA2)²) — el segundo término es SIEMPRE 0. Son dos raíces cuadradas
+//       por zona para calcular |ancho| × |alto|, dentro de un bucle O(n²) dentro de un `while`.
+//  [D9] FUSIÓN CON UMBRAL 0%. `overlapThresholdPercentage = 0.0`: cualquier solape, por mínimo que
+//       sea, fusiona dos zonas. Con el `while lastCombinations > 0` sin cota, el array CRECE en
+//       cada fusión (las originales se marcan disabled pero no se eliminan) y se vuelve a recorrer.
+//  [D10] REPINTADO. La creación de zonas no está tras barstate.isconfirmed: una zona aparece en
+//       mitad de la vela viva y se desvanece si el cierre no confirma el impulso.
+//
+// ── LO QUE SE AÑADE ───────────────────────────────────────────────────────────────────────────
+//  ▸ FRESCURA: se cuentan los toques de cada zona. En S&D la primera visita es la de mayor
+//    probabilidad y cada visita posterior consume órdenes. La zona se etiqueta y se degrada.
+//  ▸ SCORE 0-100 por zona (desplazamiento · volumen de salida · frescura · estrechez · confluencia
+//    multi-marco) y umbral mínimo para dibujarla. Deja de ser "todas las zonas valen lo mismo".
+//  ▸ Confirmación por VOLUMEN en la salida: sin volumen no hubo institución, hubo deriva.
+//  ▸ Línea proximal destacada, dashboard y alertas con el score.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+indicator("Supply & Demand Pro v1.1 · MTF + Velez", shorttitle="S&D Pro", overlay=true,
+     max_boxes_count=500, max_labels_count=500, max_lines_count=500, dynamic_requests=true)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ TIPOS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+type ZoneInfo
+    float  top
+    float  bottom
+    bool   isDemand
+    int    startTime
+    int    breakTime
+    int    guid
+    float  birthAtr          // [D6] ATR del contexto donde nació la zona, no el del gráfico
+    float  baseScore         // 0-70: desplazamiento + volumen + estrechez (fijo al nacer)
+    int    tfIdx
+    string tfStr
+    string tfLabel
+    bool   combined  = false
+    bool   disabled  = false
+
+type Trade
+    bool  isBuy
+    float sl
+    float tp1
+    float tp2
+    bool  tp1Done
+    bool  closed
+    int   openBar
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+gTf  = "① 🕐 MARCOS TEMPORALES"
+gDet = "② 🔍 DETECCIÓN DE LA ZONA"
+gQal = "③ ⭐ CALIDAD Y FRESCURA"
+gAct = "④ 🔔 RETESTEOS Y ROTURAS"
+gPA  = "⑤ 🕯️ CONFIRMACIÓN VELEZ / PRICE ACTION"
+gSig = "⑥ 🎯 SEÑAL Y RIESGO"
+gVis = "⑦ 🎨 VISUAL"
+
+tf1On   = input.bool(true,  "Marco 1", group=gTf, inline="t1")
+tf1     = input.timeframe("",   " ",  group=gTf, inline="t1", tooltip="Vacío = el marco del gráfico. Los tres marcos ejecutan la detección COMPLETA en su propio contexto y devuelven las zonas ya construidas, así que una zona de 1H es exactamente la que verías abriendo el gráfico de 1H — no una reconstrucción aproximada.")
+tf2On   = input.bool(false, "Marco 2", group=gTf, inline="t2")
+tf2     = input.timeframe("15", "  ", group=gTf, inline="t2")
+tf3On   = input.bool(false, "Marco 3", group=gTf, inline="t3")
+tf3     = input.timeframe("60", "   ", group=gTf, inline="t3")
+
+impulseBars   = input.int(3, "Velas del impulso", minval=2, maxval=10, group=gDet, tooltip="Cuántas velas consecutivas del mismo color deben formar la salida desde la base. 3 es el equilibrio; 4-5 da menos zonas y más limpias.")
+impulseBodyAtr= input.float(0.45, "Cuerpo mínimo por vela (×ATR)", minval=0.1, step=0.05, group=gDet, tooltip="[D2] El original exigía 'medio cuerpo medio' (bodySize >= averageBodySize × 0.5): cuatro velas con medio cuerpo no son un impulso institucional, son una subida tranquila. Aquí se mide contra el ATR, que es una referencia de volatilidad real y no una media de sí mismo.")
+impulseNetAtr = input.float(1.2, "Desplazamiento neto del impulso (×ATR)", minval=0.3, step=0.1, group=gDet, tooltip="[D2] Además del cuerpo por vela, el tramo COMPLETO debe recorrer esta distancia. Impide que tres velas medianas alternando mechas cuenten como salida: lo que define una zona no es la forma de las velas, es que el precio SE FUE de ahí.")
+useVolConfirm = input.bool(true, "Exigir volumen en la salida", group=gDet, tooltip="Una zona de oferta/demanda es donde transó volumen institucional. Sin volumen no hubo institución, hubo deriva. Se auto-ignora si el símbolo no publica volumen.")
+volMult       = input.float(1.3, "Volumen del impulso (× media)", minval=1.0, step=0.1, group=gDet)
+baseBodyAtr   = input.float(0.35, "Base: cuerpo máximo (×ATR)", minval=0.05, step=0.05, group=gDet, tooltip="[D1] La zona se ancla en la BASE: la vela pequeña o de color opuesto donde el precio se detuvo ANTES de salir disparado, porque ahí quedaron las órdenes sin ejecutar. El original anclaba en 'la vela de hace 5', fuese cual fuese — podía dibujar una zona de demanda sobre una vela alcista enorme, que es exactamente lo contrario de una base.")
+baseMaxBack   = input.int(6, "Base: búsqueda máxima (barras)", minval=1, maxval=20, group=gDet)
+maxZoneAtr    = input.float(1.5, "Altura máxima de zona (×ATR)", minval=0.3, step=0.1, group=gDet, tooltip="[D3] Al recortar se conserva el borde PROXIMAL —el que mira al precio—, porque ahí está la primera orden. El original recortaba por los dos lados a la vez y conservaba el centro, así que el precio giraba 'fuera' de la zona dibujada.")
+minBarsBetween= input.int(5, "Barras mínimas entre zonas del mismo tipo", minval=1, maxval=50, group=gDet)
+maxZonesPerTf = input.int(8, "Zonas en memoria por tipo y marco", minval=3, maxval=30, group=gDet)
+histDepth     = input.string("Normal", "Historial procesado", options=["Corto", "Normal", "Largo"], group=gDet, tooltip="EL PARÁMETRO QUE DECIDE SI EL SCRIPT CABE EN MEMORIA. request.security devuelve un ARRAY DE OBJETOS y Pine guarda una copia por cada barra del histórico: en un gráfico de 1min con 20.000 velas y 3 marcos activos eso son cientos de miles de objetos vivos, y TradingView aborta con 'Memory limits exceeded'. Con esta ventana, las zonas solo se detectan en las últimas N barras y el resto del histórico devuelve arrays VACÍOS, que no pesan nada. Corto=300 · Normal=800 · Largo=2000. Si ves el error de memoria, baja un escalón.")
+
+minZoneScore  = input.int(45, "Score mínimo para dibujar", minval=0, maxval=100, group=gQal, tooltip="Filtra las zonas flojas antes de que ensucien el gráfico. El score combina desplazamiento (25), volumen de salida (25), frescura (20), estrechez (10) y confluencia multi-marco (20).")
+maxTouchesShow= input.int(2, "Toques máximos antes de descartar", minval=1, maxval=6, group=gQal, tooltip="[D4] En Supply & Demand la zona MÁS FRESCA es la de mayor probabilidad: cada visita consume las órdenes que quedaban. Con 2, la zona desaparece tras su segundo retesteo. El original hacía lo contrario — ocultaba las zonas hasta que tenían 10 barras de antigüedad, es decir, escondía justo las mejores.")
+combineZones  = input.bool(true, "Fusionar zonas solapadas", group=gQal)
+combineMinPct = input.float(35.0, "Solape mínimo para fusionar (%)", minval=5.0, maxval=95.0, step=5.0, group=gQal, tooltip="[D9] El original fusionaba con CUALQUIER solape (umbral 0%), así que dos zonas que apenas se rozaban acababan siendo una sola zona enorme. 35% exige que se solapen de verdad.")
+zoneMaxAgeBars= input.int(500, "Edad máxima de zona (barras del gráfico)", minval=50, maxval=3000, group=gQal)
+
+showRetests   = input.bool(true,  "Marcar retesteos", group=gAct, inline="ra")
+showBreaks    = input.bool(false, "Marcar roturas", group=gAct, inline="ra")
+retestCooldown= input.int(5, "Barras entre retesteos de la MISMA zona", minval=1, maxval=50, group=gAct, tooltip="[D5] El cooldown del original era GLOBAL por tipo: un retesteo en cualquier zona de demanda bloqueaba todas las demás durante 5 barras. Aquí es por zona.")
+invalidBy     = input.string("Cierre", "Invalidación de la zona", options=["Cierre", "Mecha"], group=gAct, tooltip="Cierre (institucional): una mecha que atraviesa la zona y vuelve dentro es un barrido de liquidez, no una invalidación. Mecha: más conservador.")
+
+// ── ⑤ Confirmación Velez / Price Action ──────────────────────────────────────────────────────
+usePA         = input.bool(true, "Exigir vela de reversión en el retesteo", group=gPA, tooltip="La zona dice DÓNDE mirar; la vela dice SI ocurrió algo. Sin este filtro, 'el precio entró en la zona' es todo lo que hace falta para una señal — y el precio entra en zonas que luego atraviesa sin mirar atrás. Con él, el mercado tiene que MOSTRARTE el rechazo con una vela reconocible.")
+minPAScore    = input.float(2.5, "Score PA mínimo", minval=0.5, maxval=10.0, step=0.5, group=gPA, tooltip="Con 2.5 basta un patrón fuerte (Tail 3.0 · Elefante 2.5). Con 4.5 exiges patrón fuerte MÁS confluencia. Por encima de 6 solo pasa la vela de manual.")
+useApproach   = input.bool(true, "Filtrar por calidad del acercamiento (Velez)", group=gPA, tooltip="LO MÁS ESPECÍFICO DE ESTE INDICADOR. Velez distingue el RETROCESO CONTROLADO del ATAQUE: si el precio llega a la zona con velas que se van encogiendo y volumen que baja, está siendo TANTEADA y suele aguantar; si llega con rangos que se expanden y volumen creciente, no es un retroceso — es una reversión en marcha y la zona se va a romper. El indicador mide esa diferencia en vez de tratar todos los acercamientos igual.")
+appLen        = input.int(5, "Ventana del acercamiento (barras)", minval=2, maxval=20, group=gPA)
+appDecay      = input.float(1.0, "Cuerpo reciente / cuerpo medio máximo", minval=0.5, maxval=2.0, step=0.1, group=gPA, tooltip="Con 1.0, los cuerpos de las últimas barras no pueden superar la media larga: el acercamiento tiene que ser igual o más perezoso que el movimiento normal. Bájalo a 0.8 para exigir un retroceso claramente decreciente.")
+appVolMax     = input.float(1.2, "Volumen del acercamiento (× media) máximo", minval=0.5, step=0.1, group=gPA)
+useExhVeto    = input.bool(true, "Veto por agotamiento (regla 3-5-8 de Velez)", group=gPA, tooltip="Tras N velas consecutivas del mismo color el movimiento está agotado. Comprar la 5ª verde seguida es comprar lo extendido: se veta por mucho score que acumule. El reverso puntúa a favor — N rojas seguidas ENTRANDO en demanda son vendedores agotados.")
+exhBars       = input.int(5, "Velas consecutivas = agotamiento", minval=3, maxval=10, group=gPA)
+usePatTail    = input.bool(true, "🔨 Bottoming / Topping Tail (Velez) · 3.0", group=gPA, tooltip="La señal estrella de Velez, y EN UNA ZONA vale más que ninguna otra: una mecha larga contra el borde proximal es la prueba visible de que alguien absorbió toda la oferta ahí. Pesa más que el Elefante a propósito — el Elefante te dice que el movimiento YA ocurrió, la mecha te dice que el NIVEL aguantó.")
+usePatEle     = input.bool(true, "🐘 Elephant Bar (Velez) · 2.5", group=gPA)
+usePat180     = input.bool(true, "🔄 Vela 180 (Velez) · 2.0", group=gPA)
+usePatEng     = input.bool(true, "🫸 Envolvente (Price Action) · 2.0", group=gPA)
+usePatRbi     = input.bool(true, "🚫 RBI / GBI (Velez) · 1.5", group=gPA)
+
+// ── ⑥ Señal y riesgo ─────────────────────────────────────────────────────────────────────────
+showSignals   = input.bool(true, "Dibujar señales con SL/TP", group=gSig)
+slBufAtr      = input.float(0.25, "Colchón del stop (×ATR) más allá del borde distal", minval=0.0, step=0.05, group=gSig, tooltip="El stop va al otro lado del borde DISTAL, porque ahí muere la zona: si el precio la atraviesa entera, las órdenes que la formaban ya no están.")
+tp1R          = input.float(1.0, "TP1 (múltiplo de R)", minval=0.3, step=0.1, group=gSig)
+tp2R          = input.float(2.5, "TP2 (múltiplo de R)", minval=0.5, step=0.1, group=gSig)
+tp2Opposite   = input.bool(true, "TP2 en la zona opuesta más cercana", group=gSig, tooltip="Si existe una zona del tipo contrario en la dirección del trade, el TP2 deja de ser un múltiplo de R inventado y pasa a ser ESA zona — que es donde el precio va a encontrar el siguiente muro de órdenes. Si no hay ninguna, o queda más cerca que el múltiplo, se mantiene el R.")
+sigCooldown   = input.int(10, "Barras mínimas entre señales", minval=0, maxval=100, group=gSig)
+riskTrade     = input.float(200.0, "Riesgo por operación ($)", minval=1.0, step=25.0, group=gSig)
+tickVal       = input.float(0.50, "Valor del tick ($)", minval=0.01, step=0.01, group=gSig, tooltip="MNQ = 0.50 · MES = 1.25")
+tickSz        = input.float(0.25, "Tamaño del tick", minval=0.0001, step=0.01, group=gSig)
+showStats     = input.bool(true, "Auto-estadísticas de acierto", group=gSig, tooltip="El indicador sigue sus propias señales y cuenta cuántas alcanzaron TP1 y TP2 antes que el stop, sobre el gráfico cargado. Cuando SL y TP se tocan en la misma vela cuenta SL: el OHLC no dice cuál llegó antes y la suposición pesimista es la única honesta. El número es un SUELO.")
+
+maxRenderZones= input.int(15, "Máximo de zonas dibujadas", minval=4, maxval=40, group=gVis, tooltip="[D7] Los objetos se PRE-ASIGNAN una vez y solo se mueven sus coordenadas. El original borraba y recreaba cientos de cajas en cada barra.")
+colDemand     = input.color(color.new(#089981, 82), "Demanda", group=gVis, inline="c")
+colSupply     = input.color(color.new(#F23645, 82), "Oferta",  group=gVis, inline="c")
+colText       = input.color(color.new(#FFFFFF, 20), "Texto", group=gVis)
+showProximal  = input.bool(true, "Destacar la línea proximal", group=gVis, tooltip="El borde que mira al precio: el punto exacto donde debería reaccionar y donde se coloca la orden.")
+showScoreTxt  = input.bool(true, "Mostrar el score en la caja", group=gVis)
+paBarBuyCol   = input.color(#39FF14, "Vela señal BUY (verde flúor)",   group=gVis, inline="pab")
+paBarSellCol  = input.color(#FF00FF, "Vela señal SELL (magenta flúor)", group=gVis, inline="pab")
+paBarDimTrans = input.int(58, "Transparencia del patrón sin señal", minval=0, maxval=95, group=gVis, tooltip="Las velas que cumplen el patrón Velez/PA pero SIN zona o sin contexto se pintan atenuadas: sirve para ver POR QUÉ no salió la señal en vez de quedarte a ciegas.")
+showDash      = input.bool(true, "Dashboard", group=gVis)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ CÁLCULOS BASE (se evalúan en CADA contexto temporal, incluidos los de request.security)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Solo se detectan zonas dentro de esta ventana. Fuera de ella los arrays quedan vacíos y las
+// copias que request.security guarda por barra no ocupan prácticamente nada.
+int  histBars = histDepth == "Corto" ? 300 : histDepth == "Normal" ? 800 : 2000
+bool inRange  = bar_index > last_bar_index - histBars
+
+float atrV   = ta.atr(14)
+float avgVol = ta.sma(volume, 20)
+bool  hasVol = not na(avgVol) and avgVol > 0
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ FUNCIONES
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// [D1] Localiza la BASE: retrocede desde el inicio del impulso hasta la primera vela que sea
+// pequeña (cuerpo ≤ baseBodyAtr×ATR) o de color OPUESTO al impulso. Ahí se detuvo el precio y ahí
+// quedaron las órdenes sin ejecutar. Si no encuentra ninguna en la ventana, devuelve el propio
+// inicio del impulso como respaldo.
+f_findBase(int fromOffset, int maxBack, bool isDemand, float atrVal, float maxBody) =>
+    int idx = fromOffset
+    for k = fromOffset to fromOffset + maxBack
+        float bdy = math.abs(close[k] - open[k])
+        bool  small = bdy <= atrVal * maxBody
+        bool  opp   = isDemand ? close[k] < open[k] : close[k] > open[k]
+        if small or opp
+            idx := k
+            break
+    idx
+
+// Solape de dos zonas en el eje del PRECIO (índice de Jaccard). [D8] El original calculaba un área
+// con dos raíces cuadradas cuyos segundos términos eran siempre cero, dentro de un bucle O(n²)
+// dentro de un while sin cota. Esto es lo mismo, exacto, en cuatro operaciones.
+f_overlapPct(float t1, float b1, float t2, float b2) =>
+    float inter = math.max(0.0, math.min(t1, t2) - math.max(b1, b2))
+    float uni   = math.max(t1, t2) - math.min(b1, b2)
+    uni > 0 ? inter / uni * 100.0 : 0.0
+
+f_tfLabel(string tfIn) =>
+    string t = tfIn == "" ? timeframe.period : tfIn
+    string outp = t
+    if not (str.contains(t, "D") or str.contains(t, "W") or str.contains(t, "M") or str.contains(t, "S"))
+        int sec = timeframe.in_seconds(t)
+        if sec >= 3600
+            int h = int(sec / 3600)
+            outp := str.tostring(h) + "H"
+        else
+            outp := t + "m"
+    outp
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ DETECCIÓN DE ZONAS  (corre en el contexto de cada marco temporal)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// [D2] El impulso exige TRES cosas a la vez: N velas consecutivas del mismo color, cada una con
+// cuerpo ≥ ×ATR, y un desplazamiento NETO del tramo completo ≥ ×ATR. Lo que define una zona no es
+// la forma de las velas: es que el precio SE FUE de ahí y no volvió a mirar atrás.
+// [D10] Todo tras barstate.isconfirmed — una zona no puede nacer de una vela que aún puede cambiar.
+
+var array<ZoneInfo> demandList = array.new<ZoneInfo>()
+var array<ZoneInfo> supplyList = array.new<ZoneInfo>()
+var int lastDemandBar = -9999
+var int lastSupplyBar = -9999
+
+bool impUp = true
+bool impDn = true
+for i = 0 to impulseBars - 1
+    float bdy = math.abs(close[i] - open[i])
+    bool  big = bdy >= atrV * impulseBodyAtr
+    if not (big and close[i] > open[i])
+        impUp := false
+    if not (big and close[i] < open[i])
+        impDn := false
+
+float netMove = math.abs(close - open[impulseBars - 1])
+bool  netOK   = netMove >= atrV * impulseNetAtr
+
+// math.sum mantiene una ventana deslizante interna, así que arrastra estado histórico: si solo se
+// evaluase en las barras donde hace falta, esa ventana quedaría incompleta y el total dejaría de
+// ser el de las últimas `impulseBars` velas. Por eso se calcula aquí, en el ámbito global y de
+// forma incondicional, y los dos puntos que lo necesitan leen esta variable.
+float impulseVol = math.sum(volume, impulseBars)
+
+bool  volOK   = not useVolConfirm or not hasVol or impulseVol >= avgVol * impulseBars * volMult
+
+bool newDemand = inRange and impUp and netOK and volOK and barstate.isconfirmed and (bar_index - lastDemandBar) > minBarsBetween
+bool newSupply = inRange and impDn and netOK and volOK and barstate.isconfirmed and (bar_index - lastSupplyBar) > minBarsBetween
+
+// Score base 0-70, fijo al nacer la zona: desplazamiento (25) + volumen de salida (25) + estrechez
+// (20). La frescura y la confluencia multi-marco se suman después, porque cambian con el tiempo.
+f_baseScore(float net, float atrVal, float volSum, float avgV, bool hv, float zoneH) =>
+    float sDisp = math.min(25.0, net / math.max(atrVal * 2.0, 0.0001) * 25.0)
+    float sVol  = not hv ? 12.5 : math.min(25.0, volSum / math.max(avgV, 1.0) / 2.0 * 25.0)
+    float sTight= math.max(0.0, math.min(20.0, (1.0 - zoneH / math.max(atrVal * 1.5, 0.0001)) * 20.0))
+    sDisp + sVol + sTight
+
+if newDemand or newSupply
+    bool  isDem = newDemand
+    int   bOff  = f_findBase(impulseBars, baseMaxBack, isDem, atrV, baseBodyAtr)
+    float zTop  = high[bOff]
+    float zBot  = low[bOff]
+
+    // [D3] Recorte conservando el borde PROXIMAL — el que mira al precio, donde está la primera
+    // orden. En una demanda el proximal es el techo; en una oferta, el suelo.
+    if (zTop - zBot) > atrV * maxZoneAtr
+        if isDem
+            zBot := zTop - atrV * maxZoneAtr
+        else
+            zTop := zBot + atrV * maxZoneAtr
+
+    float bScore = f_baseScore(netMove, atrV, impulseVol, avgVol, hasVol, zTop - zBot)
+    // guid único: los tiempos de barra distan ≥ 60000 ms, así que el desplazamiento por marco y
+    // tipo (10..35) nunca puede colisionar con el de otra barra.
+    // El desplazamiento por marco lo aplica f_collect; aquí solo se separan demanda y oferta,
+    // que pueden nacer en la misma barra y compartirían startTime.
+    int   gid = time[bOff] + (isDem ? 0 : 5)
+
+    ZoneInfo z = ZoneInfo.new(top = zTop, bottom = zBot, isDemand = isDem, startTime = time[bOff],
+             breakTime = na, guid = gid, birthAtr = atrV, baseScore = bScore, tfIdx = 0,
+             tfStr = timeframe.period, tfLabel = f_tfLabel(""))
+
+    if isDem
+        demandList.unshift(z)
+        lastDemandBar := bar_index
+        if demandList.size() > maxZonesPerTf
+            demandList.pop()
+    else
+        supplyList.unshift(z)
+        lastSupplyBar := bar_index
+        if supplyList.size() > maxZonesPerTf
+            supplyList.pop()
+
+// Invalidación dentro del propio contexto.
+if barstate.isconfirmed and inRange
+    if demandList.size() > 0
+        for i = 0 to demandList.size() - 1
+            ZoneInfo zd = demandList.get(i)
+            if na(zd.breakTime)
+                float srcD = invalidBy == "Mecha" ? low : math.min(open, close)
+                if srcD < zd.bottom
+                    zd.breakTime := time
+    if supplyList.size() > 0
+        for i = 0 to supplyList.size() - 1
+            ZoneInfo zs = supplyList.get(i)
+            if na(zs.breakTime)
+                float srcS = invalidBy == "Mecha" ? high : math.max(open, close)
+                if srcS > zs.top
+                    zs.breakTime := time
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ RECOGIDA MULTI-MARCO
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Se pide la DETECCIÓN COMPLETA a cada contexto y se reciben los arrays ya construidos, no OHLC
+// para reconstruir aquí. Las tres llamadas van al ámbito global y sin lookahead: el valor por
+// defecto (lookahead_off) es el correcto — no se adelanta ningún dato del marco superior.
+
+// Cada llamada mantiene su propia copia por barra, así que un marco DESACTIVADO que igualmente se
+// pidiera costaría exactamente lo mismo que uno activo. Con los marcos 2 y 3 apagados por defecto,
+// pedir los tres incondicionalmente triplicaba la memoria sin aportar una sola zona.
+f_reqZones(string tf, bool enabled) =>
+    array<ZoneInfo> d = na
+    array<ZoneInfo> s = na
+    if enabled
+        [dd, ss] = request.security(syminfo.tickerid, tf, [demandList, supplyList])
+        d := dd
+        s := ss
+    [d, s]
+
+[dem1, sup1] = f_reqZones(tf1, tf1On)
+[dem2, sup2] = f_reqZones(tf2, tf2On)
+[dem3, sup3] = f_reqZones(tf3, tf3On)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ MOTOR VELEZ / PRICE ACTION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// La zona dice DÓNDE mirar; la vela dice SI ocurrió algo. Sin esta capa, "el precio entró en la
+// zona" es todo lo que hace falta para una señal — y el precio entra en zonas que después atraviesa
+// sin mirar atrás. Aquí el mercado tiene que MOSTRAR el rechazo.
+//
+// LOS PESOS NO SON LOS MISMOS QUE EN UN INDICADOR DE ESTRUCTURA, y la diferencia es deliberada:
+// en una ZONA, la mecha de rechazo pesa MÁS que el Elefante. El Elefante te dice que el movimiento
+// ya ocurrió; la mecha te dice que el NIVEL aguantó, que es justo lo que estás comprobando aquí.
+
+float bdyB   = math.abs(close - open)
+float rngB   = high - low
+float upWk   = high - math.max(close, open)
+float dnWk   = math.min(close, open) - low
+float bodyPc = rngB > 0 ? bdyB / rngB : 0.0
+float clsPos = rngB > 0 ? (close - low) / rngB : 0.5
+bool  isBullB = close > open
+bool  isBearB = close < open
+
+// Medias del acercamiento. Todas las funciones con estado van al ámbito global e incondicionales:
+// una ventana deslizante que solo se evalúa en algunas barras queda incompleta.
+float bodyFast = ta.sma(bdyB, appLen)
+float bodySlow = ta.sma(bdyB, appLen * 3)
+float volFast  = ta.sma(volume, appLen)
+
+// ── CALIDAD DEL ACERCAMIENTO (Velez) ─────────────────────────────────────────────────────────
+// Velez separa el RETROCESO CONTROLADO del ATAQUE. Si el precio llega a la zona con velas que se
+// encogen y volumen que baja, la zona está siendo TANTEADA y suele aguantar. Si llega con rangos
+// que se expanden y volumen creciente, eso no es un retroceso: es una reversión en marcha, y la
+// zona se rompe. Tratar los dos acercamientos igual es el error que hace fallar a las zonas.
+bool weakApproach = not useApproach or (bodyFast <= bodySlow * appDecay and (not hasVol or volFast <= avgVol * appVolMax))
+
+// ── Contadores 3-5-8 (solo mutan en vela cerrada) ────────────────────────────────────────────
+var int consUp = 0
+var int consDn = 0
+if barstate.isconfirmed
+    consUp := isBullB ? consUp + 1 : 0
+    consDn := isBearB ? consDn + 1 : 0
+
+// ── Patrones ─────────────────────────────────────────────────────────────────────────────────
+bool btBull = dnWk >= bdyB * 2.0 and dnWk >= atrV * 0.30 and upWk <= dnWk * 0.40 and clsPos >= 0.60
+bool ttBear = upWk >= bdyB * 2.0 and upWk >= atrV * 0.30 and dnWk <= upWk * 0.40 and clsPos <= 0.40
+bool eleBull = isBullB and bdyB >= atrV * 0.8 and bodyPc >= 0.65 and close > math.max(high[1], high[2]) and (not hasVol or volume > avgVol * 1.3)
+bool eleBear = isBearB and bdyB >= atrV * 0.8 and bodyPc >= 0.65 and close < math.min(low[1], low[2])  and (not hasVol or volume > avgVol * 1.3)
+bool v180Bull = isBullB and isBearB[1] and clsPos >= 0.70 and close >= open[1]
+bool v180Bear = isBearB and isBullB[1] and clsPos <= 0.30 and close <= open[1]
+bool engBull = isBullB and isBearB[1] and close >= open[1] and open <= close[1] and bdyB > bdyB[1]
+bool engBear = isBearB and isBullB[1] and close <= open[1] and open >= close[1] and bdyB > bdyB[1]
+bool rbiBull = isBearB[1] and isBullB and close > high[1]
+bool gbiBear = isBullB[1] and isBearB and close < low[1]
+
+// [n-1] a propósito: cuenta las velas consecutivas ANTERIORES a ésta, porque la vela de reversión
+// ya reinició el contador de su propio color.
+bool exhDnDone   = nz(consDn[1]) >= exhBars
+bool exhUpDone   = nz(consUp[1]) >= exhBars
+bool vetoBull    = useExhVeto and consUp >= exhBars
+bool vetoBear    = useExhVeto and consDn >= exhBars
+
+float paBull = 0.0
+paBull += (usePatTail and btBull)   ? 3.0 : 0.0
+paBull += (usePatEle  and eleBull)  ? 2.5 : 0.0
+paBull += (usePat180  and v180Bull) ? 2.0 : 0.0
+paBull += (usePatEng  and engBull)  ? 2.0 : 0.0
+paBull += (usePatRbi  and rbiBull)  ? 1.5 : 0.0
+paBull += exhDnDone ? 1.0 : 0.0
+paBull += (hasVol and volume > avgVol * 1.3) ? 1.0 : 0.0
+
+float paBear = 0.0
+paBear += (usePatTail and ttBear)   ? 3.0 : 0.0
+paBear += (usePatEle  and eleBear)  ? 2.5 : 0.0
+paBear += (usePat180  and v180Bear) ? 2.0 : 0.0
+paBear += (usePatEng  and engBear)  ? 2.0 : 0.0
+paBear += (usePatRbi  and gbiBear)  ? 1.5 : 0.0
+paBear += exhUpDone ? 1.0 : 0.0
+paBear += (hasVol and volume > avgVol * 1.3) ? 1.0 : 0.0
+
+bool paOKBull = not usePA or (paBull >= minPAScore and not vetoBull)
+bool paOKBear = not usePA or (paBear >= minPAScore and not vetoBear)
+
+string paTagBull = (usePatTail and btBull) ? "🔨 Bottoming Tail" : (usePatEle and eleBull) ? "🐘 Elefante" : (usePat180 and v180Bull) ? "🔄 Vela 180" : (usePatEng and engBull) ? "🫸 Envolvente" : (usePatRbi and rbiBull) ? "🚫 RBI" : "—"
+string paTagBear = (usePatTail and ttBear) ? "🔨 Topping Tail"  : (usePatEle and eleBear) ? "🐘 Elefante" : (usePat180 and v180Bear) ? "🔄 Vela 180" : (usePatEng and engBear) ? "🫸 Envolvente" : (usePatRbi and gbiBear) ? "🚫 GBI" : "—"
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ FRESCURA — memoria de toques por zona (solo en el contexto del GRÁFICO)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Las zonas llegan reconstruidas desde request.security en cada barra, así que no pueden guardar
+// estado por sí mismas. Los toques viven en mapas persistentes indexados por guid.
+
+var map<int, int>  touchCount = map.new<int, int>()
+var map<int, bool> wasInside  = map.new<int, bool>()
+var map<int, int>  lastRetest = map.new<int, int>()
+
+var array<ZoneInfo> live = array.new<ZoneInfo>()
+
+f_collect(array<ZoneInfo> dst, array<ZoneInfo> src, bool enabled, int idx, string tfs) =>
+    if enabled and not na(src)
+        if src.size() > 0
+            for i = 0 to src.size() - 1
+                ZoneInfo c = ZoneInfo.copy(src.get(i))
+                c.tfIdx  := idx
+                c.tfStr  := tfs
+                c.tfLabel:= f_tfLabel(tfs)
+                c.guid   := c.guid + idx * 10
+                dst.push(c)
+
+// [D9] Fusión acotada: como máximo `passes` pasadas, sin `while` sin cota, y con umbral real de
+// solape. El original fusionaba con cualquier roce y volvía a recorrer un array que CRECÍA en cada
+// fusión, porque las zonas originales se marcaban disabled pero nunca se eliminaban.
+f_combine(array<ZoneInfo> zs, float minPct, int passes) =>
+    for p = 1 to passes
+        if zs.size() > 1
+            for i = 0 to zs.size() - 2
+                ZoneInfo a = zs.get(i)
+                if not a.disabled
+                    for j = i + 1 to zs.size() - 1
+                        ZoneInfo b = zs.get(j)
+                        bool same = a.isDemand == b.isDemand
+                        if same and not b.disabled and not a.disabled
+                            if f_overlapPct(a.top, a.bottom, b.top, b.bottom) >= minPct
+                                // La fusionada absorbe a la otra: se queda con el rango mayor, el
+                                // inicio más antiguo y la etiqueta de ambos marcos. [D6] el recorte
+                                // usa el ATR de NACIMIENTO, no el del gráfico.
+                                a.top      := math.max(a.top, b.top)
+                                a.bottom   := math.min(a.bottom, b.bottom)
+                                a.startTime:= math.min(a.startTime, b.startTime)
+                                a.baseScore:= math.max(a.baseScore, b.baseScore)
+                                a.combined := true
+                                if a.tfLabel != b.tfLabel
+                                    a.tfLabel := a.tfLabel + "+" + b.tfLabel
+                                if (a.top - a.bottom) > a.birthAtr * maxZoneAtr
+                                    if a.isDemand
+                                        a.bottom := a.top - a.birthAtr * maxZoneAtr
+                                    else
+                                        a.top := a.bottom + a.birthAtr * maxZoneAtr
+                                b.disabled := true
+
+bool retestDemand = false
+bool retestSupply = false
+bool breakDemand  = false
+bool breakSupply  = false
+float retestLvl   = na
+float breakLvl    = na
+float retestScore = 0.0
+float sigProximal = na      // el borde que mira al precio: donde se coloca la orden
+float sigDistal   = na      // el borde lejano: donde muere la zona, y por tanto donde va el stop
+int   sigTouches  = 0
+
+if barstate.isconfirmed
+    live.clear()
+    f_collect(live, dem1, tf1On, 1, tf1)
+    f_collect(live, sup1, tf1On, 1, tf1)
+    f_collect(live, dem2, tf2On, 2, tf2)
+    f_collect(live, sup2, tf2On, 2, tf2)
+    f_collect(live, dem3, tf3On, 3, tf3)
+    f_collect(live, sup3, tf3On, 3, tf3)
+
+    if combineZones
+        f_combine(live, combineMinPct, 2)
+
+    // Toques y retesteos. [D5] Se exige INTERSECCIÓN REAL con la zona: el original comprobaba
+    // `high > bottom` para una oferta, que es cierto con el precio muy por encima de toda la zona.
+    if live.size() > 0
+        for i = 0 to live.size() - 1
+            ZoneInfo z = live.get(i)
+            if not z.disabled and na(z.breakTime)
+                bool inside = high >= z.bottom and low <= z.top
+                bool before = false
+                if wasInside.contains(z.guid)
+                    before := wasInside.get(z.guid)
+                wasInside.put(z.guid, inside)
+                if inside and not before
+                    int prev = 0
+                    if touchCount.contains(z.guid)
+                        prev := touchCount.get(z.guid)
+                    touchCount.put(z.guid, prev + 1)
+                    int lastR = -9999
+                    if lastRetest.contains(z.guid)
+                        lastR := lastRetest.get(z.guid)
+                    if (bar_index - lastR) > retestCooldown
+                        lastRetest.put(z.guid, bar_index)
+                        if z.isDemand
+                            retestDemand := true
+                            retestLvl    := z.bottom
+                            sigProximal  := z.top
+                            sigDistal    := z.bottom
+                        else
+                            retestSupply := true
+                            retestLvl    := z.top
+                            sigProximal  := z.bottom
+                            sigDistal    := z.top
+                        retestScore := z.baseScore
+                        sigTouches  := prev + 1
+            if not z.disabled and not na(z.breakTime) and z.breakTime == time
+                if z.isDemand
+                    breakDemand := true
+                    breakLvl    := z.bottom
+                else
+                    breakSupply := true
+                    breakLvl    := z.top
+
+    // Los mapas solo crecen; se vacían al desbordar para que no se acumulen indefinidamente.
+    if touchCount.size() > 250
+        touchCount.clear()
+        wasInside.clear()
+        lastRetest.clear()
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ SEÑAL DE ENTRADA
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Cuatro condiciones, y las cuatro tienen que darse en la misma vela:
+//   1. El precio RETESTEA una zona viva (ya resuelto arriba).
+//   2. La vela CIERRA de vuelta más allá del borde PROXIMAL. Entrar en la zona no basta: hay que
+//      salir de ella a favor. Una vela que entra y cierra dentro no ha rechazado nada todavía.
+//   3. Vela de reversión reconocible (Velez / Price Action).
+//   4. El acercamiento fue un retroceso controlado, no un ataque.
+
+var int lastSigBar = -9999
+bool coolOK = (bar_index - lastSigBar) >= sigCooldown
+
+bool reclaimBull = not na(sigProximal) and close > sigProximal
+bool reclaimBear = not na(sigProximal) and close < sigProximal
+
+bool buySignal  = showSignals and retestDemand and reclaimBull and paOKBull and weakApproach and coolOK
+bool sellSignal = showSignals and retestSupply and reclaimBear and paOKBear and weakApproach and coolOK
+
+if buySignal or sellSignal
+    lastSigBar := bar_index
+
+float sigEntry = close
+float sigSL    = na
+if buySignal
+    sigSL := sigDistal - atrV * slBufAtr
+if sellSignal
+    sigSL := sigDistal + atrV * slBufAtr
+
+float sigRisk = na(sigSL) ? na : math.abs(sigEntry - sigSL)
+float sigTP1  = na
+float sigTP2  = na
+
+if (buySignal or sellSignal) and not na(sigRisk) and sigRisk > 0
+    sigTP1 := buySignal ? sigEntry + sigRisk * tp1R : sigEntry - sigRisk * tp1R
+    sigTP2 := buySignal ? sigEntry + sigRisk * tp2R : sigEntry - sigRisk * tp2R
+    // TP2 en la zona OPUESTA más cercana: ahí está el siguiente muro de órdenes, que es un
+    // objetivo real y no un múltiplo de R inventado. Solo se adopta si mejora al múltiplo.
+    if tp2Opposite and live.size() > 0
+        float best = na
+        for i = 0 to live.size() - 1
+            ZoneInfo zo = live.get(i)
+            if not zo.disabled and na(zo.breakTime) and zo.isDemand != buySignal
+                float edge = buySignal ? zo.bottom : zo.top
+                bool ahead = buySignal ? edge > sigEntry : edge < sigEntry
+                if ahead
+                    if na(best)
+                        best := edge
+                    else
+                        best := buySignal ? math.min(best, edge) : math.max(best, edge)
+        if not na(best)
+            bool better = buySignal ? best > sigTP2 : best < sigTP2
+            if better
+                sigTP2 := best
+
+int sigQty = na(sigRisk) or sigRisk <= 0 or tickSz <= 0 ? 0 : math.max(1, int(math.floor(riskTrade / math.max(sigRisk / tickSz * tickVal, 0.01))))
+bool sigValid = (buySignal or sellSignal) and not na(sigTP2) and sigRisk > 0
+
+// ── Auto-estadísticas ────────────────────────────────────────────────────────────────────────
+// Regla honesta: si SL y TP se tocan en la MISMA vela cuenta SL — el OHLC no dice cuál llegó antes
+// y la suposición pesimista es la única defendible. El número mostrado es un SUELO.
+
+int STAT_MAX_BARS = 120
+
+var array<Trade> trades = array.new<Trade>()
+var int statWin1 = 0
+var int statWin2 = 0
+var int statLoss = 0
+
+if showStats and barstate.isconfirmed and trades.size() > 0
+    for i = trades.size() - 1 to 0
+        Trade t = trades.get(i)
+        if not t.closed
+            bool slHit  = t.isBuy ? low  <= t.sl  : high >= t.sl
+            bool tp1Hit = t.isBuy ? high >= t.tp1 : low  <= t.tp1
+            bool tp2Hit = t.isBuy ? high >= t.tp2 : low  <= t.tp2
+            if slHit
+                if t.tp1Done
+                    statWin1 += 1
+                else
+                    statLoss += 1
+                t.closed := true
+            else
+                if tp1Hit and not t.tp1Done
+                    t.tp1Done := true
+                if tp2Hit
+                    statWin1 += 1
+                    statWin2 += 1
+                    t.closed := true
+                else if (bar_index - t.openBar) > STAT_MAX_BARS
+                    if t.tp1Done
+                        statWin1 += 1
+                    else
+                        statLoss += 1
+                    t.closed := true
+        if t.closed
+            trades.remove(i)
+
+if sigValid and showStats
+    trades.push(Trade.new(buySignal, sigSL, sigTP1, sigTP2, false, false, bar_index))
+    if trades.size() > 30
+        trades.shift()
+
+int   statTotal = statWin1 + statLoss
+float hitTP1    = statTotal > 0 ? statWin1 / float(statTotal) * 100.0 : na
+float hitTP2    = statTotal > 0 ? statWin2 / float(statTotal) * 100.0 : na
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ RENDER CON OBJETOS PRE-ASIGNADOS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// [D7] El original borraba y recreaba TODAS las cajas en cada barra. Aquí los objetos se crean una
+// sola vez y después solo se mueven sus coordenadas; las ranuras sobrantes se ocultan poniéndolas
+// en na. Coordenadas por TIEMPO (xloc.bar_time) para que una zona de marco superior caiga en su
+// sitio exacto sin aritmética de bar_index entre contextos.
+
+var array<box>  slotBox  = array.new<box>()
+var array<line> slotProx = array.new<line>()
+
+if barstate.isfirst
+    for i = 1 to maxRenderZones
+        slotBox.push(box.new(na, na, na, na, xloc=xloc.bar_time, extend=extend.none,
+             text_color=colText, text_size=size.tiny, text_halign=text.align_right, text_valign=text.align_bottom))
+        slotProx.push(line.new(na, na, na, na, xloc=xloc.bar_time, width=2))
+
+int rendered = 0
+int cntDemand = 0
+int cntSupply = 0
+float bestScore = 0.0
+
+if barstate.islast and live.size() > 0
+    for i = 0 to live.size() - 1
+        ZoneInfo z = live.get(i)
+        if not z.disabled and rendered < maxRenderZones
+            int tch = 0
+            if touchCount.contains(z.guid)
+                tch := touchCount.get(z.guid)
+            // Frescura 20 pts: la primera visita es la de mayor probabilidad y cada visita
+            // posterior consume las órdenes que quedaban. Confluencia multi-marco 10 pts.
+            float sFresh = tch == 0 ? 20.0 : tch == 1 ? 10.0 : 0.0
+            float sMtf   = z.combined ? 10.0 : 0.0
+            float score  = z.baseScore + sFresh + sMtf
+            bool  alive  = na(z.breakTime) and tch < maxTouchesShow
+            bool  young  = (time - z.startTime) <= zoneMaxAgeBars * timeframe.in_seconds() * 1000
+            if alive and young and score >= minZoneScore
+                box  b = slotBox.get(rendered)
+                line l = slotProx.get(rendered)
+                color cz = z.isDemand ? colDemand : colSupply
+                box.set_lefttop(b, z.startTime, z.top)
+                box.set_rightbottom(b, time + timeframe.in_seconds() * 20 * 1000, z.bottom)
+                box.set_bgcolor(b, cz)
+                box.set_border_color(b, color.new(cz, 35))
+                string tag = z.tfLabel + (z.isDemand ? " D" : " S")
+                if showScoreTxt
+                    tag := tag + "  " + str.tostring(math.round(score)) + (tch > 0 ? "  ·" + str.tostring(tch) : "")
+                box.set_text(b, tag)
+                box.set_text_color(b, colText)
+                float prox = z.isDemand ? z.top : z.bottom
+                line.set_xy1(l, z.startTime, prox)
+                line.set_xy2(l, time + timeframe.in_seconds() * 20 * 1000, prox)
+                line.set_color(l, showProximal ? color.new(cz, 0) : na)
+                rendered += 1
+                if z.isDemand
+                    cntDemand += 1
+                else
+                    cntSupply += 1
+                bestScore := math.max(bestScore, score)
+
+// Ranuras sobrantes: se ocultan en vez de destruirse.
+if barstate.islast and slotBox.size() > 0
+    for i = rendered to slotBox.size() - 1
+        box.set_lefttop(slotBox.get(i), na, na)
+        box.set_rightbottom(slotBox.get(i), na, na)
+        line.set_xy1(slotProx.get(i), na, na)
+        line.set_xy2(slotProx.get(i), na, na)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ ETIQUETAS DE EVENTO
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Retesteo SIN señal: el precio tocó la zona pero no cumplió la confirmación. Se marca atenuado
+// porque ver lo que NO llegó a señal enseña tanto como ver lo que sí.
+if showRetests and (retestDemand or retestSupply) and not sigValid
+    color cR = retestDemand ? colDemand : colSupply
+    label.new(bar_index, retestLvl, "R",
+         style = retestDemand ? label.style_label_up : label.style_label_down,
+         color = color.new(cR, 55), textcolor = color.new(color.white, 30), size = size.tiny)
+
+// Señal ejecutable.
+if sigValid
+    color cS = buySignal ? paBarBuyCol : paBarSellCol
+    string head = buySignal ? "▲ BUY" : "▼ SELL"
+    string pat  = buySignal ? paTagBull : paTagBear
+    string foot = str.tostring(sigQty) + "c  ·  Z" + str.tostring(math.round(retestScore + (sigTouches <= 1 ? 20 : 0)))
+    label.new(bar_index, buySignal ? low : high, head + "\n" + pat + "\n" + foot,
+         color = color.new(cS, 10), textcolor = color.black,
+         style = buySignal ? label.style_label_up : label.style_label_down, size = size.small)
+    line.new(bar_index, sigSL,  bar_index + 16, sigSL,  color=color.new(#FF5252, 20), style=line.style_dashed, width=1)
+    line.new(bar_index, sigTP1, bar_index + 16, sigTP1, color=color.new(#26C6DA, 40), style=line.style_dotted, width=1)
+    line.new(bar_index, sigTP2, bar_index + 16, sigTP2, color=color.new(#26C6DA, 10), width=2)
+    alert('{"signal":"' + (buySignal ? "SD_BUY" : "SD_SELL") + '","ticker":"' + syminfo.ticker +
+          '","pattern":"' + pat + '","entry":' + str.tostring(sigEntry, format.mintick) +
+          ',"sl":' + str.tostring(sigSL, format.mintick) + ',"tp1":' + str.tostring(sigTP1, format.mintick) +
+          ',"tp2":' + str.tostring(sigTP2, format.mintick) + ',"qty":' + str.tostring(sigQty) + '}',
+          alert.freq_once_per_bar_close)
+
+// Coloreado en tres niveles: opaco = señal ejecutable · atenuado = patrón válido al que le faltó
+// zona, reclaim o acercamiento limpio · sin pintar = la vela no aporta información de reversión.
+color barCol = na
+if sigValid and buySignal
+    barCol := paBarBuyCol
+else if sigValid and sellSignal
+    barCol := paBarSellCol
+else if paBull >= minPAScore and paBull >= paBear and not vetoBull
+    barCol := color.new(paBarBuyCol, paBarDimTrans)
+else if paBear >= minPAScore and not vetoBear
+    barCol := color.new(paBarSellCol, paBarDimTrans)
+
+barcolor(barCol, title="Velas Velez / PA")
+
+if showBreaks and (breakDemand or breakSupply)
+    label.new(bar_index, breakLvl, "B",
+         style = breakDemand ? label.style_label_down : label.style_label_up,
+         color = color.new(#2157F3, 20), textcolor = color.white, size = size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+if showDash and barstate.islast
+    var table d = table.new(position.top_right, 2, 7, bgcolor=color.new(#0D1117, 8),
+              border_width=1, border_color=color.new(color.gray, 78))
+    table.cell(d, 0, 0, "S&D PRO v1.1", text_color=#FFD700, bgcolor=#161B22, text_size=size.small)
+    table.cell(d, 1, 0, syminfo.ticker + " " + timeframe.period, text_color=color.white, bgcolor=#161B22, text_size=size.small)
+    table.cell(d, 0, 1, "Zonas vivas", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 1, str.tostring(rendered) + "  (D " + str.tostring(cntDemand) + " · S " + str.tostring(cntSupply) + ")",
+               text_color=color.white, text_size=size.tiny)
+    table.cell(d, 0, 2, "Mejor score", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 2, rendered == 0 ? "—" : str.tostring(math.round(bestScore)) + " / 100",
+               text_color=bestScore >= 75 ? #00E676 : bestScore >= 55 ? #FFD700 : color.gray, text_size=size.tiny)
+    table.cell(d, 0, 3, "Marcos activos", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 3, (tf1On ? f_tfLabel(tf1) + " " : "") + (tf2On ? f_tfLabel(tf2) + " " : "") + (tf3On ? f_tfLabel(tf3) : ""),
+               text_color=color.white, text_size=size.tiny)
+    table.cell(d, 0, 4, "Volumen", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 4, not useVolConfirm ? "sin filtro" : hasVol ? "confirmando 🟢" : "el símbolo no publica",
+               text_color=hasVol or not useVolConfirm ? #00E676 : #FFA726, text_size=size.tiny)
+    table.cell(d, 0, 5, "Acercamiento", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 5, not useApproach ? "sin filtro" : weakApproach ? "CONTROLADO 🟢" : "ATAQUE — la zona corre peligro",
+               text_color=not useApproach ? color.gray : weakApproach ? #00E676 : #FF5252, text_size=size.tiny)
+    table.cell(d, 0, 6, "Acierto real (n=" + str.tostring(statTotal) + ")", text_color=color.gray, text_size=size.tiny)
+    string stx = not showStats ? "desactivado" : statTotal < 5 ? "muestra insuficiente" : "TP1 " + str.tostring(hitTP1, "#") + "%  ·  TP2 " + str.tostring(hitTP2, "#") + "%"
+    table.cell(d, 1, 6, stx,
+               text_color=statTotal < 5 ? color.gray : hitTP1 >= 55 ? #39FF14 : hitTP1 >= 45 ? #FFD700 : #FF5252, text_size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ ALERTAS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+alertcondition(sigValid and buySignal,  "🎯 SEÑAL BUY (zona + Velez)",  "{{ticker}} {{interval}} · BUY en retesteo de DEMANDA confirmado por vela Velez @ {{close}}")
+alertcondition(sigValid and sellSignal, "🎯 SEÑAL SELL (zona + Velez)", "{{ticker}} {{interval}} · SELL en retesteo de OFERTA confirmado por vela Velez @ {{close}}")
+alertcondition(retestDemand, "🟢 Retesteo de DEMANDA", "{{ticker}} {{interval}} · Retesteo de zona de DEMANDA @ {{close}}")
+alertcondition(retestSupply, "🔴 Retesteo de OFERTA",  "{{ticker}} {{interval}} · Retesteo de zona de OFERTA @ {{close}}")
+alertcondition(retestDemand or retestSupply, "🎯 Cualquier retesteo", "{{ticker}} {{interval}} · Retesteo de zona S&D @ {{close}}")
+alertcondition(breakDemand,  "⚠️ Rotura de DEMANDA", "{{ticker}} {{interval}} · Zona de DEMANDA rota @ {{close}}")
+alertcondition(breakSupply,  "⚠️ Rotura de OFERTA",  "{{ticker}} {{interval}} · Zona de OFERTA rota @ {{close}}")

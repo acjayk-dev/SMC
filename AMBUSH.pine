@@ -1,0 +1,441 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// AMBUSH v1.0 — Subasta Fallida y Volumen Atrapado
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// TF óptimo: 1 / 2 / 5 min · Activo: MNQ / MES (y cualquier futuro o acción con volumen real)
+//
+// ── LA TESIS ──────────────────────────────────────────────────────────────────────────────────
+// Casi toda reversión intradía de alta probabilidad es el MISMO evento: un grupo de traders quedó
+// posicionado del lado equivocado y tiene que salir. Su salida forzada es tu combustible.
+//
+// Este indicador no busca "patrones". MIDE cuánta gente quedó atrapada y dispara cuando esa gente
+// empieza a liberarse. En teoría de subastas esto se llama SUBASTA FALLIDA: el precio sondea más
+// allá del área de valor, no encuentra aceptación, y vuelve dentro. Los que compraron la ruptura
+// se quedan sin compradores detrás.
+//
+// ── POR QUÉ ESTO Y NO OTRA COSA ───────────────────────────────────────────────────────────────
+// El sesgo de la mayoría de indicadores es buscar CONFIRMACIÓN: esperan a que el movimiento sea
+// evidente, y para entonces el recorrido ya se hizo. Aquí la premisa es la contraria: el mejor
+// momento de entrar es cuando un grupo identificable de participantes acaba de equivocarse, porque
+// su error tiene una consecuencia MECÁNICA y OBLIGATORIA (cerrar), no discrecional.
+//
+// Tres hechos hacen operable esa premisa:
+//   1. La volatilidad se agrupa. Un rango estrecho precede a una expansión — es de los poquísimos
+//      hechos estadísticos robustos en mercados. Por eso solo se opera desde COMPRESIÓN.
+//   2. Los stops se acumulan justo más allá de los extremos de un rango tanteado varias veces.
+//      Cuantas más veces se tanteó un nivel, más órdenes hay descansando al otro lado.
+//   3. Una ruptura que falla RÁPIDO atrapa a más gente que una que falla despacio: los que entraron
+//      no tuvieron tiempo de salir en beneficio, y todos salen a la vez.
+//
+// ── LOS 6 COMPONENTES DEL SCORE (0-100) ───────────────────────────────────────────────────────
+//   ▸ Volumen atrapado  30 pts — cuánto volumen se transó MÁS ALLÁ del nivel. Es la población
+//                                atrapada. Sin volumen ahí no hay nadie atrapado y no hay trade.
+//   ▸ Compresión        20 pts — cuánto más estrecho que la volatilidad vigente era el rango.
+//                                Más estrecho = más consenso = más posicionamiento en los bordes.
+//   ▸ Toques del nivel  15 pts — cuántas veces se tanteó el nivel antes de romperlo.
+//   ▸ Velocidad         15 pts — en cuántas barras fracasó. Rápido = desordenado = más fuel.
+//   ▸ Vela de reclaim   10 pts — la vela que vuelve dentro, ¿cierra con fuerza o dudando?
+//   ▸ Contexto HTF      10 pts — no se pelea con un marco superior que corre a favor de la ruptura.
+//
+// ── LO QUE ESTE INDICADOR HACE Y NINGÚN OTRO ──────────────────────────────────────────────────
+// SE MIDE A SÍ MISMO. Lleva la cuenta en vivo de cuántas de sus propias señales alcanzaron TP1 y
+// TP2 antes que el stop, sobre el gráfico que tengas cargado. No te pide que le creas: te enseña
+// su acierto en esa ventana concreta. Si el número no te gusta, el indicador te lo está diciendo.
+// Cuando SL y TP se tocan en la misma vela, cuenta SL — el OHLC no dice cuál llegó antes, y la
+// suposición pesimista es la única honesta.
+//
+// ── OBJETIVOS NO ARBITRARIOS ──────────────────────────────────────────────────────────────────
+// El stop va justo más allá del extremo del sondeo: si no estaban atrapados, el precio vuelve a
+// salir y la tesis muere ahí, no 2 ATR después. TP1 es el centro del rango; TP2 es el borde
+// OPUESTO — donde está el OTRO pozo de stops. Ningún objetivo es un múltiplo de R inventado: son
+// niveles estructurales, y por eso el R:R sale favorable solo (stop corto, objetivo ancho).
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+indicator("AMBUSH v1.0 · Subasta Fallida & Volumen Atrapado", shorttitle="AMBUSH",
+     overlay=true, max_lines_count=500, max_boxes_count=200, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ TIPOS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+type Trade
+    bool  isBuy
+    float entry
+    float sl
+    float tp1
+    float tp2
+    bool  tp1Done
+    bool  closed
+    int   openBar
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+gRng = "① 🧊 RANGO Y COMPRESIÓN"
+gPrb = "② 🪤 EL SONDEO (la trampa)"
+gSig = "③ 🎯 SEÑAL Y OBJETIVOS"
+gCtx = "④ 🧭 CONTEXTO"
+gVis = "⑤ 🎨 VISUAL Y ESTADÍSTICAS"
+
+rangeLen     = input.int(20, "Barras del rango", minval=8, maxval=100, group=gRng, tooltip="Ventana que define el área de valor. En 5min, 20 barras = 100 minutos: suficiente para que se forme un consenso real de precio. Más corto reacciona antes pero acepta rangos que no son consenso, solo una pausa.")
+maxRangeAtr  = input.float(2.5, "Rango máximo (× ATR) para considerarlo comprimido", minval=0.8, maxval=8.0, step=0.1, group=gRng, tooltip="EL FILTRO MÁS IMPORTANTE DEL INDICADOR. Solo se opera desde COMPRESIÓN. La volatilidad se agrupa: un rango estrecho precede a una expansión, y además significa que todo el mundo está de acuerdo con el precio — lo que concentra el posicionamiento en los bordes. Romper un rango ancho no atrapa a nadie porque nadie tenía convicción. Bájalo a 2.0 para ser más selectivo.")
+touchTolAtr  = input.float(0.25, "Tolerancia de toque (× ATR)", minval=0.05, step=0.05, group=gRng, tooltip="Cuán cerca debe pasar una vela del nivel para contar como 'toque'. Los toques miden cuántas órdenes hay descansando al otro lado.")
+
+maxProbeBars = input.int(6, "Barras máximas del sondeo", minval=1, maxval=30, group=gPrb, tooltip="Si el precio pasa más de N barras fuera del rango SIN volver, deja de ser una trampa: es una ruptura real y el sondeo se descarta sin señal. Una ruptura que falla rápido atrapa a más gente, porque los que entraron no tuvieron tiempo de salir en beneficio y salen todos a la vez.")
+minProbeAtr  = input.float(0.15, "Excursión mínima (× ATR)", minval=0.0, step=0.05, group=gPrb, tooltip="El sondeo debe superar el nivel de forma apreciable. Un pinchazo de 2 ticks no atrapó a nadie: nadie compró esa ruptura.")
+maxProbeAtr  = input.float(2.0, "Excursión máxima (× ATR)", minval=0.5, step=0.1, group=gPrb, tooltip="El otro extremo, y es igual de importante: si el precio corrió 3 ATR más allá y solo DESPUÉS volvió, eso no es una trampa — es la reversión de un movimiento real. Trade distinto, riesgo distinto. El sondeo se descarta.")
+trapVolTarget= input.float(3.0, "Volumen atrapado para puntuación máxima (× media)", minval=1.0, step=0.5, group=gPrb, tooltip="Volumen acumulado FUERA del rango, en múltiplos del volumen medio, que otorga los 30 puntos completos. 3.0 = se transó el triple de lo normal más allá del nivel: hay una población grande atrapada. Si el símbolo no publica volumen, este componente recibe una puntuación neutra y se avisa en el dashboard.")
+
+minScore     = input.int(60, "Score mínimo para disparar señal", minval=20, maxval=100, group=gSig, tooltip="El dial de probabilidad. 60 es el equilibrio. 75+ da muy pocas señales y casi todas de manual. Por debajo de 45 estás operando rupturas fallidas cualesquiera, que es justo lo que este indicador intenta evitar.")
+minRR        = input.float(1.8, "R:R mínimo a TP2", minval=0.5, step=0.1, group=gSig, tooltip="Si el borde opuesto del rango no está lo bastante lejos respecto al stop, la señal se descarta aunque el score sea alto. Una trampa perfecta con un objetivo a 0.8R no es un buen trade: es un buen análisis mal pagado.")
+slBufferAtr  = input.float(0.20, "Colchón del stop (× ATR)", minval=0.0, step=0.05, group=gSig, tooltip="Distancia extra más allá del extremo del sondeo. El stop va ahí porque ES donde muere la tesis: si el precio vuelve a salir, no estaban atrapados.")
+riskPerTrade = input.float(200.0, "Riesgo por operación ($)", minval=1.0, step=25.0, group=gSig)
+tickVal      = input.float(0.50, "Valor del tick ($)", minval=0.01, step=0.01, group=gSig, tooltip="MNQ = 0.50 · MES = 1.25")
+tickSz       = input.float(0.25, "Tamaño del tick", minval=0.0001, step=0.01, group=gSig)
+
+useHTF       = input.bool(true, "Filtro de marco superior", group=gCtx, tooltip="No se pelea con un HTF que corre con fuerza a favor de la ruptura: ahí la 'trampa' probablemente sea una ruptura de verdad. Se lee con [1] + lookahead_on — el patrón canónico ANTI-REPINTADO, que toma la vela HTF ya CERRADA.")
+htfMode      = input.string("Auto", "Marco superior", options=["Auto", "Manual"], group=gCtx)
+htfManual    = input.timeframe("60", "HTF manual", group=gCtx)
+useSession   = input.bool(true, "Filtro de sesión", group=gCtx, tooltip="Las trampas necesitan participantes a los que atrapar. Fuera de la ventana de alta participación el volumen es de creadores de mercado y el modelo pierde su fundamento.")
+sessWin      = input.session("0830-1130", "Sesión (hora de Nueva York)", group=gCtx, tooltip="0830-1130 NY = solape Londres/NY + primera hora de NY. Para Londres: 0200-0500.")
+
+showBox      = input.bool(true, "Dibujar el rango y el sondeo", group=gVis)
+colBuy       = input.color(#39FF14, "Color señal BUY", group=gVis, inline="c")
+colSell      = input.color(#FF00FF, "Color señal SELL", group=gVis, inline="c")
+colBox       = input.color(color.new(#42A5F5, 82), "Color del rango", group=gVis)
+showDash     = input.bool(true, "Dashboard", group=gVis)
+showStats    = input.bool(true, "Auto-estadísticas (acierto real en este gráfico)", group=gVis, tooltip="El indicador sigue sus propias señales y cuenta cuántas alcanzaron TP1 y TP2 antes que el stop. No te pide que le creas: te enseña su acierto sobre el gráfico que tienes cargado. Cuando SL y TP se tocan en la misma vela cuenta SL, porque el OHLC no dice cuál llegó antes y la suposición pesimista es la única honesta.")
+maxTracked   = input.int(60, "Operaciones seguidas en memoria", minval=10, maxval=200, group=gVis)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ FUNCIONES
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Cuenta cuántas veces se TANTEÓ un nivel. No basta que una vela pasara cerca: tiene que haber sido
+// un extremo local, es decir, el precio llegó ahí y fue rechazado. Un nivel tanteado 3 veces tiene
+// muchas más órdenes descansando al otro lado que un máximo tocado una sola vez de pasada.
+f_touches(bool isHigh, float level, int len, float tol) =>
+    int c    = 0
+    int last = -99
+    for i = 2 to len
+        float px       = isHigh ? high[i] : low[i]
+        // if/else explícito en vez de un ternario partido en dos líneas: una línea de continuación
+        // que EMPIEZA por ":" no es reconocida por Pine, y con sangría múltiplo de 4 tampoco se
+        // interpreta como continuación. El if/else no tiene ese problema y además se lee mejor.
+        bool localExt = false
+        if isHigh
+            localExt := high[i] >= high[i + 1] and high[i] >= high[i - 1]
+        else
+            localExt := low[i] <= low[i + 1] and low[i] <= low[i - 1]
+        if math.abs(px - level) <= tol and localExt and (i - last) >= 3
+            c    += 1
+            last := i
+    c
+
+f_htfBias() =>
+    float ef = ta.ema(close, 21)
+    float es = ta.ema(close, 50)
+    close > ef and ef > es ? 1 : close < ef and ef < es ? -1 : 0
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ CÁLCULOS BASE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+float atr    = ta.atr(14)
+float avgVol = ta.sma(volume, 20)
+bool  hasVol = not na(avgVol) and avgVol > 0
+float rngBar = high - low
+float clsPos = rngBar > 0 ? (close - low) / rngBar : 0.5
+
+string htfAuto = not timeframe.isintraday ? "W" : timeframe.multiplier <= 1 ? "15" : timeframe.multiplier <= 5 ? "60" : timeframe.multiplier <= 15 ? "240" : "D"
+string htfUse  = htfMode == "Auto" ? htfAuto : htfManual
+htfRaw         = request.security(syminfo.tickerid, htfUse, f_htfBias()[1], lookahead=barmerge.lookahead_on)
+int    htfBias = useHTF ? nz(htfRaw) : 0
+
+bool inSess = not useSession or not na(time(timeframe.period, sessWin, "America/New_York"))
+
+// El rango EXCLUYE la vela en curso ([1]): si la incluyera, `high > boxHi` nunca podría ser cierto
+// —el propio máximo formaría el techo— y no habría forma de detectar la ruptura.
+float boxHi = ta.highest(high, rangeLen)[1]
+float boxLo = ta.lowest(low,  rangeLen)[1]
+float boxW  = boxHi - boxLo
+bool  compressed = not na(boxW) and boxW > 0 and boxW <= atr * maxRangeAtr
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ MÁQUINA DE ESTADOS DEL SONDEO
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// probeDir: 0 = en espera · +1 = sondeo POR ENCIMA (alcistas en riesgo → prepara VENTA)
+//                          · -1 = sondeo POR DEBAJO (bajistas en riesgo → prepara COMPRA)
+//
+// DETALLE CRÍTICO: al arrancar el sondeo el rango se CONGELA. Si se siguiera leyendo en vivo,
+// ta.highest incorporaría el propio máximo del sondeo y el nivel subiría con el precio: el
+// "reclaim" nunca se cumpliría porque el listón se movería a la vez que el pie. El nivel que hay
+// que recuperar es el que había ANTES de la ruptura, y ese es el que se guarda.
+
+var int   probeDir   = 0
+var int   probeStart = 0
+var float probeVol   = 0.0
+var float probeExt   = na
+var float probeLevel = na
+var float probeHi    = na
+var float probeLo    = na
+var float probeW     = na
+var int   probeTouch = 0
+var box   probeBox   = na
+
+bool trapFired = false
+bool abortProbe= false
+
+if barstate.isconfirmed
+    if probeDir == 0
+        bool startUp = compressed and high > boxHi
+        bool startDn = compressed and low  < boxLo
+        if startUp or startDn
+            probeDir   := startUp ? 1 : -1
+            probeStart := bar_index
+            probeVol   := volume
+            probeExt   := startUp ? high : low
+            probeLevel := startUp ? boxHi : boxLo
+            probeHi    := boxHi
+            probeLo    := boxLo
+            probeW     := boxW
+            probeTouch := f_touches(startUp, startUp ? boxHi : boxLo, rangeLen, atr * touchTolAtr)
+            if showBox
+                probeBox := box.new(bar_index - rangeLen, boxHi, bar_index, boxLo, bgcolor=colBox,
+                     border_color=color.new(#42A5F5, 40), border_style=line.style_dashed)
+    else
+        probeVol += volume
+        probeExt := probeDir == 1 ? math.max(probeExt, high) : math.min(probeExt, low)
+        if not na(probeBox)
+            box.set_right(probeBox, bar_index)
+
+        float excursion = probeDir == 1 ? probeExt - probeLevel : probeLevel - probeExt
+        bool  reclaimed = probeDir == 1 ? close < probeLevel : close > probeLevel
+
+        // Se descarta el sondeo si tardó demasiado (fue ruptura real) o si corrió demasiado lejos
+        // (fue expansión real, y volver de ahí es otro trade con otro riesgo).
+        if (bar_index - probeStart) > maxProbeBars or excursion > atr * maxProbeAtr
+            abortProbe := true
+        else if reclaimed and excursion >= atr * minProbeAtr
+            trapFired := true
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ SCORE DE LA TRAMPA (0-100)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Se recalcula en CADA barra con el estado vigente del sondeo, no solo al dispararse: así el
+// dashboard enseña el score FORMÁNDOSE y ves la emboscada montarse antes de que ocurra.
+
+float scVol   = 0.0
+float scComp  = 0.0
+float scTouch = 0.0
+float scSpeed = 0.0
+float scBar   = 0.0
+float scHtf   = 0.0
+
+if probeDir != 0
+    // ▸ Volumen atrapado (30) — la población que quedó del lado equivocado.
+    scVol   := hasVol ? math.min(30.0, probeVol / math.max(avgVol, 1.0) / trapVolTarget * 30.0) : 15.0
+    // ▸ Compresión (20) — cuánto más estrecho que la volatilidad vigente era el rango.
+    scComp  := math.max(0.0, math.min(20.0, (1.0 - probeW / math.max(atr * maxRangeAtr, 0.0001)) * 20.0))
+    // ▸ Toques (15) — 3 tanteos previos = puntuación completa.
+    scTouch := math.min(15.0, probeTouch / 3.0 * 15.0)
+    // ▸ Velocidad (15) — cuanto antes fracase, más desordenada será la salida.
+    scSpeed := math.max(0.0, math.min(15.0, (1.0 - float(bar_index - probeStart) / math.max(maxProbeBars, 1)) * 15.0))
+    // ▸ Vela de reclaim (10) — ¿vuelve dentro con decisión o dudando?
+    scBar   := probeDir == 1 ? (1.0 - clsPos) * 10.0 : clsPos * 10.0
+    // ▸ Contexto HTF (10) — penaliza pelearse con un marco superior que corre a favor de la ruptura.
+    int want = probeDir == 1 ? -1 : 1
+    scHtf   := not useHTF ? 6.0 : htfBias == want ? 10.0 : htfBias == 0 ? 6.0 : 0.0
+
+float trapScore = scVol + scComp + scTouch + scSpeed + scBar + scHtf
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ SEÑAL
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Un sondeo POR ENCIMA que falla deja atrapados a los ALCISTAS → señal de VENTA. Y al revés.
+
+bool isBuySetup = probeDir == -1
+
+float sigEntry = close
+float sigSL    = na
+float sigTP1   = na
+float sigTP2   = na
+
+if trapFired
+    sigSL  := isBuySetup ? probeExt - atr * slBufferAtr : probeExt + atr * slBufferAtr
+    sigTP1 := (probeHi + probeLo) / 2.0
+    sigTP2 := isBuySetup ? probeHi : probeLo
+
+float sigRisk = na(sigSL) ? na : math.abs(sigEntry - sigSL)
+float sigRR   = na(sigRisk) or sigRisk <= 0 ? 0.0 : math.abs(sigTP2 - sigEntry) / sigRisk
+
+bool signalOK   = trapFired and trapScore >= minScore and sigRR >= minRR and inSess and sigRisk > 0
+bool buySignal  = signalOK and isBuySetup
+bool sellSignal = signalOK and not isBuySetup
+
+int sigQty = na(sigRisk) or sigRisk <= 0 or tickSz <= 0 ? 0 : math.max(1, int(math.floor(riskPerTrade / math.max(sigRisk / tickSz * tickVal, 0.01))))
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ AUTO-ESTADÍSTICAS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// El indicador se mide a sí mismo sobre el gráfico cargado. Regla honesta: si SL y TP se tocan en
+// la MISMA vela, cuenta SL — el OHLC no dice cuál llegó antes y la suposición pesimista es la
+// única defendible. Esto hace que el número mostrado sea un SUELO, no un escaparate.
+
+// Vida máxima de una operación seguida. En 5min, 80 barras ≈ 6h 40m: si la trampa no ha resuelto
+// en ese plazo, resolvió en tu contra por tiempo aunque el precio no llegara al stop.
+int STAT_MAX_BARS = 80
+
+var array<Trade> trades = array.new<Trade>()
+var int statWinTP1 = 0
+var int statWinTP2 = 0
+var int statLoss   = 0
+
+if showStats and barstate.isconfirmed and trades.size() > 0
+    for i = trades.size() - 1 to 0
+        Trade t = trades.get(i)
+        if not t.closed
+            bool slHit  = t.isBuy ? low  <= t.sl  : high >= t.sl
+            bool tp1Hit = t.isBuy ? high >= t.tp1 : low  <= t.tp1
+            bool tp2Hit = t.isBuy ? high >= t.tp2 : low  <= t.tp2
+            if slHit
+                if t.tp1Done
+                    // Ya había alcanzado TP1 en una vela anterior: el trade ya estaba ganado.
+                    statWinTP1 += 1
+                else
+                    statLoss += 1
+                t.closed := true
+            else
+                if tp1Hit and not t.tp1Done
+                    t.tp1Done := true
+                if tp2Hit
+                    statWinTP1 += 1
+                    statWinTP2 += 1
+                    t.closed   := true
+                else if (bar_index - t.openBar) > STAT_MAX_BARS
+                    // Caducidad. Sin ella, una operación que ni alcanza TP2 ni toca SL se quedaría
+                    // abierta indefinidamente y acabaría saliendo de la muestra sin contarse —
+                    // sesgando la estadística hacia arriba justo con los casos que no funcionaron.
+                    // Si llegó a TP1 cuenta como acierto; si no, como fallo. Criterio pesimista: en
+                    // la práctica ahí habrías salido por tiempo, no en beneficio.
+                    if t.tp1Done
+                        statWinTP1 += 1
+                    else
+                        statLoss += 1
+                    t.closed := true
+        if t.closed
+            trades.remove(i)
+
+if signalOK and showStats
+    trades.push(Trade.new(isBuySetup, sigEntry, sigSL, sigTP1, sigTP2, false, false, bar_index))
+    if trades.size() > maxTracked
+        trades.shift()
+
+int  statTotal = statWinTP1 + statLoss
+float hitTP1   = statTotal > 0 ? statWinTP1 / float(statTotal) * 100.0 : na
+float hitTP2   = statTotal > 0 ? statWinTP2 / float(statTotal) * 100.0 : na
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ RESET DEL SONDEO  (después de consumir trapFired / abortProbe)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+if barstate.isconfirmed and (trapFired or abortProbe)
+    if not na(probeBox)
+        if signalOK
+            box.set_bgcolor(probeBox, color.new(isBuySetup ? colBuy : colSell, 88))
+            box.set_border_color(probeBox, isBuySetup ? colBuy : colSell)
+            box.set_border_style(probeBox, line.style_solid)
+        else
+            box.delete(probeBox)
+    probeBox   := na
+    probeDir   := 0
+    probeVol   := 0.0
+    probeExt   := na
+    probeLevel := na
+    probeTouch := 0
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ VISUALES
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+if signalOK
+    color cS = isBuySetup ? colBuy : colSell
+    string txt = (isBuySetup ? "▲ AMBUSH BUY" : "▼ AMBUSH SELL") + "\n" + str.tostring(math.round(trapScore)) + "/100" + "\n" + str.tostring(sigQty) + "c · " + str.tostring(sigRR, "#.#") + "R"
+    label.new(bar_index, isBuySetup ? low : high, txt, color=color.new(cS, 10), textcolor=color.black,
+              style=isBuySetup ? label.style_label_up : label.style_label_down, size=size.small)
+    line.new(bar_index, sigSL,  bar_index + 18, sigSL,  color=color.new(#FF5252, 20), style=line.style_dashed, width=1)
+    line.new(bar_index, sigTP1, bar_index + 18, sigTP1, color=color.new(#26C6DA, 35), style=line.style_dotted, width=1)
+    line.new(bar_index, sigTP2, bar_index + 18, sigTP2, color=color.new(#26C6DA, 10), width=2)
+    alert('{"signal":"' + (isBuySetup ? "AMBUSH_BUY" : "AMBUSH_SELL") + '","ticker":"' + syminfo.ticker +
+          '","score":' + str.tostring(math.round(trapScore)) + ',"entry":' + str.tostring(sigEntry, format.mintick) +
+          ',"sl":' + str.tostring(sigSL, format.mintick) + ',"tp1":' + str.tostring(sigTP1, format.mintick) +
+          ',"tp2":' + str.tostring(sigTP2, format.mintick) + ',"qty":' + str.tostring(sigQty) + '}',
+          alert.freq_once_per_bar_close)
+
+color barCol = buySignal ? colBuy : sellSignal ? colSell : na
+barcolor(barCol, title="Vela de emboscada")
+
+// Marca discreta del sondeo en curso: la emboscada montándose.
+plotshape(probeDir == 1 and not trapFired, title="Sondeo arriba", style=shape.triangledown,
+     location=location.abovebar, size=size.tiny, color=color.new(#FFA726, 45))
+plotshape(probeDir == -1 and not trapFired, title="Sondeo abajo", style=shape.triangleup,
+     location=location.belowbar, size=size.tiny, color=color.new(#FFA726, 45))
+
+bgcolor(useSession and inSess ? color.new(#FFD700, 96) : na, title="Sesión")
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+if showDash and barstate.islast
+    var table d = table.new(position.top_right, 2, 9, bgcolor=color.new(#0D1117, 6),
+              border_width=1, border_color=color.new(color.gray, 78))
+
+    string estado = probeDir == 0 ? (compressed ? "⏳ Comprimido — al acecho" : "· Rango ancho, sin setup") :
+              probeDir == 1 ? "🪤 SONDEO ARRIBA — alcistas expuestos" : "🪤 SONDEO ABAJO — bajistas expuestos"
+    color  cEst   = probeDir == 0 ? (compressed ? #FFD700 : color.gray) : #FFA726
+
+    table.cell(d, 0, 0, "AMBUSH", text_color=#FFD700, bgcolor=#161B22, text_size=size.small)
+    table.cell(d, 1, 0, syminfo.ticker + " " + timeframe.period, text_color=color.white, bgcolor=#161B22, text_size=size.small)
+
+    table.cell(d, 0, 1, "Estado", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 1, estado, text_color=cEst, text_size=size.tiny)
+
+    table.cell(d, 0, 2, "SCORE", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 2, probeDir == 0 ? "—" : str.tostring(math.round(trapScore)) + " / 100" + (trapScore >= minScore ? "  ✓" : ""),
+               text_color=probeDir == 0 ? color.gray : trapScore >= minScore ? #39FF14 : color.new(color.white, 25), text_size=size.tiny)
+
+    table.cell(d, 0, 3, "· Volumen atrapado", text_color=color.new(color.gray, 25), text_size=size.tiny)
+    table.cell(d, 1, 3, probeDir == 0 ? "—" : str.tostring(scVol, "#.#") + "/30" + (hasVol ? "" : "  (sin vol.)"),
+               text_color=color.new(color.white, 35), text_size=size.tiny)
+
+    table.cell(d, 0, 4, "· Compresión", text_color=color.new(color.gray, 25), text_size=size.tiny)
+    table.cell(d, 1, 4, probeDir == 0 ? "—" : str.tostring(scComp, "#.#") + "/20", text_color=color.new(color.white, 35), text_size=size.tiny)
+
+    table.cell(d, 0, 5, "· Toques + velocidad", text_color=color.new(color.gray, 25), text_size=size.tiny)
+    table.cell(d, 1, 5, probeDir == 0 ? "—" : str.tostring(scTouch, "#.#") + "/15  ·  " + str.tostring(scSpeed, "#.#") + "/15",
+               text_color=color.new(color.white, 35), text_size=size.tiny)
+
+    table.cell(d, 0, 6, "Sesgo HTF (" + (useHTF ? htfUse : "off") + ")", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 6, not useHTF ? "—" : htfBias == 1 ? "ALCISTA 🟢" : htfBias == -1 ? "BAJISTA 🔴" : "NEUTRO ⚪",
+               text_color=htfBias == 1 ? #00E676 : htfBias == -1 ? #FF5252 : color.gray, text_size=size.tiny)
+
+    table.cell(d, 0, 7, "Sesión", text_color=color.gray, text_size=size.tiny)
+    table.cell(d, 1, 7, not useSession ? "sin filtro" : inSess ? "ACTIVA 🟢" : "fuera ⚪",
+               text_color=inSess ? #00E676 : color.gray, text_size=size.tiny)
+
+    table.cell(d, 0, 8, "Acierto real (n=" + str.tostring(statTotal) + ")", text_color=color.gray, text_size=size.tiny)
+    string stxt = not showStats ? "desactivado" : statTotal < 5 ? "muestra insuficiente" :
+                  "TP1 " + str.tostring(hitTP1, "#") + "%  ·  TP2 " + str.tostring(hitTP2, "#") + "%"
+    table.cell(d, 1, 8, stxt,
+               text_color=statTotal < 5 ? color.gray : hitTP1 >= 55 ? #39FF14 : hitTP1 >= 45 ? #FFD700 : #FF5252,
+               text_size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ ALERTAS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+alertcondition(buySignal,  title="🟢 AMBUSH BUY",  message="{{ticker}} {{interval}} · AMBUSH BUY — subasta bajista fallida @ {{close}}")
+alertcondition(sellSignal, title="🔴 AMBUSH SELL", message="{{ticker}} {{interval}} · AMBUSH SELL — subasta alcista fallida @ {{close}}")
+alertcondition(probeDir != 0 and probeDir[1] == 0, title="🪤 Sondeo iniciado", message="{{ticker}} {{interval}} · Sondeo fuera del rango — emboscada montándose")
