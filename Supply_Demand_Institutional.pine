@@ -1,8 +1,31 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v4.7
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v4.8
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v4.8 — CHoCH, Y EL PIVOTE ROTO DEJA DE REGALAR ESTRUCTURA
+//   · EL NIVEL ROTO NO SE CONSUMÍA. `swHi`/`swLo` guardaban el último pivote confirmado y no se tocaban
+//     nunca más: una vez que el precio cerraba por encima de un máximo, ese mismo máximo seguía
+//     concediendo BOS a todo impulso posterior hasta que se confirmara un pivote nuevo —y eso tarda
+//     `swingLen` velas—. Los 15 puntos de estructura, el bloque más caro del score después de nada, se
+//     cobraban varias veces contra una rotura que ya había ocurrido. `f_bias` sí consumía su nivel desde
+//     v3.9; la detección no, y nadie lo había cruzado. Ahora un CIERRE más allá gasta el pivote. Por
+//     cierre y no por mecha, igual que en todo el resto del indicador: la mecha que atraviesa y vuelve
+//     es un barrido de liquidez, y de hecho el barrido se mide con el mismo criterio de nivel vivo —no
+//     se puede barrer liquidez que un cierre anterior ya se llevó—.
+//     Esto BAJA la frecuencia de BOS y de LIQ. Es lo que se pretende: el atributo vuelve a significar
+//     algo. Mira la columna Frec. antes y después.
+//   · BOS Y CHoCH PUNTUABAN IGUAL. El indicador solo preguntaba "¿superó el último swing?", que es media
+//     pregunta. En SMC romper en la dirección que el mercado ya llevaba (BOS) es continuación, y romper
+//     en contra (CHoCH) es donde cambian las manos: son los dos sucesos que el método distingue, y aquí
+//     valían lo mismo. `ztype` tampoco lo cubría — clasifica por el tramo de LLEGADA a la base, no por
+//     estructura. Ahora la detección mantiene su propia dirección estructural y marca el CHoCH, con el
+//     cuidado de recuperar la dirección PREVIA al impulso: sin eso, un CHoCH se clasificaría como
+//     continuación de la tendencia que él mismo acaba de crear.
+//     El CHoCH entra en la tabla como corte propio y, de momento, NO toca el score: el reparto de los 15
+//     puntos es configurable y viene en 0. Es la disciplina de la casa desde v3.0 —nada pesa antes de
+//     separarse en los datos— y vale también cuando la doctrina está de tu parte.
 //
 // v4.7 — EL BLOQUE SE VEÍA UNA VELA TARDE, Y NO HACÍA NINGUNA FALTA
 //   En 1 minuto una vela de retraso es la diferencia entre entrar en el proximal y entrar perseguiendo.
@@ -339,7 +362,9 @@
 // ODDS ENHANCERS (Sam Seiden) + HUELLA SMC · escala 0-100
 //   1. IMPULSO (20)        desplazamiento 8 + impulso/altura 8 + vela de momentum 4
 //   2. HUELLA (20)         FVG dejado por el impulso 12 + volumen relativo 8
-//   3. ESTRUCTURA (15)     el impulso rompió el último swing: el bloque CAUSÓ el cambio
+//   3. ESTRUCTURA (15)     el impulso rompió el último swing VIVO: el bloque CAUSÓ el cambio.
+//                          [v4.8] BOS de continuación frente a CHoCH (rotura contra la dirección
+//                          vigente); el reparto entre los dos es configurable y arranca en 0.
 //   4. BASE (10)           1 vela 10 · 2 velas 7 · Order Block 6 · 3+ velas 4
 //   5. FRESCURA (15)       primera visita 15 · segunda 5 · después 0
 //   6. LIQUIDEZ (5)        la base barrió el último pivote antes de girar
@@ -371,7 +396,7 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v4.7", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v4.8", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -391,6 +416,7 @@ type Zone
     float  rvol                 // volumen del impulso / volumen medio
     bool   fvg
     bool   bos
+    bool   choch                // [v4.8] la rotura fue CONTRA la estructura vigente: cambio de manos
     int    ztype                // 1 reversión · -1 continuación · 0 neutro
     bool   sweep
     int    baseN                // velas de la base
@@ -468,6 +494,7 @@ maxZonesMem    = input.int(60, "Bloques en memoria", minval=20, maxval=150, grou
 footprint  = input.string("FVG o BOS", "Huella institucional exigida", options=["Ninguna", "FVG o BOS", "FVG y BOS"], group=gQl, tooltip="Sin huella el bloque ni siquiera se registra: un impulso que no dejó desequilibrio ni rompió estructura rara vez tiene órdenes institucionales detrás.")
 gradeAp    = input.int(62, "Grado A+ a partir de", minval=40, maxval=100, inline="gr", group=gQl, tooltip="[v4.2] Estaban fijos en 80/70. Al endurecer FVG y momentum en v3.9 la mayoría de bloques perdió ~16 puntos y dejaron de existir los A+: una escala en la que nadie llega arriba no clasifica nada. Ajústalos a tu distribución — mira la columna Frec. de los tres grados en la tabla y muévelos hasta que repartan.")
 gradeA     = input.int(50, "A", minval=30, maxval=100, inline="gr", group=gQl)
+chochEdge  = input.float(0.0, "Estructura: puntos que el BOS de continuación cede al CHoCH", minval=0.0, maxval=10.0, step=0.5, group=gQl, tooltip="[v4.8] Los 15 puntos de estructura se repartían por igual entre romper en la dirección que ya llevaba el mercado (BOS) y romper en contra (CHoCH), que en SMC son cosas distintas: uno continúa lo que ya pasaba, el otro es donde cambian las manos.\n\nCon N aquí, el CHoCH conserva los 15 y la continuación se queda en 15−N. La escala sigue siendo 0-100, no se infla.\n\nPOR DEFECTO 0, o sea sin efecto, y es deliberado: la disciplina de este indicador desde v3.0 es que nada entra en el score antes de separarse en la tabla. Mira la fila 'con CHoCH' contra 'con BOS' —frecuencia y esperanza, en las DOS mitades y en los dos activos— y solo entonces dale peso. Que la doctrina diga que el CHoCH vale más no es un dato.")
 minScore   = input.int(55, "Score mínimo para alertar", minval=0, maxval=100, group=gQl, tooltip="Solo afecta a la alerta de bloque nuevo. El dibujo tiene su propio umbral en ⑥ Visual.")
 liveReg    = input.bool(true, "Publicar el bloque al instante (sin esperar al cierre de otra vela)", group=gQl, tooltip="[v4.7] EN 1 MINUTO ESTO SON 60 SEGUNDOS DE ENTRADA. Hasta v4.6 el bloque se registraba con barstate.isconfirmed, o sea al CERRAR la vela en la que se detecta — una vela entera después de que el impulso hubiera terminado.\n\nNO REPINTA, y la razón es concreta: f_detect no lee ni un solo precio de la vela en curso. Trabaja entera con [1] o anterior (esa es justamente la condición que permite pedir los marcos superiores con lookahead_on), así que las coordenadas del bloque —t0, proximal, distal— salen de velas ya cerradas y están determinadas desde el primer tick. Esperar al cierre no añadía certeza: escondía un minuto un nivel que ya no podía cambiar de sitio.\n\nCon esto activado el bloque aparece en el instante en que cierra la última vela del impulso, que es el mínimo teórico. La alerta SD_BLOCK acompaña al dibujo en vez de llegar una vela después.\n\nNo afecta a toques, mitigación, roturas ni a la tabla de verificación: eso depende del máximo y del mínimo de la vela en curso, que todavía se están formando, y sigue decidiéndose solo en vela cerrada. Desactívalo si prefieres el comportamiento de v4.6.")
 maxAgeBars = input.int(300, "Edad máxima (velas de su marco)", minval=20, maxval=2000, group=gQl, tooltip="[v4.6] Se cuenta en VELAS, no en tiempo de reloj. Hasta v4.5 la edad restaba milisegundos, así que el fin de semana y los festivos consumían vida sin que pasara una sola vela: en futuros, un bloque del viernes por la tarde llegaba al lunes con dos días encima y los de puente nacían caducados.")
@@ -601,6 +628,14 @@ f_detect() =>
     var float swLo       = na
     var int   swHiBar    = na
     var int   swLoBar    = na
+    // [v4.8] CONSUMO DEL NIVEL Y ESTADO ESTRUCTURAL. `swHiBrk`/`swLoBrk` guardan la vela en la que un
+    // CIERRE se llevó ese pivote; `na` significa que sigue vivo. No se borra el nivel al romperlo porque
+    // la detección necesita distinguir "lo rompió ESTE impulso" de "ya estaba roto antes".
+    var int   swHiBrk    = na
+    var int   swLoBrk    = na
+    var int   structDir  = 0    // 1 alcista · -1 bajista · 0 sin estructura definida todavía
+    var int   structPrev = 0    // la dirección ANTERIOR al último giro
+    var int   structFlip = na   // vela del último giro, para recuperar la dirección previa al impulso
     var int   lastDemBar = -100000
     var int   lastSupBar = -100000
 
@@ -613,7 +648,9 @@ f_detect() =>
     float evRatio = na
     float evRvol  = na
     bool  evFvg   = false
-    bool  evBos   = false
+    // [v4.8] Tres estados en vez de dos, para no ampliar la tupla del request.security:
+    //   0 el impulso no rompió estructura · 1 BOS de continuación · 2 CHoCH (rotura a contracorriente)
+    int   evBos   = 0
     int   evType  = 0
     bool  evSweep = false
     int   evBaseN = 0
@@ -720,8 +757,24 @@ f_detect() =>
                                 if gap > 0 and gap >= a * fvgMinAtr
                                     fvg := true
                                     break
-                        // BOS: el impulso cerró más allá del último swing confirmado
-                        bool bos = isDem ? (not na(swHi) and maxC > swHi) : (not na(swLo) and minC < swLo)
+                        // ── ESTRUCTURA: BOS vs CHoCH  [v4.8] ───────────────────────────────────────
+                        // Un pivote que un CIERRE ya se llevó está GASTADO: los stops que lo defendían
+                        // se ejecutaron entonces, y volver a superarlo no rompe nada. Hasta v4.7 el nivel
+                        // no se consumía nunca, así que varios impulsos seguidos cobraban los 15 puntos
+                        // de estructura contra el mismo máximo ya roto. Cuenta si seguía vivo cuando
+                        // arrancó el impulso — o si fue este mismo impulso el que lo rompió.
+                        int  legStart = bar_index - legN
+                        bool hiLive   = not na(swHi) and (na(swHiBrk) or swHiBrk >= legStart)
+                        bool loLive   = not na(swLo) and (na(swLoBrk) or swLoBrk >= legStart)
+                        bool bos      = isDem ? (hiLive and maxC > swHi) : (loLive and minC < swLo)
+                        // CHoCH: la rotura va CONTRA la dirección estructural que regía ANTES del impulso
+                        // —rompió al alza estando bajista, o a la baja estando alcista—. Es la diferencia
+                        // entre un nivel que continúa lo que ya pasaba y uno donde cambian las manos, y
+                        // hasta v4.7 los dos puntuaban exactamente igual. `dirPre` recupera la dirección
+                        // previa cuando fue este impulso el que la giró: si no, un CHoCH se clasificaría
+                        // como continuación de la dirección que él mismo acaba de crear.
+                        int  dirPre   = not na(structFlip) and structFlip >= legStart ? structPrev : structDir
+                        bool choch    = bos and (isDem ? dirPre == -1 : dirPre == 1)
                         // Barrido de liquidez contra el último PIVOTE confirmado: ahí es donde se
                         // acumulan los stops. Un mínimo en mitad de un impulso no tiene nada que barrer.
                         // [v4.1] Se mide con el MISMO extremo que define el distal —base más la primera vela
@@ -731,9 +784,14 @@ f_detect() =>
                         float swpHi = math.max(wHi, high[bNear - 1])
                         bool sweep = false
                         if sweepMode == "Pivote (estructura)"
+                            // [v4.8] Mismo criterio de nivel vivo: no se puede barrer liquidez que un
+                            // cierre anterior ya se llevó. Se mide contra el arranque de la BASE, que es
+                            // quien hace el barrido, no contra el del impulso.
+                            int   baseStart = bar_index - bFar
                             float lvl  = isDem ? swLo : swHi
                             int   lvlB = isDem ? swLoBar : swHiBar
-                            sweep := not na(lvl) and not na(lvlB) and (bar_index - lvlB) <= sweepLookback * 2 and (isDem ? swpLo < lvl : swpHi > lvl)
+                            int   lvlK = isDem ? swLoBrk : swHiBrk
+                            sweep := not na(lvl) and not na(lvlB) and (na(lvlK) or lvlK >= baseStart) and (bar_index - lvlB) <= sweepLookback * 2 and (isDem ? swpLo < lvl : swpHi > lvl)
                         else
                             float prior = isDem ? low[bFar + 1] : high[bFar + 1]
                             for k = bFar + 2 to bFar + sweepLookback
@@ -752,7 +810,7 @@ f_detect() =>
                         evRatio := ratio
                         evRvol  := not na(av) and av > 0 ? volSum / (av * legN) : na
                         evFvg   := fvg
-                        evBos   := bos
+                        evBos   := bos ? (choch ? 2 : 1) : 0
                         evType  := zt
                         evSweep := sweep
                         evBaseN := bFar - bNear + 1
@@ -767,12 +825,31 @@ f_detect() =>
                             lastSupBar := bar_index
 
     // Los swings se actualizan DESPUÉS: BOS y barrido se miden contra la estructura previa al impulso.
+    // [v4.8] Primero el CONSUMO por cierre —que además fija la dirección estructural— y luego el rearme
+    // con el pivote nuevo. Por CIERRE y no por mecha, igual que f_bias y que la invalidación del bloque:
+    // una mecha que atraviesa y vuelve es un barrido de liquidez, no una rotura de estructura. Un pivote
+    // recién confirmado nace vivo por construcción: para serlo, las swingLen velas siguientes no lo
+    // superaron, así que ningún cierre puede haberlo roto ya.
+    if not na(swHi) and na(swHiBrk) and close[1] > swHi
+        swHiBrk := bar_index - 1
+        if structDir != 1
+            structPrev := structDir
+            structFlip := bar_index - 1
+            structDir  := 1
+    if not na(swLo) and na(swLoBrk) and close[1] < swLo
+        swLoBrk := bar_index - 1
+        if structDir != -1
+            structPrev := structDir
+            structFlip := bar_index - 1
+            structDir  := -1
     if not na(ph)
         swHi    := ph
         swHiBar := bar_index - swingLen
+        swHiBrk := na
     if not na(pl)
         swLo    := pl
         swLoBar := bar_index - swingLen
+        swLoBrk := na
     [evNew, evDem, evTop, evBot, evT0, evDisp, evRatio, evRvol, evFvg, evBos, evType, evSweep, evBaseN, evLegN, evMom, evTight]
 
 [e1n, e1d, e1t, e1b, e1t0, e1ds, e1r, e1v, e1f, e1bo, e1y, e1s, e1bn, e1ln, e1m, e1tg] = request.security(syminfo.tickerid, tf1, f_detect(), lookahead = barmerge.lookahead_on)
@@ -873,8 +950,9 @@ f_score(Zone z, int prior) =>
     // 2. Huella 20
     float sFvg   = z.fvg ? 12.0 : 0.0
     float sVol   = na(z.rvol) ? 4.0 : math.max(0.0, math.min(8.0, (z.rvol - 0.9) / 0.6 * 8.0))
-    // 3. Estructura 15
-    float sBos   = z.bos ? 15.0 : 0.0
+    // 3. Estructura 15 — [v4.8] repartidos entre continuación y cambio de carácter. Con chochEdge=0
+    //    (por defecto) los dos cobran 15 y el score es idéntico al de v4.7.
+    float sBos   = z.bos ? (z.choch ? 15.0 : 15.0 - chochEdge) : 0.0
     // 4. Base 10 — 1 vela de compresión 10 · 2 velas 7 · Order Block 6 · 3+ velas 4
     float sBase  = not z.baseTight ? 6.0 : z.baseN <= 1 ? 10.0 : z.baseN == 2 ? 7.0 : 4.0
     // 5. Frescura 15
@@ -900,7 +978,7 @@ f_grade(float s) =>
     s >= gradeAp ? "A+" : s >= gradeA ? "A" : "B"
 
 f_tags(Zone z) =>
-    (z.fvg ? " FVG" : "") + (z.bos ? " BOS" : "") + (z.sweep ? " LIQ" : "") + (z.momOut ? " MOM" : "") + (not z.baseTight ? " OB" : "") + (z.isBreaker ? " BRK" : "")
+    (z.fvg ? " FVG" : "") + (z.choch ? " CHoCH" : z.bos ? " BOS" : "") + (z.sweep ? " LIQ" : "") + (z.momOut ? " MOM" : "") + (not z.baseTight ? " OB" : "") + (z.isBreaker ? " BRK" : "")
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ ALTA DE BLOQUES
@@ -909,9 +987,12 @@ f_tags(Zone z) =>
 // guid en una `var` propia de cada llamada. Devuelve el resultado para el embudo del panel:
 //   0 sin evento · 1 rechazado por huella · 2 descartado por duplicado · 3 registrado
 
-f_addZone(bool use, bool ev, bool isDem, float top, float bot, int t0, float disp, float ratio, float rvol, bool fvg, bool bos, int zt, bool sweep, int baseN, int legN, bool momOut, bool tight, int tfIdx, string tfStr) =>
+f_addZone(bool use, bool ev, bool isDem, float top, float bot, int t0, float disp, float ratio, float rvol, bool fvg, int bosKind, int zt, bool sweep, int baseN, int legN, bool momOut, bool tight, int tfIdx, string tfStr) =>
     var int lastGuid = na
     int res = 0
+    // [v4.8] `bosKind` llega codificado desde f_detect: 0 sin rotura · 1 continuación · 2 CHoCH.
+    bool bos   = bosKind > 0
+    bool choch = bosKind == 2
     // [v4.7] El bloque se publica en cuanto el evento existe, sin esperar al cierre de la vela. Todo lo
     // que lo define viene de velas cerradas (f_detect no lee la vela en curso), así que el nivel ya no
     // puede moverse: lo que Pine confirme al cierre será idéntico a lo que se pintó en el primer tick.
@@ -922,7 +1003,7 @@ f_addZone(bool use, bool ev, bool isDem, float top, float bot, int t0, float dis
             bool fpOK = footprint == "Ninguna" ? true : footprint == "FVG o BOS" ? (fvg or bos) : (fvg and bos)
             res := 1
             if fpOK
-                Zone z = Zone.new(top = top, bot = bot, isDem = isDem, t0 = t0, guid = guid, tfSec = f_tfSec(tfStr), tfLbl = f_tfLabel(tfStr), disp = disp, ratio = ratio, rvol = rvol, fvg = fvg, bos = bos, ztype = zt, sweep = sweep, baseN = baseN, legN = legN, momOut = momOut, baseTight = tight, pd = f_pdPos((top + bot) / 2), tfIdx = tfIdx, bar0 = bar_index)
+                Zone z = Zone.new(top = top, bot = bot, isDem = isDem, t0 = t0, guid = guid, tfSec = f_tfSec(tfStr), tfLbl = f_tfLabel(tfStr), disp = disp, ratio = ratio, rvol = rvol, fvg = fvg, bos = bos, choch = choch, ztype = zt, sweep = sweep, baseN = baseN, legN = legN, momOut = momOut, baseTight = tight, pd = f_pdPos((top + bot) / 2), tfIdx = tfIdx, bar0 = bar_index)
                 // Si nace con el precio dentro no cuenta como toque: tiene que salir y volver.
                 z.wasInside := high >= bot and low <= top
                 // El bloque todavía no está en el array, así que su confluencia se calcula aquí; los demás
@@ -952,7 +1033,7 @@ f_addZone(bool use, bool ev, bool isDem, float top, float bot, int t0, float dis
                     if newSc >= minScore
                         // [v4.7] La alerta sale con el dibujo, no una vela después. `freq` exige const, así
                         // que son dos llamadas en vez de un ternario.
-                        string msg = '{"event":"SD_BLOCK","side":"' + (isDem ? "LONG" : "SHORT") + '","ticker":"' + syminfo.ticker + '","tf":"' + z.tfLbl + '","type":"' + f_typeTxt(z) + '","proximal":' + str.tostring(isDem ? top : bot, format.mintick) + ',"distal":' + str.tostring(isDem ? bot : top, format.mintick) + ',"score":' + str.tostring(math.round(newSc)) + ',"grade":"' + f_grade(newSc) + '"}'
+                        string msg = '{"event":"SD_BLOCK","side":"' + (isDem ? "LONG" : "SHORT") + '","ticker":"' + syminfo.ticker + '","tf":"' + z.tfLbl + '","type":"' + f_typeTxt(z) + '","proximal":' + str.tostring(isDem ? top : bot, format.mintick) + ',"distal":' + str.tostring(isDem ? bot : top, format.mintick) + ',"score":' + str.tostring(math.round(newSc)) + ',"grade":"' + f_grade(newSc) + '","structure":"' + (choch ? "CHOCH" : bos ? "BOS" : "none") + '"}'
                         if liveReg
                             alert(msg, alert.freq_once_per_bar)
                         else
@@ -1030,14 +1111,14 @@ var float evXSum    = 0.0 // suma de SUS resultados reales en R (puede ser negat
 // [v3.9] Tres cortes nuevos de CONTEXTO —sesión, sesgo del marco superior y descuento/premium— porque
 // son las variables que quedaron fuera en v3.0 y nunca se volvieron a medir. No tocan el score: entran
 // aquí, que es donde se decide con datos si aportan algo.
-var array<int>   bN = array.new<int>(19, 0)    // operaciones del corte
-var array<int>   b1 = array.new<int>(19, 0)    // ... que llegaron al objetivo
-var array<int>   b2 = array.new<int>(19, 0)    // ... que llegaron al doble
-var array<float> bS = array.new<float>(19, 0.0) // suma de MFE
-var array<int>   bT = array.new<int>(19, 0)    // [v3.4] ... cerradas por ventana agotada
-var array<float> bC = array.new<float>(19, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
-var array<int>   bM = array.new<int>(19, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
-var array<float> bX = array.new<float>(19, 0.0) // [v4.6] suma de SUS resultados reales en R
+var array<int>   bN = array.new<int>(20, 0)    // operaciones del corte
+var array<int>   b1 = array.new<int>(20, 0)    // ... que llegaron al objetivo
+var array<int>   b2 = array.new<int>(20, 0)    // ... que llegaron al doble
+var array<float> bS = array.new<float>(20, 0.0) // suma de MFE
+var array<int>   bT = array.new<int>(20, 0)    // [v3.4] ... cerradas por ventana agotada
+var array<float> bC = array.new<float>(20, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
+var array<int>   bM = array.new<int>(20, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
+var array<float> bX = array.new<float>(20, 0.0) // [v4.6] suma de SUS resultados reales en R
 var float        evCSum = 0.0
 
 // [v4.6] FRONTERA DE LAS DOS MITADES, CONGELADA EN LA PRIMERA VELA. `last_bar_index / 2` se reevaluaba en
@@ -1210,8 +1291,9 @@ if barstate.isconfirmed and zones.size() > 0
                     evXSum += xr
                 bool early = z.evalBar < splitBar
                 bool pdFav = na(z.pd) ? false : (z.isDem ? z.pd <= 0.5 : z.pd >= 0.5)
-                for k = 0 to 18
-                    bool has = k == 0 ? z.scoreAt >= gradeAp : k == 1 ? (z.scoreAt >= gradeA and z.scoreAt < gradeAp) : k == 2 ? z.scoreAt < gradeA : k == 3 ? z.fvg : k == 4 ? z.bos : k == 5 ? z.sweep : k == 6 ? z.htfAt : k == 7 ? (z.baseTight and z.baseN <= 1) : k == 8 ? z.momOut : k == 9 ? z.rthAt : k == 10 ? z.biasAt == 1 : k == 11 ? pdFav : k == 12 ? z.rrAt : k == 13 ? z.softAt : k == 14 ? z.tfIdx == 0 : k == 15 ? z.tfIdx == 1 : k == 16 ? z.tfIdx == 2 : k == 17 ? early : not early
+                for k = 0 to 19
+                    // [v4.8] "con CHoCH" entra en k==5 y desplaza un puesto a todo lo que iba detrás.
+                    bool has = k == 0 ? z.scoreAt >= gradeAp : k == 1 ? (z.scoreAt >= gradeA and z.scoreAt < gradeAp) : k == 2 ? z.scoreAt < gradeA : k == 3 ? z.fvg : k == 4 ? z.bos : k == 5 ? z.choch : k == 6 ? z.sweep : k == 7 ? z.htfAt : k == 8 ? (z.baseTight and z.baseN <= 1) : k == 9 ? z.momOut : k == 10 ? z.rthAt : k == 11 ? z.biasAt == 1 : k == 12 ? pdFav : k == 13 ? z.rrAt : k == 14 ? z.softAt : k == 15 ? z.tfIdx == 0 : k == 16 ? z.tfIdx == 1 : k == 17 ? z.tfIdx == 2 : k == 18 ? early : not early
                     if has
                         bN.set(k, bN.get(k) + 1)
                         bS.set(k, bS.get(k) + m)
@@ -1233,7 +1315,7 @@ if barstate.isconfirmed and zones.size() > 0
                 brkSeq += 1
                 // [v3.9] Faltaba tfIdx: los breakers nacían con marco `na` y se caían de los tres cortes
                 // por marco de la tabla — se medían en el total pero en ninguna de sus filas.
-                Zone b = Zone.new(top = z.top, bot = z.bot, isDem = not z.isDem, t0 = time, guid = -brkSeq, tfSec = z.tfSec, tfLbl = z.tfLbl, disp = math.abs(close - open) / math.max(atrC, syminfo.mintick), ratio = legRatioMin, rvol = na, fvg = false, bos = true, ztype = 1, sweep = false, baseN = 1, legN = 1, momOut = false, baseTight = true, pd = f_pdPos((z.top + z.bot) / 2), tfIdx = z.tfIdx, bar0 = bar_index)
+                Zone b = Zone.new(top = z.top, bot = z.bot, isDem = not z.isDem, t0 = time, guid = -brkSeq, tfSec = z.tfSec, tfLbl = z.tfLbl, disp = math.abs(close - open) / math.max(atrC, syminfo.mintick), ratio = legRatioMin, rvol = na, fvg = false, bos = true, choch = true, ztype = 1, sweep = false, baseN = 1, legN = 1, momOut = false, baseTight = true, pd = f_pdPos((z.top + z.bot) / 2), tfIdx = z.tfIdx, bar0 = bar_index)
                 b.isBreaker := true
                 b.wasInside := true
                 newBrk.push(b)
@@ -1405,7 +1487,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v4.7", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v4.8", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
@@ -1493,8 +1575,8 @@ f_evalTable() =>
     bool   full = evalMode == "Completo"
     string sT1  = str.tostring(reactTarget, "#.#") + "R"
     string sT2  = str.tostring(reactTarget * 2, "#.#") + "R"
-    var table ev = table.new(position.bottom_right, 9, 23, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "con LIQ", "con MTF", "base 1 vela", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
+    var table ev = table.new(position.bottom_right, 9, 24, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
+    array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "  · de ellos CHoCH", "con LIQ", "con MTF", "base 1 vela", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
 
     if full
         table.cell(ev, 0, 0, "Operación simulada", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
@@ -1507,23 +1589,23 @@ f_evalTable() =>
         table.cell(ev, 7, 0, "T/R",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 8, 0, "Esp.",   text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         f_evRow(ev, 1, "TODOS", evN, evHeld, evHeld2, evRSum, evTimeout, evCSum, evMkt, evXSum, evN, true)
-        for k = 0 to 18
+        for k = 0 to 19
             f_evRow(ev, k + 2, bNames.get(k), bN.get(k), b1.get(k), b2.get(k), bS.get(k), bT.get(k), bC.get(k), bM.get(k), bX.get(k), evN, false)
-        table.cell(ev, 0, 21, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
+        table.cell(ev, 0, 22, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 7
-            table.cell(ev, c, 21, "", text_size = size.tiny)
-        table.cell(ev, 8, 21, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(ev, 0, 22, "Esp. NETA · T/R = R media sacada de las cerradas por reloj · las dos MITADES deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
-        for c = 1 to 8
             table.cell(ev, c, 22, "", text_size = size.tiny)
+        table.cell(ev, 8, 22, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 0, 23, "Esp. NETA · T/R = R media sacada de las cerradas por reloj · las dos MITADES deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+        for c = 1 to 8
+            table.cell(ev, c, 23, "", text_size = size.tiny)
     else
         table.cell(ev, 0, 0, "Verificación", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
         table.cell(ev, 1, 0, "N",       text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 2, 0, "≥" + sT2, text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 3, 0, "Esp.",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         f_evMini(ev, 1, "TODOS",      evN,        evHeld2,    evCSum,     evMkt,      evXSum,     true)
-        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(17), b2.get(17), bC.get(17), bM.get(17), bX.get(17), false)
-        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(18), b2.get(18), bC.get(18), bM.get(18), bX.get(18), false)
+        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(18), b2.get(18), bC.get(18), bM.get(18), bX.get(18), false)
+        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(19), b2.get(19), bC.get(19), bM.get(19), bX.get(19), false)
         table.cell(ev, 0, 4, "las mitades deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 3
             table.cell(ev, c, 4, "", text_size = size.tiny)
