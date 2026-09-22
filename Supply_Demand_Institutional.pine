@@ -1,8 +1,31 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v4.6
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v4.7
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v4.7 — EL BLOQUE SE VEÍA UNA VELA TARDE, Y NO HACÍA NINGUNA FALTA
+//   En 1 minuto una vela de retraso es la diferencia entre entrar en el proximal y entrar perseguiendo.
+//   El bloque se registraba con `barstate.isconfirmed`, es decir, al CERRAR la vela en la que se detecta.
+//   Pero la detección no lee ni un solo precio de esa vela: `f_detect` trabaja entera con [1] o anterior
+//   —esa es justamente la garantía que permite pedir los marcos superiores con lookahead_on—, así que el
+//   bloque ya está COMPLETAMENTE DETERMINADO en el primer tick de esa vela. Esperar a su cierre no añadía
+//   ni una pizca de certeza: solo escondía un minuto un nivel que ya no podía cambiar.
+//
+//   Con "Publicar el bloque al instante" el bloque aparece en el momento exacto en que cierra la última
+//   vela del impulso, que es el mínimo teórico sin repintado. Ni antes —antes no existe— ni después.
+//   La alerta SD_BLOCK acompaña al dibujo (freq_once_per_bar en vez de once_per_bar_close).
+//
+//   POR QUÉ ESTO NO REPINTA, en concreto. El dibujo intravela es PROVISIONAL en el sentido de Pine: en
+//   cada tick el script revierte al estado cerrado y se reejecuta. Lo que se confirma al cierre de la vela
+//   es exactamente lo mismo que ya se había pintado, porque las coordenadas (t0, top, bot) salen de velas
+//   cerradas y no pueden moverse. Un nivel publicado así nunca cambia de sitio ni desaparece por haberse
+//   publicado pronto.
+//
+//   LO QUE SIGUE ESPERANDO AL CIERRE, y debe seguir esperando: toques, mitigación, roturas, breakers y
+//   toda la tabla de verificación. Eso sí depende del máximo y del mínimo de la vela en curso, que todavía
+//   se están formando. Publicar un toque intravela sería exactamente el repintado que este indicador
+//   lleva siete versiones evitando.
 //
 // v4.6 — SIETE DEFECTOS DE LA AUDITORÍA EXTERNA
 //   · EL "IMPULSO COMPLETO" NUNCA LO FUE. Desde v3.0 el comentario prometía medir el impulso entero
@@ -330,9 +353,25 @@
 //     esos datos. Cada marco devuelve el EVENTO del bloque nuevo (valores simples), no arrays de
 //     objetos: memoria mínima y sin ventana de historial basada en last_bar_index.
 //   · Toques, mitigación, roturas y estadísticas se deciden solo en vela cerrada.
+//
+// CUÁNDO APARECE EL BLOQUE  [v4.7]  —  con legBars=2, en un gráfico de 1 minuto
+//     T+0  cierra la BASE
+//     T+1  cierra la 1ª vela del impulso
+//     T+2  cierra la 2ª vela del impulso  →  el impulso está completo y el bloque, determinado
+//     T+3  f_detect lo ve (lee [1], o sea T+2) y el bloque SE PUBLICA en el primer tick de T+3
+//   El primer tick de T+3 es el mismo instante que el cierre de T+2, así que el bloque aparece en
+//   cuanto cierra la última vela del impulso: el mínimo posible sin adivinar el futuro. El desfase de
+//   [1] dentro de f_detect no cuesta tiempo de reloj — lo costaba esperar al CIERRE de T+3, que es lo
+//   que hacía v4.6 y ya no hace. Apagar "Publicar el bloque al instante" devuelve el retraso de una vela.
+//
+//   LA ESTRUCTURA SÍ TIENE UN COSTE, y no es repintado: BOS y LIQ se miden contra pivotes CONFIRMADOS,
+//   que necesitan `swingLen` velas por la derecha (5 por defecto). Un pivote formado hace menos de 5
+//   velas todavía no existe para el motor, así que un bloque puede nacer sin BOS y no obtenerlo nunca
+//   —el score se calcula con lo que había en su vela de nacimiento—. Bajar swingLen acelera eso a costa
+//   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v4.6", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v4.7", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -430,6 +469,7 @@ footprint  = input.string("FVG o BOS", "Huella institucional exigida", options=[
 gradeAp    = input.int(62, "Grado A+ a partir de", minval=40, maxval=100, inline="gr", group=gQl, tooltip="[v4.2] Estaban fijos en 80/70. Al endurecer FVG y momentum en v3.9 la mayoría de bloques perdió ~16 puntos y dejaron de existir los A+: una escala en la que nadie llega arriba no clasifica nada. Ajústalos a tu distribución — mira la columna Frec. de los tres grados en la tabla y muévelos hasta que repartan.")
 gradeA     = input.int(50, "A", minval=30, maxval=100, inline="gr", group=gQl)
 minScore   = input.int(55, "Score mínimo para alertar", minval=0, maxval=100, group=gQl, tooltip="Solo afecta a la alerta de bloque nuevo. El dibujo tiene su propio umbral en ⑥ Visual.")
+liveReg    = input.bool(true, "Publicar el bloque al instante (sin esperar al cierre de otra vela)", group=gQl, tooltip="[v4.7] EN 1 MINUTO ESTO SON 60 SEGUNDOS DE ENTRADA. Hasta v4.6 el bloque se registraba con barstate.isconfirmed, o sea al CERRAR la vela en la que se detecta — una vela entera después de que el impulso hubiera terminado.\n\nNO REPINTA, y la razón es concreta: f_detect no lee ni un solo precio de la vela en curso. Trabaja entera con [1] o anterior (esa es justamente la condición que permite pedir los marcos superiores con lookahead_on), así que las coordenadas del bloque —t0, proximal, distal— salen de velas ya cerradas y están determinadas desde el primer tick. Esperar al cierre no añadía certeza: escondía un minuto un nivel que ya no podía cambiar de sitio.\n\nCon esto activado el bloque aparece en el instante en que cierra la última vela del impulso, que es el mínimo teórico. La alerta SD_BLOCK acompaña al dibujo en vez de llegar una vela después.\n\nNo afecta a toques, mitigación, roturas ni a la tabla de verificación: eso depende del máximo y del mínimo de la vela en curso, que todavía se están formando, y sigue decidiéndose solo en vela cerrada. Desactívalo si prefieres el comportamiento de v4.6.")
 maxAgeBars = input.int(300, "Edad máxima (velas de su marco)", minval=20, maxval=2000, group=gQl, tooltip="[v4.6] Se cuenta en VELAS, no en tiempo de reloj. Hasta v4.5 la edad restaba milisegundos, así que el fin de semana y los festivos consumían vida sin que pasara una sola vela: en futuros, un bloque del viernes por la tarde llegaba al lunes con dos días encima y los de puente nacían caducados.")
 invalidBy  = input.string("Cierre", "Invalidación (rotura del distal)", options=["Cierre", "Mecha"], group=gQl, tooltip="Cierre: una mecha que atraviesa el distal y vuelve dentro es un barrido de liquidez, no una invalidación.")
 mitigPct   = input.int(100, "Mitigado al penetrar el (%)", minval=30, maxval=100, group=gQl, tooltip="[v3.0] Un bloque consumido al 80% casi no tiene órdenes vivas aunque el distal siga intacto. Por debajo de 100 el bloque se retira al alcanzar ese % de penetración. 100 = solo muere por rotura del distal (comportamiento clásico).")
@@ -872,7 +912,10 @@ f_tags(Zone z) =>
 f_addZone(bool use, bool ev, bool isDem, float top, float bot, int t0, float disp, float ratio, float rvol, bool fvg, bool bos, int zt, bool sweep, int baseN, int legN, bool momOut, bool tight, int tfIdx, string tfStr) =>
     var int lastGuid = na
     int res = 0
-    if use and ev and barstate.isconfirmed and not na(t0) and not na(top) and not na(bot)
+    // [v4.7] El bloque se publica en cuanto el evento existe, sin esperar al cierre de la vela. Todo lo
+    // que lo define viene de velas cerradas (f_detect no lee la vela en curso), así que el nivel ya no
+    // puede moverse: lo que Pine confirme al cierre será idéntico a lo que se pintó en el primer tick.
+    if use and ev and (liveReg or barstate.isconfirmed) and not na(t0) and not na(top) and not na(bot)
         int guid = t0 * 8 + tfIdx * 2 + (isDem ? 0 : 1)
         if na(lastGuid) or guid != lastGuid
             lastGuid := guid
@@ -907,7 +950,13 @@ f_addZone(bool use, bool ev, bool isDem, float top, float bot, int t0, float dis
                     zones.push(z)
                     res := 3
                     if newSc >= minScore
-                        alert('{"event":"SD_BLOCK","side":"' + (isDem ? "LONG" : "SHORT") + '","ticker":"' + syminfo.ticker + '","tf":"' + z.tfLbl + '","type":"' + f_typeTxt(z) + '","proximal":' + str.tostring(isDem ? top : bot, format.mintick) + ',"distal":' + str.tostring(isDem ? bot : top, format.mintick) + ',"score":' + str.tostring(math.round(newSc)) + ',"grade":"' + f_grade(newSc) + '"}', alert.freq_once_per_bar_close)
+                        // [v4.7] La alerta sale con el dibujo, no una vela después. `freq` exige const, así
+                        // que son dos llamadas en vez de un ternario.
+                        string msg = '{"event":"SD_BLOCK","side":"' + (isDem ? "LONG" : "SHORT") + '","ticker":"' + syminfo.ticker + '","tf":"' + z.tfLbl + '","type":"' + f_typeTxt(z) + '","proximal":' + str.tostring(isDem ? top : bot, format.mintick) + ',"distal":' + str.tostring(isDem ? bot : top, format.mintick) + ',"score":' + str.tostring(math.round(newSc)) + ',"grade":"' + f_grade(newSc) + '"}'
+                        if liveReg
+                            alert(msg, alert.freq_once_per_bar)
+                        else
+                            alert(msg, alert.freq_once_per_bar_close)
                 else
                     res := 2
     res
@@ -1356,7 +1405,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v4.5", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v4.7", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
