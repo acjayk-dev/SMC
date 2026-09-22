@@ -1,0 +1,1632 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v4.6
+// Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v4.6 — SIETE DEFECTOS DE LA AUDITORÍA EXTERNA
+//   · EL "IMPULSO COMPLETO" NUNCA LO FUE. Desde v3.0 el comentario prometía medir el impulso entero
+//     hasta la base, pero la búsqueda de la base estaba acotada por `baseMaxBack` (4 velas), así que
+//     el impulso no podía pasar de legBars+3 velas: uno de seis velas no encontraba base y el bloque
+//     NO SE REGISTRABA. No es que se midiera corto — es que desaparecía. El desplazamiento fuerte y
+//     sostenido, justo el que construye los mejores niveles, era el que el motor no podía ver. Nuevo
+//     input "Impulso: velas máximas" que separa las dos cosas: cuánto puede durar el impulso y cuánto
+//     hacia atrás se busca la base.
+//   · LA ESPERANZA DABA POR PERDIDA 1R ENTERA LA OPERACIÓN CERRADA POR RELOJ. Si la ventana se agotaba
+//     sin tocar el stop, la fórmula la contaba como −1R completa. En la realidad sales a mercado y te
+//     llevas lo que haya, que suele estar entre el stop y el objetivo. Con la columna T/o marcando
+//     filas al 35-40%, ese error se comía media fila. Ahora esas operaciones se liquidan a su precio
+//     real de salida, positivo o negativo, y hay una columna T/R que dice cuánto se sacó de ellas.
+//   · LA EDAD SE MEDÍA CON EL RELOJ DE PARED. `f_young` restaba milisegundos, así que un fin de semana
+//     consumía dos días de vida sin que pasara una sola vela: los bloques del viernes por la tarde
+//     nacían medio muertos y los de festivo llegaban caducados al lunes. En futuros eso es todas las
+//     semanas. Ahora la edad se cuenta en VELAS del marco del bloque, igual que la ventana de la
+//     evaluación desde v3.4.
+//   · CON UNIDAD "ATR" LA CARRERA DEJABA DE SER SIMÉTRICA. El stop seguía puesto en el distal más el
+//     colchón mientras el objetivo se medía en ATR: dos distancias distintas, que es exactamente la
+//     asimetría que v3.2 corrigió para el otro modo. Ahora la unidad elegida FIJA EL STOP, así que
+//     objetivo y stop están a la misma distancia en los dos modos y el ~50% de referencia vale igual.
+//   · LA FRONTERA DE LAS DOS MITADES SE MOVÍA. `last_bar_index / 2` se reevaluaba en cada operación,
+//     así que en tiempo real la frontera avanza y las operaciones viejas quedaron clasificadas con un
+//     corte distinto del de las nuevas: las dos mitades dejaban de ser comparables, y son la defensa
+//     más importante de la tabla. Se congela en la primera vela y se muestra en el pie.
+//   · "UNA OPERACIÓN A LA VEZ" DEPENDÍA DEL ORDEN DEL ARRAY. El hueco se liberaba DENTRO del mismo
+//     bucle, así que un bloque que cerraba en esta vela dejaba entrar a otro de la misma vela, pero
+//     solo si estaba más adelante en el array. La muestra se elegía por orden de creación, no por lo
+//     que pasó en el mercado. Ahora el hueco se congela al empezar la vela: como mucho una apertura
+//     por vela, y quien cierra libera para la SIGUIENTE.
+//   · CONFLUENCIA MTF RECALCULADA EN BUCLE ANIDADO. `f_htfConf` recorre todos los bloques y se llamaba
+//     desde dentro de otros recorridos —panel, dibujo, cada toque—, O(n²) repetido en cada tick de la
+//     última vela con hasta 150 bloques en memoria. Ahora se calcula UNA vez por vela cerrada y se
+//     guarda en el bloque. De paso arregla una incoherencia: el panel la medía en vivo y el motor en
+//     vela cerrada, así que el score del panel y el de la tabla podían discrepar.
+//
+// v4.5 — DOS FALLOS QUE APARECIERON EN LA AUDITORÍA COMPLETA
+//   · TRANSPARENCIA POR ENCIMA DE 100 = ERROR EN EJECUCIÓN. `tr` se limitaba a 95 y DESPUÉS se le sumaban
+//     6 por bloque tocado: 101. Pine rechaza cualquier transparencia mayor que 100, así que con una
+//     opacidad alta el indicador no se veía raro — se caía. El clamp va ahora al final.
+//   · EL PANEL INFRAVALORABA EL RIESGO. La fila mostraba "R" como la altura de la caja, pero el riesgo
+//     real incluye el colchón más allá del distal, el mismo que usa la tabla de verificación. La cifra
+//     con la que dimensionabas la posición era MENOR que la que el indicador usa para medirse a sí mismo.
+//
+// v4.4 — TODOS LOS UMBRALES DE SCORE, BAJADOS A LA DISTRIBUCIÓN REAL
+//   En pantalla: "mejor 54". El mejor bloque VIVO de todo el gráfico puntuaba 54, y los umbrales seguían
+//   en 50 para dibujar, 65 para alertar y 75/62 para los grados. Endurecer el FVG a 0.25×ATR hizo lo que
+//   debía —dejar de repartirlo a todo el mundo— pero eso resta ~12 puntos a casi todos los bloques, y en
+//   v4.2 solo corregí los grados. Los otros dos se quedaron descolgados: el dibujo cortaba bloques
+//   válidos y la alerta no podía saltar nunca. Ahora dibujar 38, alertar 55, grados 62/50.
+//   No es ajustar para que salga bonito: es que una escala cuyo máximo observado queda por debajo del
+//   umbral más bajo no clasifica nada. Cuando tengas muestra, mira la frecuencia de los tres grados en
+//   la tabla y muévelos hasta que repartan la población.
+//
+// v4.3 — LAS CAJAS NO SE VEÍAN, Y EL FILTRO DE PROPORCIÓN SE ME FUE DE LA MANO
+//   · TRANSPARENCIA ATADA A UMBRALES MUERTOS. Las cajas se pintaban al 66/74/84% según el score cruzara
+//     80 o 70 — los mismos números que v3.9 dejó inalcanzables al endurecer FVG y momentum. Con casi
+//     todos los bloques por debajo de 70, todo se dibujaba al 84% (90% si estaba tocado): invisible
+//     sobre fondo oscuro. Ahora la transparencia sigue a los umbrales de grado configurables y parte de
+//     un valor que controlas tú en ⑥ Visual. Si no ves las cajas, bájalo.
+//   · LA PROPORCIÓN SE MEDÍA CONTRA LA CAJA, NO CONTRA LA BASE. En v4.1 la saqué del recorte —eso estaba
+//     bien— pero la dejé sobre `top - bot`, que incluye la mecha de la primera vela del impulso. Esa
+//     mecha se añade al distal para COLOCAR EL STOP, no porque el precio se consolidara ahí: medir el
+//     recorrido contra ella endureció el filtro mucho más de lo que pretendía y empezó a descartar
+//     bloques buenos. Seiden compara el recorrido con lo que costó irse, y eso es la BASE.
+//
+// v4.2 — DOS CALIBRACIONES QUE LA PRIMERA TANDA DESTAPÓ (MNQ 1m, n=41 · NO CONCLUYENTE)
+//   La muestra no vale como resultado —41 operaciones, y con solo el 37% de los toques en sesión regular
+//   es casi toda madrugada— pero sí enseñó dos defectos de calibración que se ven aunque falten datos:
+//   · "CON MARGEN" SALÍA AL 93% DE FRECUENCIA, el mismo vicio que el FVG en v3.1. La culpa era de cómo lo
+//     definí: cuando NO hay bloque contrario delante lo contaba como margen suficiente, y con pocos
+//     bloques vivos eso es casi siempre. Ahora el corte exige que HAYA muro y esté lejos, que es lo que
+//     de verdad distingue un nivel con recorrido de uno ahogado.
+//   · CERO BLOQUES A+ EN 41, y solo 6 grados A. Al endurecer FVG y momentum en v3.9 se le quitaron unos
+//     16 puntos a casi todos los bloques, pero los grados seguían clavados en 80/70 — el error de v2.6
+//     en espejo. Una escala en la que nadie alcanza el tramo alto no clasifica, decora. Los umbrales
+//     pasan a ser CONFIGURABLES (75/62 por defecto): mira la frecuencia de los tres grados y muévelos
+//     hasta que repartan la población.
+//
+// v4.1 — AUDITORÍA DE FIDELIDAD: CUATRO FALLOS DE LÓGICA Y DOS ENHANCERS QUE FALTABAN
+//   CUATRO COSAS QUE NO CUADRABAN CON LA TEORÍA
+//   · LA PROPORCIÓN SE MEDÍA SOBRE EL BLOQUE YA RECORTADO. El recorte por altura máxima es gestión de
+//     riesgo, no calidad, pero al reducir la altura inflaba el ratio impulso/altura: un bloque gordo se
+//     recortaba y luego pasaba el filtro que debía tumbarlo. Seiden mide la fuerza de la salida contra
+//     la zona que construyó el precio, no contra la que dibuja el indicador. Ahora se mide antes.
+//   · EL BARRIDO NO MIRABA EL MISMO EXTREMO QUE EL DISTAL. El distal incluye la mecha de la primera vela
+//     del impulso —la que suele hacer el stop-run justo antes de irse— pero el test de liquidez solo
+//     miraba las velas de la base, así que se perdía el caso más característico del concepto.
+//   · LA CONFLUENCIA MTF CONTABA BLOQUES MUERTOS: usaba `not broken` en vez de `f_live`, de modo que un
+//     bloque de marco superior caducado o ya mitigado seguía regalando puntos de confluencia.
+//   · EL COLCHÓN DEL STOP DE LA PRUEBA USABA EL ATR DEL GRÁFICO. En 15m, un bloque de 1H recibía un
+//     colchón de quince minutos: stop demasiado estrecho, y por eso las filas de marco superior salían
+//     artificialmente peor. Ahora escala con la raíz del tiempo, que es como escala la volatilidad.
+//
+//   DOS ODDS ENHANCERS DE SEIDEN QUE NUNCA HABÍAN ESTADO
+//   · MARGEN DE BENEFICIO: distancia del proximal al siguiente bloque contrario vivo, en R. En su método
+//     es de los criterios más importantes —un nivel perfecto con la zona contraria pegada no se opera—
+//     y el indicador no lo miraba desde que se quitó el motor de objetivos en v3.0.
+//   · CALIDAD DE LA LLEGADA: el precio que llega acelerando atraviesa; el retroceso controlado —velas que
+//     se encogen, la idea de Velez— respeta. Nuevo corte "llegada suave".
+//   Como todo desde v3.0, ninguno toca el score: entran como cortes medibles en la tabla.
+//
+// v4.0 — PRICE ACTION Y OLIVER VELEZ: PINTADO DE VELAS, AISLADO DEL MOTOR
+//   Ocho patrones parametrizables uno a uno —umbrales y colores propios— que pintan la vela y, si lo
+//   pides, la etiquetan: ELEPHANT, SHAVED, PIN/TAIL, 180, OUTSIDE, RBI/GBI, INSIDE y el agotamiento
+//   3-5-8 de Velez. Todo medido en ATR y en porcentaje del rango, nunca en puntos, así que valen igual
+//   en MNQ que en MES y en cualquier marco.
+//
+//   AISLADO A PROPÓSITO, y esto es lo importante. El módulo vive al final del archivo, calcula sus
+//   propios valores, lee los bloques solo para preguntar si el precio está dentro de alguno, y su única
+//   salida es barcolor() más una etiqueta. Nada de aquí entra en la detección, el score, el ciclo de
+//   vida ni la tabla: puedes encenderlo y apagarlo entero y las estadísticas no se mueven un decimal.
+//   Está al final precisamente para que sea imposible que se cuele hacia arriba.
+//
+//   Modo "Solo dentro de bloques": las velas alcistas pintan únicamente dentro de una demanda viva y las
+//   bajistas dentro de una oferta — la lectura de Velez, la vela de giro vale donde hay un nivel detrás.
+//   Sigue siendo un filtro de PINTADO: los bloques no se enteran de que estos patrones existen.
+//
+//   UNA VELA = UN PATRÓN, por prioridad de lo específico a lo genérico (Elephant → 180 → Outside →
+//   Pin → Shaved → RBI/GBI → Inside → 3-5-8). Si un patrón te tapa otro, apágalo.
+//
+// v3.9 — EL CONTEXTO QUE FALTABA, Y UN PANEL QUE CABE EN LA PANTALLA
+//   LAS DOS VARIABLES DE CONTEXTO AUSENTES. Desde v3.0 el indicador medía el bloque en el vacío. Faltaban
+//   las dos que más pueden cambiar la respuesta, y ninguna estaba:
+//   · SESIÓN. Todas las mediciones mezclaban sesión regular y nocturna. Un bloque tocado a las 3 de la
+//     madrugada, con una fracción del volumen, no es el mismo suceso que uno tocado a las 10 — y contaban
+//     igual. Nuevo corte "toque en RTH".
+//   · SESGO DEL MARCO SUPERIOR por rompimiento de estructura. Una demanda a favor de la dirección de 1H y
+//     otra en contra se estaban promediando juntas. Nuevo corte "a favor del sesgo".
+//   · Y el descuento/premium, que ya se calculaba pero solo alimentaba el score sin medirse nunca: corte
+//     "con descuento".
+//   Ninguna toca el score. Entran donde se decide con datos: la tabla. Si alguna separa de verdad —y lo
+//   hace en las DOS mitades y en los dos activos— será lo primero que este motor haya encontrado.
+//
+//   CALIBRACIÓN CON LOS DATOS DE LAS ÚLTIMAS TANDAS
+//   · FVG 0.10 → 0.25×ATR. Con 0.10 seguía apareciendo en el 76-85% de los bloques: una etiqueta que
+//     tiene casi todo el mundo no distingue nada.
+//   · Momentum 1.2 → 1.5×ATR, por lo mismo: estaba en el 73-78%.
+//   · Bloques dibujados 24 → 16. Con el dibujo por cercanía ya no hacen falta tantos y el gráfico
+//     respira; en las capturas los textos se pisaban unos a otros.
+//
+//   PANEL: el modo RESUMEN es ahora el de serie — cuatro filas con el veredicto y las dos mitades. El
+//   despliegue de diecisiete cortes ocupaba media pantalla y solo hace falta al investigar.
+//   Corregido de paso: los breakers nacían sin marco (tfIdx na) y se caían de los tres cortes por marco.
+//
+// v3.8 — REFINADO COMO HERRAMIENTA DE LECTURA
+//   Siete versiones midiendo han dejado una conclusión que conviene no disimular: el bloque está bien
+//   CONSTRUIDO y bien MEDIDO, y lo que la medición dice es que por sí solo no predice. Así que el
+//   indicador se refina como lo que sí es —un instrumento para leer dónde están los niveles y en qué
+//   estado— y no como un generador de señales disfrazado.
+//   · SE DIBUJAN LOS BLOQUES MÁS CERCANOS AL PRECIO, no los más recientes. El tope de dibujo se llenaba
+//     con los últimos nacidos, que suelen quedar lejos, y el nivel hacia el que el precio se dirige podía
+//     quedarse sin pintar. Es el cambio que más se nota en pantalla.
+//   · FRANJA DE MITIGACIÓN dibujada: la parte del bloque que el precio ya se comió. Estaba solo como
+//     "M62%" en el texto; pintada se ve de un vistazo cuánto queda vivo.
+//   · PANEL REORIENTADO a la pregunta real: dónde está el siguiente nivel a cada lado, a cuántos puntos
+//     y cuántos ATR, con su grado, y si el precio ya está DENTRO. El embudo de formación pasa a ser
+//     opcional: es diagnóstico, no operativa.
+//   · ALERTAS POR LADO Y CON CONTEXTO: demanda y oferta separadas, filtradas por score, y con un JSON
+//     (SD_TOUCH) que lleva nivel, distal, grado, número de toque y % mitigado. Una alerta que no dice
+//     cuál de los dieciséis bloques del gráfico se ha tocado no sirve para reaccionar.
+//
+// v3.7 — COSTES, Y EL STOP DEJA DE MOVERSE SOLO
+//   Con el contador arreglado, el modo "una operación a la vez" dio n=114 (MNQ) y n=119 (MES) en vez de
+//   11 y 4. Y el resultado apenas se movió: −0.18 → −0.24 y +0.28 → +0.21. Es decir, el solapamiento
+//   entre operaciones era del 17%, no del 90% que yo había supuesto: la muestra ya era casi independiente
+//   y mi hipótesis de la correlación estaba equivocada. Lo que sí se repitió, en los dos modos, es que
+//   MES falla la prueba de las mitades: −0.06 / +0.41 con el modo activo, −0.11 / +0.57 sin él.
+//
+//   · COSTES. Hasta aquí toda la esperanza era BRUTA, y eso favorece sistemáticamente al activo de R más
+//     pequeña. Un bloque de MES en 15m arriesga 2-3 puntos, así que 3 ticks de comisión + deslizamiento
+//     son el 6-10% de la R en CADA operación; en MNQ, con R de 20 puntos, rondan el 1%. El coste se
+//     calcula por operación (no como promedio global, porque depende del tamaño de su R) y la columna
+//     Esp. pasa a ser neta.
+//   · STOP CONGELADO AL ENTRAR. Se recalculaba cada vela con el ATR del momento, así que se movía solo
+//     durante la operación: en una expansión de volatilidad se alejaba y en una contracción se acercaba.
+//     Eso no es una operación real. Stop y riesgo se fijan ahora en la vela del toque.
+//
+// v3.6 — LAS MITADES MATARON EL ÚLTIMO RESULTADO POSITIVO
+//   Primera tanda con la partición de v3.5, en 15m:
+//     MNQ  1ª mitad −0.19 (n=59) · 2ª mitad −0.18 (n=77)  → coincide: negativo de verdad.
+//     MES  1ª mitad −0.11 (n=61) · 2ª mitad +0.57 (n=82)  → DISCREPA EN SIGNO.
+//   El +0.28 de MES venía entero de la segunda mitad. No era una propiedad de los bloques sino de un
+//   tramo de mercado, exactamente como delataba el desplazamiento uniforme de todas sus filas. La
+//   partición hizo su trabajo a la primera y mató el único resultado positivo que quedaba en pie.
+//
+//   FUGA EN EL CONTADOR DE EVALUACIONES ABIERTAS. El modo "una operación a la vez" devolvió n=11 y n=4,
+//   TODAS en la primera mitad y cero en la segunda: eso no es un resultado, es un contador atascado. El
+//   tope de memoria descartaba bloques con `zones.shift()` sin comprobar si tenían evaluación abierta, y
+//   cada uno se llevaba su cuenta sin devolverla hasta bloquear la muestra entera. Ahora el contador se
+//   RECALCULA cada vela desde el estado real de los bloques, así que no puede desincronizarse.
+//
+// v3.5 — DOS MERCADOS, RESPUESTAS OPUESTAS: LAS DEFENSAS QUE FALTABAN
+//   En gráfico de 15m la esperanza salió +0.28 en MES y −0.18 en MNQ. Y no en algunas filas: en LAS DOCE
+//   de cada tabla, todas positivas en uno y todas negativas en el otro. Un desplazamiento UNIFORME de
+//   todos los cortes no habla de los bloques —cada corte es una submuestra distinta— sino de algo que
+//   afecta al mercado entero. Dos causas, y las dos invalidan la lectura:
+//   · OPERACIONES NO INDEPENDIENTES. Con ocho bloques vivos, un solo impulso los cruza todos y ganan o
+//     pierden JUNTOS: n=143 no son 143 decisiones sino el mismo suceso contado muchas veces. Por eso un
+//     puñado de sesiones puede decidir el signo. Nuevo modo UNA OPERACIÓN A LA VEZ: un bloque tocado
+//     mientras otro sigue abierto no entra en la muestra. Baja mucho el N y sube mucho lo que vale.
+//   · EL PERIODO. Nueva partición ▸1ª MITAD / ▸2ª MITAD del histórico. Es la defensa más importante de
+//     todas y la que más resultados mata: una ventaja real aparece en las DOS mitades. Si solo está en
+//     una, la produjo un tramo de mercado concreto y no se puede esperar que se repita.
+//
+//   Lo único que ha coincidido en signo entre los dos mercados en esta tanda es la fila MTF (+1.00 y
+//   +0.91, MFE 3.02 y 5.77). Es llamativo, pero son n=9 y n=11: ya di por buena esa misma pista en v3.2
+//   y murió al medir mejor. Es la hipótesis a comprobar, no una conclusión.
+//
+// v3.4 — VEREDICTO DEL 1 MINUTO, Y LA VENTANA MEDÍA EL RELOJ
+//   Tercera tanda: esperanza +0.00 (MNQ, n=177) y −0.06 (MES, n=204) con objetivo 2R y stop 1R. Hacen
+//   falta 33.4% de aciertos para empatar y salen 31-33%. En el marco de 1 MINUTO, que aporta el 92% de
+//   la muestra, EL BLOQUE NO TIENE VENTAJA — y eso ya es una conclusión sólida, no una sospecha: dos
+//   mercados, ~350 operaciones, medida simétrica y validada contra su propio nivel de azar.
+//   También cae la hipótesis del MTF que parecía prometedora en v3.2: +0.91 en MNQ (n=11) contra −0.37
+//   en MES (n=19). Signos opuestos = ruido. Lo mismo A+: +0.64 contra −0.33, con n=11 y n=9.
+//
+//   PERO las filas de marco superior no medían lo que parecía. La ventana se contaba en velas DEL
+//   GRÁFICO, así que un bloque de 15m tenía 20 velas de 1m —veinte minutos— para un recorrido que
+//   necesita horas: salía con MFE 0.41 y esperanza −1. Una cuarta parte de TODA la muestra se cerraba
+//   por reloj. Corregido: la ventana se cuenta en velas del marco del bloque.
+//   · COLUMNA T/o: qué porcentaje de cada fila se cerró por tiempo. Sin ella no se distingue un corte
+//     que falla de uno al que no se le dio tiempo. En naranja por encima del 35%.
+//
+// v3.3 — LA MEDIDA YA ES FIABLE. AHORA LA PREGUNTA CORRECTA.
+//   Con las reglas simétricas de v3.2 el resultado cayó a 48% (MNQ) y 49% (MES): exactamente la moneda
+//   al aire que corresponde a una carrera 1R contra 1R. Eso valida el instrumento — y dice que el bloque,
+//   POR SÍ SOLO Y EN 1 MINUTO, no tiene ventaja detectable. Ningún atributo se separó de la media
+//   (44-51% en los dos activos) y los grados se contradicen entre mercados con muestras de 9 y 11.
+//
+//   Pero "48% de aciertos" no significa "sin ventaja". Dos sistemas con el mismo 48% son cosas opuestas
+//   si uno corre hasta 3R y el otro se para en 1R, y la prueba anterior se CERRABA al tocar 1R, así que
+//   era ciega a todo lo que viniera después. Dos cambios:
+//   · MFE (RECORRIDO MÁXIMO A FAVOR). La operación vive hasta que salta el stop o se agota la ventana,
+//     registrando hasta dónde llegó. Con eso se calcula la ESPERANZA a cualquier objetivo, que es la
+//     única pregunta que importa: no "¿aguanta?" sino "¿deja dinero?".
+//   · DESGLOSE POR MARCO. Es el corte que faltaba y probablemente el decisivo: si los bloques de 1m son
+//     ruido pero los de 15m o 1H tienen esperanza positiva, el motor no está mal — está mal el marco en
+//     el que se estaba aplicando. Los bloques de 1m miden 3-8 puntos, por debajo del ruido del activo.
+//
+// v3.2 — LA PRUEBA, POR FIN SIMÉTRICA (segunda tanda de datos: MNQ 80% · MES 83%, reacción 2.2R)
+//   Corregida la ventana y la unidad en v3.1, el resultado SUBIÓ en vez de bajar. La pista estaba en la
+//   reacción media: si se resuelve al alcanzar 1R, la media debería salir apenas por encima de 1.0, y
+//   salía en 2.2. Es decir, UNA SOLA VELA saltaba muy por encima del objetivo — los bloques miden 3-8
+//   puntos y una vela de 1m recorre 10-15, así que la carrera se decidía dentro de la misma vela. Y ahí
+//   quedaban dos asimetrías que siempre ganaba el éxito:
+//   · GANAR SE MEDÍA POR MECHA Y PERDER POR CIERRE. El objetivo usaba `high`; la invalidación, `close`.
+//     Ahora la prueba tiene su propio STOP REAL: por mecha, con colchón más allá del distal, y la R se
+//     mide proximal→stop, así que objetivo y stop están a la MISMA distancia. Es una carrera limpia.
+//     La invalidación por cierre del input sigue rigiendo la VIDA del bloque: es otra pregunta.
+//   · LA VELA DEL TOQUE PODÍA RESOLVER A FAVOR, aunque su máximo pudiera ser anterior a su mínimo. Ahora
+//     esa vela solo puede PERDER; el objetivo se empieza a medir a partir de la siguiente.
+//   Con esto, un conjunto de bloques sin valor real daría ~50%. Cualquier cifra por encima significa algo.
+//
+// v3.1 — LA MEDIDA ESTABA MAL: CORREGIDA CON DATOS REALES (MNQ y MES, 1m)
+//   La primera tanda de datos dio 75% de bloques "aguantados" en ambos activos, con A+ 79 / A 64 / B 78
+//   en MNQ: la B ganando a la A. Antes de tocar el score había que auditar el instrumento de medida, y
+//   tenía dos fallos que inflaban el resultado hasta volverlo inútil:
+//   · SIN LÍMITE DE TIEMPO. Un bloque tocado seguía acumulando reacción durante horas hasta alcanzar el
+//     objetivo. La estadística medía "alguna vez", no "al tocarlo". Ahora hay ventana (20 velas): si no
+//     reacciona ni rompe dentro de ella, no hizo su trabajo y cuenta como fallo.
+//   · OBJETIVO ASIMÉTRICO. Medir en ATR daba el mismo objetivo a todos los bloques mientras que fallar
+//     exigía atravesar el bloque ENTERO: uno alto ganaba con un movimiento proporcionalmente ridículo.
+//     Ahora la unidad por defecto es la R DEL BLOQUE (proximal→distal), lo que realmente se arriesga.
+//     Con objetivo 1.0 la apuesta es simétrica: si los bloques no valieran nada, saldría ~50%.
+//
+//   DOS ATRIBUTOS ERAN PESO MUERTO, y los datos lo demostraron
+//   · FVG aparecía en el 89% de los bloques y BOS+MOM en el 80%. Un atributo que tiene casi todo el
+//     mundo no separa nada, y sus puntos en el score se reparten a ciegas. En 1 minuto los huecos de un
+//     tick son constantes: ahora el FVG exige tamaño mínimo y la vela de momentum, cuerpo de verdad.
+//   · La tabla incorpora columna FREC.: sin saber qué porcentaje de bloques tiene cada atributo es
+//     imposible distinguir "no funciona" de "lo tiene todo el mundo".
+//
+// v3.0 — SIN SEÑALES: TODO EL PESO EN LA CONSTRUCCIÓN DEL BLOQUE
+//   Se elimina por completo el aparato de entradas (patrones de vela, disparadores, visitas armadas,
+//   ataque, plan de riesgo, motor de operaciones, alertas BUY/SELL y filtros de sesgo/sesión/
+//   volatilidad). Un bloque mal construido no se arregla con un disparador bueno: primero el nivel.
+//
+//   MEJORAS DE FORMACIÓN
+//   · IMPULSO COMPLETO. El desplazamiento se medía sobre un número FIJO de velas (2 por defecto),
+//     así que un impulso de 4 velas se contabilizaba como si fueran 2: desplazamiento y proporción
+//     salida/altura salían sistemáticamente cortos. Ahora se mide desde la base hasta el final real
+//     del impulso — todas las velas entre la base y el presente son, por construcción, grandes y del
+//     mismo color. FVG, BOS y volumen relativo se calculan sobre ese mismo tramo.
+//   · DEDUPLICACIÓN. Dos bloques del MISMO marco que se solapan son el mismo nivel contado dos veces:
+//     ensucian el gráfico e inflan la confluencia. Ahora se queda el de mayor score y el otro se
+//     descarta. El solape ENTRE MARCOS distintos se respeta: eso sí es confluencia real.
+//   · PREMIUM / DISCOUNT (ICT) COMO ATRIBUTO DEL BLOQUE, no como filtro de entrada: una demanda nace
+//     con descuento o sin él, y eso es una propiedad del nivel que se puede puntuar y medir.
+//   · CONFLUENCIA MTF GRADUADA por fracción de solape, no un sí/no. Rozar una zona de 1H no es lo
+//     mismo que estar contenida dentro de ella.
+//   · MITIGACIÓN PARCIAL. Se registra hasta qué % del bloque ha penetrado el precio. Un bloque
+//     consumido al 80% ya casi no tiene órdenes vivas aunque el distal siga intacto.
+//
+//   VERIFICACIÓN (lo que sustituye al backtest de señales)
+//   · Cada bloque tocado entra en evaluación: ¿el precio reaccionó N×ATR desde el proximal antes de
+//     romper el distal? Se resuelve como AGUANTÓ o FALLÓ, con criterio pesimista (si la misma vela
+//     alcanza el objetivo y rompe, cuenta como fallo).
+//   · La tabla desglosa el resultado por GRADO y por ATRIBUTO. Es la única forma honesta de saber si
+//     el score discrimina de verdad y si FVG, BOS o el barrido de liquidez aportan algo medible.
+//     Si A+ no aguanta más que B, el score está mal y hay que cambiarlo — no al revés.
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// QUÉ ES UN BLOQUE
+//   Una base estrecha (donde quedaron órdenes sin ejecutar) seguida de un impulso que se va de ahí.
+//   No lo define la forma de las velas sino que el precio SE FUE. El borde proximal va en el CUERPO
+//   de la base — donde se colocaron las órdenes; el distal en la mecha más extrema — donde ya no
+//   queda nada que defender.
+//
+// ODDS ENHANCERS (Sam Seiden) + HUELLA SMC · escala 0-100
+//   1. IMPULSO (20)        desplazamiento 8 + impulso/altura 8 + vela de momentum 4
+//   2. HUELLA (20)         FVG dejado por el impulso 12 + volumen relativo 8
+//   3. ESTRUCTURA (15)     el impulso rompió el último swing: el bloque CAUSÓ el cambio
+//   4. BASE (10)           1 vela 10 · 2 velas 7 · Order Block 6 · 3+ velas 4
+//   5. FRESCURA (15)       primera visita 15 · segunda 5 · después 0
+//   6. LIQUIDEZ (5)        la base barrió el último pivote antes de girar
+//   7. TIPO (5)            reversión (DBR / RBD) frente a continuación
+//   8. CONFLUENCIA MTF (5) fracción de solape con un bloque vivo de marco SUPERIOR
+//   9. CURVA / PD (5)      demanda con descuento · oferta con premium
+//   Grados: A+ ≥ 80 · A ≥ 70 · B por debajo.
+//
+// GARANTÍAS DE NO REPINTADO
+//   · La detección solo lee velas CERRADAS; los marcos superiores se piden con lookahead_on sobre
+//     esos datos. Cada marco devuelve el EVENTO del bloque nuevo (valores simples), no arrays de
+//     objetos: memoria mínima y sin ventana de historial basada en last_bar_index.
+//   · Toques, mitigación, roturas y estadísticas se deciden solo en vela cerrada.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+indicator("Supply & Demand Blocks Institutional v4.6", shorttitle="S&D Blocks", overlay=true,
+     max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ TIPO
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+type Zone
+    float  top
+    float  bot
+    bool   isDem
+    int    t0
+    int    guid
+    int    tfSec
+    string tfLbl
+    float  disp                 // desplazamiento del impulso completo, en ATR
+    float  ratio                // impulso / altura del bloque
+    float  rvol                 // volumen del impulso / volumen medio
+    bool   fvg
+    bool   bos
+    int    ztype                // 1 reversión · -1 continuación · 0 neutro
+    bool   sweep
+    int    baseN                // velas de la base
+    int    legN                 // velas reales del impulso
+    bool   momOut               // el impulso contiene una vela Elephant o Shaved
+    bool   baseTight            // base de compresión; false = vela opuesta grande (Order Block)
+    float  pd                   // posición del bloque en el rango del marco de curva (0 bajo · 1 alto)
+    int    tfIdx                // [v3.3] marco que lo generó (0·1·2), para desglosar las estadísticas
+    int    bar0                 // [v4.6] vela del GRÁFICO en la que se registró: la edad se cuenta en
+                                //        velas, no en milisegundos — ver f_young
+    float  htfConf     = 0.0    // [v4.6] confluencia MTF cacheada, recalculada una vez por vela cerrada
+    bool   isBreaker   = false
+    // ── estado ──
+    int    touches     = 0
+    bool   wasInside   = false
+    bool   broken      = false
+    float  deepest     = 0.0    // penetración máxima alcanzada (0-1 de la altura)
+    // ── evaluación: ¿el bloque hizo su trabajo? ──
+    bool   evalOn      = false
+    bool   resolved    = false
+    int    evalBar     = na     // [v3.1] vela en la que empezó la evaluación, para la ventana de tiempo
+    float  stopPx      = na     // [v3.7] stop FIJADO al entrar: antes se recalculaba con el ATR de cada
+    float  riskPts     = na     //        vela y se movía solo, que no es una operación real
+    float  mfe         = 0.0    // [v3.3] recorrido máximo a favor desde el proximal, en R, hasta el stop
+    float  exitR       = na     // [v4.6] resultado REAL de la salida en R: -1 si saltó el stop, y el
+                                //        recorrido neto a precio de mercado si se agotó la ventana
+    float  scoreAt     = na     // score en el momento del primer toque
+    bool   htfAt       = false  // tenía confluencia MTF en ese momento
+    bool   rthAt       = false  // [v3.9] el toque ocurrió en sesión regular
+    int    biasAt      = 0      // [v3.9] 1 a favor del sesgo del marco superior · -1 en contra · 0 sin sesgo
+    bool   rrAt        = false  // [v4.1] había margen hasta el bloque contrario (odds enhancer de Seiden)
+    bool   softAt      = false  // [v4.1] el precio llegó en retroceso controlado, no acelerando
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+gTf = "① Marcos temporales"
+gZn = "② Construcción del bloque"
+gQl = "③ Calidad y ciclo de vida"
+gPd = "④ Contexto"
+gEv = "⑤ Verificación"
+gVs = "⑥ Visual"
+gPa = "⑦ Price Action · Oliver Velez"
+
+tf1On = input.bool(true,  "Marco 1", inline="t1", group=gTf)
+tf1   = input.timeframe("", " ", inline="t1", group=gTf, tooltip="Vacío = marco del gráfico. Cada marco ejecuta la detección completa en su propio contexto. Marcos menores que el gráfico o repetidos se ignoran.")
+tf2On = input.bool(true,  "Marco 2", inline="t2", group=gTf)
+tf2   = input.timeframe("15", "  ", inline="t2", group=gTf)
+tf3On = input.bool(false, "Marco 3", inline="t3", group=gTf)
+tf3   = input.timeframe("60", "   ", inline="t3", group=gTf)
+
+legBars        = input.int(2, "Impulso: velas mínimas verificadas", minval=1, maxval=5, group=gZn, tooltip="Velas consecutivas del mismo color, cada una con cuerpo real, exigidas para considerar que hay impulso. [v3.0] Es un MÍNIMO: si el impulso real es más largo, se mide entero hasta la base.")
+legMaxBars     = input.int(8, "Impulso: velas máximas", minval=2, maxval=20, group=gZn, tooltip="[v4.6] Cuánto puede durar el impulso. Hasta v4.5 esto no existía y el límite lo ponía de rebote la búsqueda de la base: con legBars=2 y baseMaxBack=4 ningún impulso de más de 5 velas encontraba base, así que el bloque NO SE REGISTRABA. El desplazamiento fuerte y sostenido —el que construye los mejores niveles— era justo el que el motor no podía ver. Súbelo si trabajas con impulsos largos; el coste es buscar unas velas más hacia atrás.")
+legBodyAtr     = input.float(0.5, "Impulso: cuerpo mínimo por vela (×ATR)", minval=0.1, step=0.05, group=gZn)
+legNetAtr      = input.float(1.5, "Impulso: desplazamiento mínimo (×ATR)", minval=0.5, step=0.1, group=gZn, tooltip="Lo que define un bloque no es la forma de las velas sino que el precio SE FUE de ahí. Medido sobre el impulso completo.")
+legRatioMin    = input.float(2.0, "Impulso / altura del bloque mínima", minval=1.0, step=0.25, group=gZn, tooltip="El recorrido del impulso debe ser al menos N veces la altura del bloque. Un bloque de 20 puntos que produjo 25 no demostró nada.")
+baseBodyAtr    = input.float(0.4, "Base: cuerpo máximo por vela (×ATR)", minval=0.05, step=0.05, group=gZn)
+baseMaxBack    = input.int(4, "Base: búsqueda máxima hacia atrás (velas)", minval=1, maxval=10, group=gZn)
+baseMaxCandles = input.int(3, "Base: velas máximas", minval=1, maxval=6, group=gZn)
+maxZoneAtr     = input.float(1.5, "Altura máxima del bloque (×ATR)", minval=0.3, step=0.1, group=gZn, tooltip="Al recortar se conserva SIEMPRE el borde proximal.")
+fvgMinAtr      = input.float(0.25, "FVG: hueco mínimo (×ATR)", minval=0.0, step=0.01, group=gZn, tooltip="[v3.1] En 1 minuto los huecos de un tick aparecen constantemente: sin tamaño mínimo el 90% de los bloques salía con etiqueta FVG y sus 12 puntos se los llevaba casi todo el mundo, que es lo mismo que no puntuar nada. Un desequilibrio real tiene tamaño.")
+momBodyAtr     = input.float(1.5, "Momentum: cuerpo de vela institucional (×ATR)", minval=0.5, step=0.1, group=gZn, tooltip="[v3.1] Umbral para marcar MOM en el impulso. Debe estar CLARAMENTE por encima del cuerpo mínimo por vela: si no, casi todo impulso contiene una vela 'institucional' por construcción y la etiqueta deja de distinguir nada.")
+swingLen       = input.int(5, "Estructura: velas a cada lado del pivote", minval=2, maxval=20, group=gZn)
+sweepMode      = input.string("Pivote (estructura)", "Liquidez: cómo se mide el barrido", options=["Pivote (estructura)", "Extremo previo (legado)"], group=gZn, tooltip="Pivote: la base tiene que perforar el último PIVOTE confirmado, que es donde se acumulan los stops. Extremo previo: cualquier mínimo/máximo de las N velas anteriores, incluidos los de mitad de un impulso, donde no hay stops que barrer.")
+sweepLookback  = input.int(10, "Liquidez: ventana (velas)", minval=2, maxval=50, group=gZn, tooltip="Modo legado: velas previas revisadas. Modo pivote: el pivote no puede ser más antiguo que el doble de este valor.")
+legInBars      = input.int(5, "Tramo de llegada a la base (velas)", minval=2, maxval=20, group=gZn, tooltip="Velas anteriores a la base con las que se clasifica el bloque: llegó cayendo (DBR, reversión) o subiendo (RBR, continuación).")
+minBarsBetween = input.int(3, "Velas mínimas entre bloques del mismo tipo", minval=1, maxval=50, group=gZn)
+dedupOn        = input.bool(true, "Deduplicar bloques solapados del mismo marco", group=gZn, tooltip="[v3.0] Dos bloques del MISMO marco que se solapan son el mismo nivel contado dos veces: ensucian el gráfico e inflan la confluencia MTF. Se conserva el de mayor score. El solape ENTRE MARCOS distintos NO se toca: eso sí es confluencia real.")
+dedupPct       = input.int(50, "Solape que cuenta como duplicado (%)", minval=10, maxval=100, group=gZn)
+useBreaker     = input.bool(false, "Breaker: el bloque roto se da la vuelta", group=gZn, tooltip="SMC: si una demanda se rompe CON DESPLAZAMIENTO, donde la demanda falló toma el control la oferta — el mismo rango queda como bloque contrario. Nace sin toques y exige que el precio se aleje y vuelva. Desactivado por defecto: compáralo en la tabla de verificación antes de fiarte.")
+breakerDispAtr = input.float(0.8, "Breaker: cuerpo mínimo de la vela que rompe (×ATR)", minval=0.2, step=0.1, group=gZn, tooltip="Sin desplazamiento la rotura es deriva, no un cambio de control: ese bloque no se da la vuelta, simplemente muere.")
+maxZonesMem    = input.int(60, "Bloques en memoria", minval=20, maxval=150, group=gZn)
+
+footprint  = input.string("FVG o BOS", "Huella institucional exigida", options=["Ninguna", "FVG o BOS", "FVG y BOS"], group=gQl, tooltip="Sin huella el bloque ni siquiera se registra: un impulso que no dejó desequilibrio ni rompió estructura rara vez tiene órdenes institucionales detrás.")
+gradeAp    = input.int(62, "Grado A+ a partir de", minval=40, maxval=100, inline="gr", group=gQl, tooltip="[v4.2] Estaban fijos en 80/70. Al endurecer FVG y momentum en v3.9 la mayoría de bloques perdió ~16 puntos y dejaron de existir los A+: una escala en la que nadie llega arriba no clasifica nada. Ajústalos a tu distribución — mira la columna Frec. de los tres grados en la tabla y muévelos hasta que repartan.")
+gradeA     = input.int(50, "A", minval=30, maxval=100, inline="gr", group=gQl)
+minScore   = input.int(55, "Score mínimo para alertar", minval=0, maxval=100, group=gQl, tooltip="Solo afecta a la alerta de bloque nuevo. El dibujo tiene su propio umbral en ⑥ Visual.")
+maxAgeBars = input.int(300, "Edad máxima (velas de su marco)", minval=20, maxval=2000, group=gQl, tooltip="[v4.6] Se cuenta en VELAS, no en tiempo de reloj. Hasta v4.5 la edad restaba milisegundos, así que el fin de semana y los festivos consumían vida sin que pasara una sola vela: en futuros, un bloque del viernes por la tarde llegaba al lunes con dos días encima y los de puente nacían caducados.")
+invalidBy  = input.string("Cierre", "Invalidación (rotura del distal)", options=["Cierre", "Mecha"], group=gQl, tooltip="Cierre: una mecha que atraviesa el distal y vuelve dentro es un barrido de liquidez, no una invalidación.")
+mitigPct   = input.int(100, "Mitigado al penetrar el (%)", minval=30, maxval=100, group=gQl, tooltip="[v3.0] Un bloque consumido al 80% casi no tiene órdenes vivas aunque el distal siga intacto. Por debajo de 100 el bloque se retira al alcanzar ese % de penetración. 100 = solo muere por rotura del distal (comportamiento clásico).")
+
+curveTf  = input.timeframe("240", "Rango operativo: marco", group=gPd, tooltip="Rango dentro del cual se mide si el bloque nace con descuento o con premium. Debe ser SUPERIOR al del gráfico.")
+curveLen = input.int(50, "Rango operativo: velas", minval=10, maxval=300, group=gPd)
+usePd    = input.bool(true, "Puntuar premium / discount", group=gPd, tooltip="ICT: una demanda vale más en la mitad baja del rango (descuento) y una oferta en la mitad alta (premium). Comprar caro es comprar donde ya no queda recorrido.")
+// [v3.9] Las dos variables de contexto que FALTABAN. No entran en el score — entran en la tabla de
+// verificación como cortes nuevos, que es donde se decide si algo aporta. El motor está para eso.
+sessStr  = input.session("0930-1600", "Sesión regular (hora de Nueva York)", group=gPd, tooltip="[v3.9] Todas las mediciones anteriores mezclaban sesión regular y nocturna. Un bloque tocado a las 3 de la madrugada, con una fracción del volumen y del interés, no es el mismo suceso que uno tocado a las 10 de la mañana — y sin embargo contaban igual. Ahora hay una fila 'toque en RTH' en la tabla que lo separa.")
+biasTf   = input.timeframe("60", "Sesgo estructural: marco", group=gPd, tooltip="[v3.9] Dirección del marco superior según su último rompimiento de estructura POR CIERRE de un pivote confirmado, que es la definición de SMC. Se registra si el bloque estaba A FAVOR o EN CONTRA de ese sesgo en el momento del toque, y aparece como corte en la tabla.")
+biasSwing = input.int(5, "Sesgo estructural: velas del pivote", minval=2, maxval=20, group=gPd)
+// [v4.1] Los dos odds enhancers de Seiden que NUNCA habían estado en el indicador. El margen de beneficio
+// es, en su método, de los más importantes: un nivel perfecto con la zona contraria pegada no se opera.
+// Y la llegada: el precio que llega acelerando suele atravesar el nivel, mientras que el retroceso
+// controlado —velas que se encogen, la idea de Velez— es el que respeta. Como todo lo demás desde v3.0,
+// no tocan el score: entran como cortes medibles.
+rrMin    = input.float(2.0, "Margen: R mínimo hasta el bloque contrario", minval=0.5, step=0.25, group=gPd, tooltip="[v4.1] Distancia del proximal al siguiente bloque contrario vivo, medida en R de esta operación. Si no hay ningún bloque contrario delante, cuenta como margen suficiente: es camino despejado.")
+arrBars  = input.int(5, "Llegada: velas del tramo de aproximación", minval=2, maxval=30, group=gPd)
+arrMax   = input.float(2.0, "Llegada: recorrido máximo para contarla suave (×ATR)", minval=0.5, step=0.1, group=gPd, tooltip="[v4.1] Recorrido neto del precio en las últimas N velas al tocar el bloque. Por encima de este umbral la llegada es una ofensiva, no un retroceso, y Seiden esperaría que atravesara el nivel.")
+
+reactUnit   = input.string("R del bloque", "Unidad de la reacción", options=["R del bloque", "ATR"], group=gEv, tooltip="[v3.1] R DEL BLOQUE: la reacción se mide en múltiplos de la distancia proximal→distal (más el colchón), que es exactamente lo que arriesgas operando ese bloque. ATR: distancia absoluta, igual para todos los bloques. [v4.6] La unidad que elijas FIJA TAMBIÉN EL STOP. Hasta v4.5, con ATR el objetivo se medía en ATR pero el stop seguía en el distal: dos distancias distintas, y la carrera dejaba de ser simétrica. Ahora objetivo y stop están siempre a la misma distancia, así que el ~50% de referencia vale en los dos modos y cualquier cifra por encima significa algo.")
+reactTarget = input.float(1.0, "Reacción que cuenta como 'aguantó'", minval=0.2, step=0.1, group=gEv)
+evalBufAtr  = input.float(0.10, "Stop de la prueba: colchón más allá del distal (×ATR)", minval=0.0, step=0.05, group=gEv, tooltip="[v3.2] La prueba usa un stop REAL, por mecha y con colchón, igual que lo usarías operando — no la invalidación por cierre del bloque, que es otra pregunta. La R se mide proximal→stop, así que el objetivo y el stop están a la misma distancia: una carrera limpia. [v4.6] Solo aplica con unidad R DEL BLOQUE: con unidad ATR el stop lo fija el propio ATR del marco del bloque y este colchón no interviene.")
+reactWindow = input.int(20, "Ventana para reaccionar (velas DEL BLOQUE · 0 = sin límite)", minval=0, maxval=500, group=gEv, tooltip="[v3.4] Se cuenta en velas del MARCO DEL BLOQUE, no del gráfico: 20 aquí son 20 minutos para un bloque de 1m y 5 horas para uno de 15m. Vigila la columna T/o: si es alta, esa fila mide el reloj. [v4.6] Agotarse la ventana ya NO cuesta 1R automática: la operación se liquida a mercado con su resultado real y la columna T/R dice cuánto se sacó de esas. Una T/o alta sigue siendo un aviso, pero ya no hunde la esperanza por construcción.")
+costTicks   = input.float(3.0, "Coste por operación ida y vuelta (ticks)", minval=0.0, step=0.5, group=gEv, tooltip="[v3.7] Comisión + deslizamiento, en ticks. Se descuenta de la columna Esp., que pasa a ser NETA. Importa muchísimo cuando la R es pequeña: un bloque de MES en 15m arriesga 2-3 puntos, así que 3 ticks son el 6-10% de la R en cada operación; en MNQ, con R de 20 puntos, apenas el 1%. Dos activos con la misma esperanza bruta pueden acabar en lados opuestos del cero.")
+oneAtATime  = input.bool(false, "Una operación a la vez", group=gEv, tooltip="[v3.5] Si hay 8 bloques vivos y el precio los cruza todos en el mismo movimiento, ganan o pierden JUNTOS: la muestra parece grande pero son el mismo suceso contado ocho veces, y eso hace que un puñado de sesiones decida el signo del resultado. Activado, solo se evalúa un bloque cada vez — como operarías de verdad. La muestra baja mucho, pero cada operación cuenta una decisión independiente. Si la ventaja desaparece al activarlo, nunca existió. [v4.6] El hueco se congela al empezar la vela: como mucho una apertura por vela, y quien cierra lo libera para la SIGUIENTE. Antes lo liberaba en la misma vela y entraba quien estuviera más adelante en el array, así que la muestra la elegía el orden de creación de los bloques.")
+showEval    = input.bool(true, "Tabla de verificación", group=gEv)
+evalMode    = input.string("Resumen", "Detalle de la tabla", options=["Resumen", "Completo"], group=gEv, tooltip="[v3.9] Resumen: el veredicto y las dos mitades, cuatro filas. Es lo único que necesitas mirar habitualmente — el resto es investigación y ocupaba media pantalla. Completo: los diecisiete cortes con todas las columnas.")
+evalMinN    = input.int(20, "Muestra mínima para dar color", minval=5, maxval=200, group=gEv, tooltip="Por debajo de este número de bloques resueltos la fila se muestra en gris: todavía no dice nada.")
+
+showZones    = input.bool(true, "Dibujar bloques", group=gVs)
+showMinScore = input.int(38, "Score mínimo para dibujar", minval=0, maxval=100, group=gVs)
+maxRender    = input.int(16, "Máximo de bloques dibujados", minval=4, maxval=40, group=gVs)
+zoneOpac     = input.int(72, "Transparencia de las cajas (0 sólido · 95 casi invisible)", minval=0, maxval=95, group=gVs, tooltip="[v4.3] Punto de partida. Los bloques de grado A+ se pintan 8 puntos más sólidos y los B, 8 más tenues. Si no ves las cajas, baja este número.")
+showFresh    = input.bool(false, "Solo bloques sin tocar", group=gVs)
+extendBars   = input.int(15, "Extensión a la derecha (velas)", minval=0, maxval=100, group=gVs)
+colDem       = input.color(#089981, "Demanda", inline="c", group=gVs)
+colSup       = input.color(#F23645, "Oferta", inline="c", group=gVs)
+showDash     = input.bool(true, "Panel", group=gVs)
+showFunnel   = input.bool(false, "Panel: añadir embudo de formación", group=gVs, tooltip="[v3.8] Detectados · sin huella · duplicados · registrados. Sirve para depurar por qué no aparecen bloques, no para operar, así que por defecto no ocupa sitio en el panel.")
+
+// ── ⑦ PRICE ACTION · OLIVER VELEZ ─────────────────────────────────────────────────────────────
+// [v4.0] Módulo PURAMENTE VISUAL y aislado. Calcula sus propios patrones, solo llama a barcolor() y lee
+// los bloques en modo consulta. No entra en la detección, ni en el score, ni en la evaluación: el motor
+// de verificación sigue midiendo exactamente lo mismo que antes, con o sin esto activado.
+paMode   = input.string("Todas las velas", "Pintar velas", options=["Desactivado", "Todas las velas", "Solo dentro de bloques"], group=gPa, tooltip="[v4.0] Solo dentro de bloques: las velas alcistas se pintan únicamente si están dentro de una DEMANDA viva, y las bajistas dentro de una OFERTA. Es la lectura de Velez —la vela de giro vale donde hay un nivel detrás— pero es solo un filtro de PINTADO: los bloques no se enteran de que existen estos patrones.")
+paTagOn  = input.bool(false, "Etiquetar el patrón sobre la vela", group=gPa)
+paOpac   = input.int(0, "Transparencia del pintado", minval=0, maxval=90, group=gPa)
+
+eleOn    = input.bool(true,  "Elephant",  inline="p1", group=gPa, tooltip="VELEZ · Elephant bar: cuerpo institucional que limpia las velas previas con volumen. Cuerpo ≥ N×ATR y ≥ N% del rango, cierre más allá de las últimas velas.")
+eleBody  = input.float(1.0,  "×ATR",      inline="p1", group=gPa, step=0.1, minval=0.2)
+eleBodyP = input.int(70,     "% rango",   inline="p1", group=gPa, minval=30, maxval=100)
+eleCUp   = input.color(#00E676, "", inline="p1", group=gPa)
+eleCDn   = input.color(#FF1744, "", inline="p1", group=gPa)
+eleClear = input.int(3, "Elephant: velas previas que debe superar", minval=1, maxval=10, group=gPa)
+eleVol   = input.bool(true, "Elephant: exigir volumen sobre la media de 20", group=gPa)
+
+shvOn    = input.bool(true,  "Shaved",    inline="p2", group=gPa, tooltip="Shaved bar: cierra en su extremo, sin mecha a favor. Urgencia del comprador o del vendedor hasta el último tick.")
+shvRng   = input.float(0.7,  "×ATR",      inline="p2", group=gPa, step=0.1, minval=0.2)
+shvWick  = input.int(10,     "% mecha",   inline="p2", group=gPa, minval=0, maxval=40)
+shvCUp   = input.color(#26C6DA, "", inline="p2", group=gPa)
+shvCDn   = input.color(#EC407A, "", inline="p2", group=gPa)
+
+pinOn    = input.bool(true,  "Pin / Tail", inline="p3", group=gPa, tooltip="VELEZ · Bottoming / Topping Tail: rechazo. Mecha dominante, cuerpo pequeño. La mecha es el rastro de las órdenes que absorbieron el movimiento.")
+pinRng   = input.float(0.8,  "×ATR",      inline="p3", group=gPa, step=0.1, minval=0.2)
+pinWick  = input.int(60,     "% mecha",   inline="p3", group=gPa, minval=40, maxval=90)
+pinCUp   = input.color(#FFD700, "", inline="p3", group=gPa)
+pinCDn   = input.color(#FF9800, "", inline="p3", group=gPa)
+pinBodyP = input.int(30, "Pin: cuerpo máximo (% del rango)", minval=5, maxval=50, group=gPa)
+
+v18On    = input.bool(true,  "180",        inline="p4", group=gPa, tooltip="VELEZ · 180 bar: una vela con cuerpo real anulada por la siguiente en sentido contrario, que cierra más allá de su apertura. El giro completo en dos velas.")
+v18Body  = input.int(60,     "% rango",   inline="p4", group=gPa, minval=30, maxval=100)
+v18Size  = input.int(80,     "% previa",  inline="p4", group=gPa, minval=40, maxval=200)
+v18CUp   = input.color(#7C4DFF, "", inline="p4", group=gPa)
+v18CDn   = input.color(#F50057, "", inline="p4", group=gPa)
+
+outOn    = input.bool(true,  "Outside",   inline="p5", group=gPa, tooltip="Outside bar: envuelve el rango de la vela previa y cierra más allá de su extremo.")
+outRng   = input.float(1.0,  "×ATR",      inline="p5", group=gPa, step=0.1, minval=0.3)
+outCUp   = input.color(#64DD17, "", inline="p5", group=gPa)
+outCDn   = input.color(#D50000, "", inline="p5", group=gPa)
+
+rbiOn    = input.bool(true,  "RBI / GBI", inline="p6", group=gPa, tooltip="VELEZ · Red Bar Ignored / Green Bar Ignored: una vela contraria PEQUEÑA que la siguiente ignora por completo. Patrón de CONTINUACIÓN, no de giro.")
+rbiSmall = input.float(0.5,  "cuerpo ×ATR", inline="p6", group=gPa, step=0.05, minval=0.1)
+rbiCUp   = input.color(#1DE9B6, "", inline="p6", group=gPa)
+rbiCDn   = input.color(#FF6E40, "", inline="p6", group=gPa)
+
+insOn    = input.bool(true,  "Inside",    inline="p7", group=gPa, tooltip="Inside bar: compresión dentro de la vela madre. No dice dirección, dice que el mercado está decidiendo.")
+insCol   = input.color(#9E9E9E, "", inline="p7", group=gPa)
+
+exhOn    = input.bool(true,  "Agotamiento 3-5-8", inline="p8", group=gPa, tooltip="VELEZ · Regla 3-5-8: velas consecutivas del mismo color. A la quinta el movimiento está extendido; a la octava, agotado. Es la prioridad más baja: solo pinta si la vela no encaja en ningún otro patrón.")
+exhA     = input.int(5,      "aviso",     inline="p8", group=gPa, minval=3, maxval=12)
+exhB     = input.int(8,      "extremo",   inline="p8", group=gPa, minval=4, maxval=20)
+exhCol   = input.color(#FFEA00, "", inline="p8", group=gPa)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ UTILIDADES DE MARCO
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+f_tfSec(string tf) =>
+    timeframe.in_seconds(tf == "" ? timeframe.period : tf)
+
+f_tfLabel(string tfIn) =>
+    string t = tfIn == "" ? timeframe.period : tfIn
+    string o = t
+    if not (str.contains(t, "D") or str.contains(t, "W") or str.contains(t, "M") or str.contains(t, "S"))
+        int sec = timeframe.in_seconds(t)
+        o := sec >= 3600 ? str.tostring(int(sec / 3600)) + "H" : t + "m"
+    o
+
+int  chartSec  = timeframe.in_seconds()
+bool tf1Use    = tf1On and f_tfSec(tf1) >= chartSec
+bool tf2Use    = tf2On and f_tfSec(tf2) >= chartSec and not (tf1Use and f_tfSec(tf2) == f_tfSec(tf1))
+bool tf3Use    = tf3On and f_tfSec(tf3) >= chartSec and not (tf1Use and f_tfSec(tf3) == f_tfSec(tf1)) and not (tf2Use and f_tfSec(tf3) == f_tfSec(tf2))
+bool tfIgnored = (tf1On and not tf1Use) or (tf2On and not tf2Use) or (tf3On and not tf3Use)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ DETECCIÓN (corre dentro del contexto de cada marco; SOLO velas cerradas)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Devuelve el EVENTO de un bloque nacido en esta vela (valores simples). Todas las lecturas usan [1]
+// o anteriores, así que el valor es definitivo desde el primer tick y lookahead_on no adelanta nada.
+
+f_detect() =>
+    float a  = ta.atr(14)[1]
+    float av = ta.sma(volume, 20)[1]
+    float ph = ta.pivothigh(high[1], swingLen, swingLen)
+    float pl = ta.pivotlow(low[1], swingLen, swingLen)
+    var float swHi       = na
+    var float swLo       = na
+    var int   swHiBar    = na
+    var int   swLoBar    = na
+    var int   lastDemBar = -100000
+    var int   lastSupBar = -100000
+
+    bool  evNew   = false
+    bool  evDem   = false
+    float evTop   = na
+    float evBot   = na
+    int   evT0    = na
+    float evDisp  = na
+    float evRatio = na
+    float evRvol  = na
+    bool  evFvg   = false
+    bool  evBos   = false
+    int   evType  = 0
+    bool  evSweep = false
+    int   evBaseN = 0
+    int   evLegN  = 0
+    bool  evMom   = false
+    bool  evTight = true
+
+    if not na(a) and a > 0
+        // ── ¿Hay impulso? Las primeras `legBars` velas cerradas, mismo color y cuerpo real ──────
+        bool legUp = true
+        bool legDn = true
+        for i = 1 to legBars
+            bool big = math.abs(close[i] - open[i]) >= a * legBodyAtr
+            legUp := legUp and big and close[i] > open[i]
+            legDn := legDn and big and close[i] < open[i]
+
+        if legUp or legDn
+            bool isDem = legUp
+            // ── Base: primera vela pequeña u opuesta antes del impulso ──────────────────────────
+            // Todo lo que queda ENTRE la base y el presente es, por construcción, vela grande del
+            // mismo color: fue rechazado como base precisamente por eso. Ese tramo es el impulso real.
+            // [v4.6] El impulso se recorre hasta `legMaxBars` velas, no hasta donde llegara de rebote la
+            // ventana de búsqueda de la base. Son dos cosas distintas y estaban atadas: con legBars=2 y
+            // baseMaxBack=4 el bucle moría en la vela 6, así que un impulso de siete velas no encontraba
+            // base y el bloque se perdía entero. Se toma el MAYOR de los dos límites para no estrechar
+            // nunca la ventana de quien ya tenía baseMaxBack alto.
+            int bNear   = -1
+            int scanMax = math.max(legBars + baseMaxBack, legMaxBars)
+            for k = legBars + 1 to scanMax
+                bool opp = isDem ? close[k] < open[k] : close[k] > open[k]
+                if math.abs(close[k] - open[k]) <= a * baseBodyAtr or opp
+                    bNear := k
+                    break
+
+            if bNear > 1
+                // [v3.0] IMPULSO COMPLETO, no un número fijo de velas.
+                int   legN   = bNear - 1
+                float maxC   = close[1]
+                float minC   = close[1]
+                float volSum = 0.0
+                bool  momOut = false
+                for i = 1 to legN
+                    maxC   := math.max(maxC, close[i])
+                    minC   := math.min(minC, close[i])
+                    volSum += volume[i]
+                    float bd = math.abs(close[i] - open[i])
+                    float rg = high[i] - low[i]
+                    // Vela de momentum: cuerpo institucional (Elephant) o cierre en el extremo (Shaved)
+                    if rg > 0
+                        float wickFav = close[i] > open[i] ? high[i] - close[i] : close[i] - low[i]
+                        momOut := momOut or (bd >= a * momBodyAtr and bd >= rg * 0.7) or (rg >= a * momBodyAtr * 0.7 and bd >= rg * 0.6 and wickFav <= rg * 0.1)
+                float net   = math.abs(close[1] - open[legN])
+                bool  sepOK = isDem ? bar_index - lastDemBar > minBarsBetween : bar_index - lastSupBar > minBarsBetween
+
+                if net >= a * legNetAtr and sepOK
+                    // ── Extensión de la base: velas pequeñas contiguas hacia atrás ──────────────
+                    int bFar = bNear
+                    if baseMaxCandles > 1
+                        for k = bNear + 1 to bNear + baseMaxCandles - 1
+                            if math.abs(close[k] - open[k]) <= a * baseBodyAtr
+                                bFar := k
+                            else
+                                break
+                    float wHi = high[bNear]
+                    float wLo = low[bNear]
+                    float oHi = math.max(open[bNear], close[bNear])
+                    float oLo = math.min(open[bNear], close[bNear])
+                    for k = bNear to bFar
+                        wHi := math.max(wHi, high[k])
+                        wLo := math.min(wLo, low[k])
+                        oHi := math.max(oHi, math.max(open[k], close[k]))
+                        oLo := math.min(oLo, math.min(open[k], close[k]))
+                    // Mecha a cuerpo: proximal en el CUERPO de la base (donde se colocaron las órdenes);
+                    // distal en la mecha más extrema de la base o de la primera vela del impulso, que a
+                    // menudo barre justo por debajo/encima antes de irse.
+                    float top = isDem ? oHi : math.max(wHi, high[bNear - 1])
+                    float bot = isDem ? math.min(wLo, low[bNear - 1]) : oLo
+                    if top - bot < a * 0.05
+                        top := isDem ? wHi : top
+                        bot := isDem ? bot : wLo
+                    // [v4.3] La PROPORCIÓN se mide contra la BASE —la consolidación real— y no contra la
+                    // caja dibujada. En v4.1 la saqué del recorte, que estaba bien, pero la dejé sobre
+                    // `top - bot`, que incluye la mecha de la primera vela del impulso; esa mecha la
+                    // añadimos al distal para COLOCAR EL STOP, no porque el precio se consolidara ahí.
+                    // Medía la fuerza de la salida contra un tramo que no es consolidación, el filtro
+                    // quedó mucho más duro de lo previsto y empezó a matar bloques válidos. Seiden compara
+                    // el recorrido con lo que el precio tardó en irse: eso es la base.
+                    float ratio = net / math.max(wHi - wLo, a * 0.1)
+                    // Recorte conservando el borde proximal
+                    if top - bot > a * maxZoneAtr
+                        if isDem
+                            bot := top - a * maxZoneAtr
+                        else
+                            top := bot + a * maxZoneAtr
+
+                    if ratio >= legRatioMin
+                        // FVG dentro del impulso: hueco entre la vela i y la vela i+2, con TAMAÑO mínimo.
+                        // [v3.1] Sin el mínimo, en 1m casi todos los bloques traían FVG y la etiqueta no
+                        // distinguía nada: un hueco de un tick no es un desequilibrio institucional.
+                        bool fvg = false
+                        if legN >= 2
+                            for i = 1 to legN - 1
+                                float gap = isDem ? low[i] - high[i + 2] : low[i + 2] - high[i]
+                                if gap > 0 and gap >= a * fvgMinAtr
+                                    fvg := true
+                                    break
+                        // BOS: el impulso cerró más allá del último swing confirmado
+                        bool bos = isDem ? (not na(swHi) and maxC > swHi) : (not na(swLo) and minC < swLo)
+                        // Barrido de liquidez contra el último PIVOTE confirmado: ahí es donde se
+                        // acumulan los stops. Un mínimo en mitad de un impulso no tiene nada que barrer.
+                        // [v4.1] Se mide con el MISMO extremo que define el distal —base más la primera vela
+                        // del impulso— porque es justo esa vela la que suele hacer el barrido antes de irse.
+                        // Antes solo miraba las velas de la base y se perdía el caso más característico.
+                        float swpLo = math.min(wLo, low[bNear - 1])
+                        float swpHi = math.max(wHi, high[bNear - 1])
+                        bool sweep = false
+                        if sweepMode == "Pivote (estructura)"
+                            float lvl  = isDem ? swLo : swHi
+                            int   lvlB = isDem ? swLoBar : swHiBar
+                            sweep := not na(lvl) and not na(lvlB) and (bar_index - lvlB) <= sweepLookback * 2 and (isDem ? swpLo < lvl : swpHi > lvl)
+                        else
+                            float prior = isDem ? low[bFar + 1] : high[bFar + 1]
+                            for k = bFar + 2 to bFar + sweepLookback
+                                prior := isDem ? math.min(prior, low[k]) : math.max(prior, high[k])
+                            sweep := isDem ? swpLo < prior : swpHi > prior
+                        // Tipo por el tramo de llegada a la base: reversión o continuación
+                        float legIn = close[bFar + 1] - open[bFar + legInBars]
+                        int   zt    = legIn <= -a * 0.5 ? (isDem ? 1 : -1) : legIn >= a * 0.5 ? (isDem ? -1 : 1) : 0
+
+                        evNew   := true
+                        evDem   := isDem
+                        evTop   := top
+                        evBot   := bot
+                        evT0    := time[bFar]
+                        evDisp  := net / a
+                        evRatio := ratio
+                        evRvol  := not na(av) and av > 0 ? volSum / (av * legN) : na
+                        evFvg   := fvg
+                        evBos   := bos
+                        evType  := zt
+                        evSweep := sweep
+                        evBaseN := bFar - bNear + 1
+                        evLegN  := legN
+                        evMom   := momOut
+                        // ¿La base es compresión o la última vela OPUESTA grande? La segunda es un Order
+                        // Block válido, pero no prueba que el precio apenas se parara ahí.
+                        evTight := math.abs(close[bNear] - open[bNear]) <= a * baseBodyAtr
+                        if isDem
+                            lastDemBar := bar_index
+                        else
+                            lastSupBar := bar_index
+
+    // Los swings se actualizan DESPUÉS: BOS y barrido se miden contra la estructura previa al impulso.
+    if not na(ph)
+        swHi    := ph
+        swHiBar := bar_index - swingLen
+    if not na(pl)
+        swLo    := pl
+        swLoBar := bar_index - swingLen
+    [evNew, evDem, evTop, evBot, evT0, evDisp, evRatio, evRvol, evFvg, evBos, evType, evSweep, evBaseN, evLegN, evMom, evTight]
+
+[e1n, e1d, e1t, e1b, e1t0, e1ds, e1r, e1v, e1f, e1bo, e1y, e1s, e1bn, e1ln, e1m, e1tg] = request.security(syminfo.tickerid, tf1, f_detect(), lookahead = barmerge.lookahead_on)
+[e2n, e2d, e2t, e2b, e2t0, e2ds, e2r, e2v, e2f, e2bo, e2y, e2s, e2bn, e2ln, e2m, e2tg] = request.security(syminfo.tickerid, tf2, f_detect(), lookahead = barmerge.lookahead_on)
+[e3n, e3d, e3t, e3b, e3t0, e3ds, e3r, e3v, e3f, e3bo, e3y, e3s, e3bn, e3ln, e3m, e3tg] = request.security(syminfo.tickerid, tf3, f_detect(), lookahead = barmerge.lookahead_on)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ RANGO OPERATIVO (premium / discount) · velas cerradas del marco superior
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+[cHi, cLo] = request.security(syminfo.tickerid, curveTf, [ta.highest(high, curveLen)[1], ta.lowest(low, curveLen)[1]], lookahead = barmerge.lookahead_on)
+
+// [v3.9] Sesgo ESTRUCTURAL del marco superior: la dirección la marca el último rompimiento por CIERRE de
+// un pivote confirmado. Un nivel roto se consume (queda en na) y se rearma con el siguiente pivote, así
+// que el mismo máximo no puede disparar el sesgo dos veces. Todo sobre velas cerradas: sin repintado.
+f_bias() =>
+    float ph = ta.pivothigh(high[1], biasSwing, biasSwing)
+    float pl = ta.pivotlow(low[1], biasSwing, biasSwing)
+    var float bHi = na
+    var float bLo = na
+    var int   dir = 0
+    if not na(ph)
+        bHi := ph
+    if not na(pl)
+        bLo := pl
+    if not na(bHi) and close[1] > bHi
+        dir := 1
+        bHi := na
+    if not na(bLo) and close[1] < bLo
+        dir := -1
+        bLo := na
+    dir
+
+int htfDir = request.security(syminfo.tickerid, biasTf, f_bias(), lookahead = barmerge.lookahead_on)
+
+bool  curveTfOK = f_tfSec(curveTf) > chartSec
+bool  pdOK      = usePd and curveTfOK and not na(cHi) and not na(cLo) and cHi > cLo
+bool  biasTfOK  = f_tfSec(biasTf) > chartSec
+bool  inRTH     = not timeframe.isintraday or not na(time(timeframe.period, sessStr, "America/New_York"))
+float atrC      = ta.atr(14)
+
+// Posición de un precio dentro del rango: 0 = mínimo del rango · 1 = máximo.
+f_pdPos(float px) =>
+    pdOK ? math.max(0.0, math.min(1.0, (px - cLo) / (cHi - cLo))) : na
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ ALMACÉN DE BLOQUES
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+var array<Zone> zones = array.new<Zone>()
+
+f_typeTxt(Zone z) =>
+    z.isDem ? (z.ztype == 1 ? "DBR" : z.ztype == -1 ? "RBR" : "D") : (z.ztype == 1 ? "RBD" : z.ztype == -1 ? "DBD" : "S")
+
+// [v4.6] Cuántas velas DEL GRÁFICO equivalen a una vela del marco de este bloque. Es la misma conversión
+// que la ventana de evaluación usa desde v3.4, ahora compartida también por la edad.
+f_blkBars(Zone z) =>
+    math.max(1, int(math.round(z.tfSec / float(chartSec))))
+
+// [v4.6] LA EDAD SE CUENTA EN VELAS, no en milisegundos. `(time - z.t0)` metía en la cuenta el fin de
+// semana, el cierre diario y los festivos: un bloque nacido el viernes por la tarde llegaba al lunes con
+// dos días de "edad" sin que hubiera pasado una sola vela, y en futuros eso ocurre todas las semanas.
+// Se mide desde el REGISTRO del bloque (z.bar0), que en marcos superiores puede ir unas velas por detrás
+// de su origen real: la edad efectiva queda, como mucho, ligeramente a favor del bloque, nunca en contra.
+f_young(Zone z) =>
+    (bar_index - z.bar0) <= maxAgeBars * f_blkBars(z)
+
+// Un bloque está VIVO mientras no se haya roto, no haya caducado y no esté mitigado por encima del tope.
+f_live(Zone z) =>
+    not z.broken and f_young(z) and z.deepest < mitigPct / 100.0
+
+// [v3.0] Confluencia MTF GRADUADA: fracción de la altura de este bloque cubierta por un bloque vivo del
+// mismo tipo en un marco SUPERIOR. Rozar una zona de 1H no es lo mismo que estar dentro de ella.
+f_htfConf(Zone z) =>
+    float best = 0.0
+    for o in zones
+        // [v4.1] f_live, no `not o.broken`: un bloque de marco superior caducado o ya mitigado por encima
+        // del tope seguía regalando confluencia. Si no lo dibujas porque está muerto, tampoco confluye.
+        if o.isDem == z.isDem and o.tfSec > z.tfSec and f_live(o)
+            float ov = math.min(o.top, z.top) - math.max(o.bot, z.bot)
+            if ov > 0
+                best := math.max(best, ov / math.max(z.top - z.bot, syminfo.mintick))
+    math.min(1.0, best)
+
+// Score 0-100. `prior` = toques ANTERIORES al que se está evaluando.
+// [v4.6] La confluencia MTF ya no se pasa como argumento: se lee de `z.htfConf`, que se recalcula una vez
+// por vela cerrada para todos los bloques. Antes `f_htfConf` —que recorre el array entero— se invocaba
+// desde dentro de otros recorridos del array (panel, dibujo, cada toque): O(n²) repetido en cada tick de
+// la última vela, con hasta 150 bloques en memoria. Y además el panel la medía EN VIVO mientras el motor
+// la medía en vela cerrada, así que el score que leías arriba podía no ser el que la tabla registró.
+f_score(Zone z, int prior) =>
+    // 1. Impulso 20 — las escalas continuas se miden contra TUS PROPIOS MÍNIMOS: el mínimo exigido
+    //    puntúa 0 y el doble del mínimo puntúa el máximo. Así la escala se recalibra sola al cambiar
+    //    los inputs, en vez de compararse con constantes que en intradía casi nunca se alcanzan.
+    float sDisp  = math.max(0.0, math.min(8.0, (z.disp  - legNetAtr)   / math.max(legNetAtr, 0.5)  * 8.0))
+    float sRatio = math.max(0.0, math.min(8.0, (z.ratio - legRatioMin) / math.max(legRatioMin, 1.0) * 8.0))
+    float sMom   = z.momOut ? 4.0 : 0.0
+    // 2. Huella 20
+    float sFvg   = z.fvg ? 12.0 : 0.0
+    float sVol   = na(z.rvol) ? 4.0 : math.max(0.0, math.min(8.0, (z.rvol - 0.9) / 0.6 * 8.0))
+    // 3. Estructura 15
+    float sBos   = z.bos ? 15.0 : 0.0
+    // 4. Base 10 — 1 vela de compresión 10 · 2 velas 7 · Order Block 6 · 3+ velas 4
+    float sBase  = not z.baseTight ? 6.0 : z.baseN <= 1 ? 10.0 : z.baseN == 2 ? 7.0 : 4.0
+    // 5. Frescura 15
+    float sFresh = prior == 0 ? 15.0 : prior == 1 ? 5.0 : 0.0
+    // 6-7. Liquidez 5 + tipo 5
+    float sSweep = z.sweep ? 5.0 : 0.0
+    float sType  = z.ztype == 1 ? 5.0 : z.ztype == 0 ? 2.5 : 0.0
+    // 8. Confluencia MTF 5, graduada
+    float sMtf   = 5.0 * z.htfConf
+    // 9. Curva 5 — demanda con descuento, oferta con premium
+    float sPd    = 0.0
+    if usePd and not na(z.pd)
+        float fav = z.isDem ? 1.0 - z.pd : z.pd
+        sPd := math.max(0.0, math.min(5.0, (fav - 0.5) / 0.5 * 5.0))
+    sDisp + sRatio + sMom + sFvg + sVol + sBos + sBase + sFresh + sSweep + sType + sMtf + sPd
+
+// [v4.2] Umbrales CONFIGURABLES. Estaban clavados en 80/70, pero al endurecer FVG y momentum en v3.9 se
+// le quitaron ~16 puntos a la mayoría de bloques y el resultado fue cero A+ en 41 y solo 6 grados A: una
+// escala en la que nadie alcanza el tramo alto no clasifica, solo decora. El score no predice —eso ya lo
+// sabemos—, así que el grado es una etiqueta descriptiva de cuán de libro es el bloque, y como tal debe
+// repartir la población. Ajústalos a lo que veas: si casi todo te sale B, bájalos.
+f_grade(float s) =>
+    s >= gradeAp ? "A+" : s >= gradeA ? "A" : "B"
+
+f_tags(Zone z) =>
+    (z.fvg ? " FVG" : "") + (z.bos ? " BOS" : "") + (z.sweep ? " LIQ" : "") + (z.momOut ? " MOM" : "") + (not z.baseTight ? " OB" : "") + (z.isBreaker ? " BRK" : "")
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ ALTA DE BLOQUES
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// El evento persiste durante toda la vela del marco superior (lookahead_on), así que se deduplica por
+// guid en una `var` propia de cada llamada. Devuelve el resultado para el embudo del panel:
+//   0 sin evento · 1 rechazado por huella · 2 descartado por duplicado · 3 registrado
+
+f_addZone(bool use, bool ev, bool isDem, float top, float bot, int t0, float disp, float ratio, float rvol, bool fvg, bool bos, int zt, bool sweep, int baseN, int legN, bool momOut, bool tight, int tfIdx, string tfStr) =>
+    var int lastGuid = na
+    int res = 0
+    if use and ev and barstate.isconfirmed and not na(t0) and not na(top) and not na(bot)
+        int guid = t0 * 8 + tfIdx * 2 + (isDem ? 0 : 1)
+        if na(lastGuid) or guid != lastGuid
+            lastGuid := guid
+            bool fpOK = footprint == "Ninguna" ? true : footprint == "FVG o BOS" ? (fvg or bos) : (fvg and bos)
+            res := 1
+            if fpOK
+                Zone z = Zone.new(top = top, bot = bot, isDem = isDem, t0 = t0, guid = guid, tfSec = f_tfSec(tfStr), tfLbl = f_tfLabel(tfStr), disp = disp, ratio = ratio, rvol = rvol, fvg = fvg, bos = bos, ztype = zt, sweep = sweep, baseN = baseN, legN = legN, momOut = momOut, baseTight = tight, pd = f_pdPos((top + bot) / 2), tfIdx = tfIdx, bar0 = bar_index)
+                // Si nace con el precio dentro no cuenta como toque: tiene que salir y volver.
+                z.wasInside := high >= bot and low <= top
+                // El bloque todavía no está en el array, así que su confluencia se calcula aquí; los demás
+                // la tienen de la pasada de esta misma vela.
+                z.htfConf   := f_htfConf(z)
+                float newSc = f_score(z, 0)
+                // [v3.0] Duplicado: bloque vivo del MISMO marco y tipo que solapa por encima del umbral.
+                // Es el mismo nivel contado dos veces. Se queda el de mayor score.
+                int dup = -1
+                if dedupOn and zones.size() > 0
+                    for i = 0 to zones.size() - 1
+                        Zone o = zones.get(i)
+                        if o.isDem == isDem and o.tfSec == z.tfSec and f_live(o)
+                            float ov = math.min(o.top, top) - math.max(o.bot, bot)
+                            float hh = math.max(math.min(o.top - o.bot, top - bot), syminfo.mintick)
+                            if ov / hh >= dedupPct / 100.0
+                                dup := i
+                                break
+                bool keep = true
+                if dup >= 0
+                    keep := newSc > f_score(zones.get(dup), zones.get(dup).touches)
+                    if keep
+                        zones.remove(dup)
+                if keep
+                    zones.push(z)
+                    res := 3
+                    if newSc >= minScore
+                        alert('{"event":"SD_BLOCK","side":"' + (isDem ? "LONG" : "SHORT") + '","ticker":"' + syminfo.ticker + '","tf":"' + z.tfLbl + '","type":"' + f_typeTxt(z) + '","proximal":' + str.tostring(isDem ? top : bot, format.mintick) + ',"distal":' + str.tostring(isDem ? bot : top, format.mintick) + ',"score":' + str.tostring(math.round(newSc)) + ',"grade":"' + f_grade(newSc) + '"}', alert.freq_once_per_bar_close)
+                else
+                    res := 2
+    res
+
+// Limpieza: bloques rotos o caducados fuera, y tope de memoria (primero los más antiguos).
+var int zUnres = 0
+if barstate.isconfirmed and zones.size() > 0
+    for i = zones.size() - 1 to 0
+        Zone z = zones.get(i)
+        // [v4.6] Mismo criterio que f_young —velas, no reloj— al doble de edad: el bloque deja de estar
+        // vivo en maxAgeBars pero se guarda un rato más para no truncar su evaluación abierta.
+        if z.broken or (bar_index - z.bar0) > maxAgeBars * f_blkBars(z) * 2
+            if z.evalOn and not z.resolved
+                zUnres += 1
+            zones.remove(i)
+    // [v3.6] El tope de memoria descartaba bloques sin mirar si tenían una evaluación abierta.
+    while zones.size() > maxZonesMem
+        Zone old = zones.shift()
+        if old.evalOn and not old.resolved
+            zUnres += 1
+
+int r1 = f_addZone(tf1Use, e1n, e1d, e1t, e1b, e1t0, e1ds, e1r, e1v, e1f, e1bo, e1y, e1s, e1bn, e1ln, e1m, e1tg, 0, tf1)
+int r2 = f_addZone(tf2Use, e2n, e2d, e2t, e2b, e2t0, e2ds, e2r, e2v, e2f, e2bo, e2y, e2s, e2bn, e2ln, e2m, e2tg, 1, tf2)
+int r3 = f_addZone(tf3Use, e3n, e3d, e3t, e3b, e3t0, e3ds, e3r, e3v, e3f, e3bo, e3y, e3s, e3bn, e3ln, e3m, e3tg, 2, tf3)
+
+// Embudo de formación: dónde se pierden los candidatos.
+var int fnDet = 0   // eventos de bloque detectados por los marcos
+var int fnFp  = 0   // ... rechazados por el filtro de huella
+var int fnDup = 0   // ... descartados por duplicado
+var int fnReg = 0   // ... registrados
+if barstate.isconfirmed
+    fnDet += (r1 > 0 ? 1 : 0) + (r2 > 0 ? 1 : 0) + (r3 > 0 ? 1 : 0)
+    fnFp  += (r1 == 1 ? 1 : 0) + (r2 == 1 ? 1 : 0) + (r3 == 1 ? 1 : 0)
+    fnDup += (r1 == 2 ? 1 : 0) + (r2 == 2 ? 1 : 0) + (r3 == 2 ? 1 : 0)
+    fnReg += (r1 == 3 ? 1 : 0) + (r2 == 3 ? 1 : 0) + (r3 == 3 ? 1 : 0)
+
+bool newBlock = r1 == 3 or r2 == 3 or r3 == 3
+
+// [v4.6] CONFLUENCIA MTF: una sola pasada por vela cerrada, DESPUÉS de dar de alta los bloques nuevos y
+// antes del ciclo de vida, que es donde se consume. El valor queda en el propio bloque y todo lo de abajo
+// —score, panel, dibujo, tabla— lee el mismo número. Antes cada consumidor la recalculaba recorriendo el
+// array entero desde dentro de otro recorrido del array, y el panel lo hacía además en la vela en curso.
+if barstate.isconfirmed and zones.size() > 0
+    for z in zones
+        z.htfConf := f_htfConf(z)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ CICLO DE VIDA Y VERIFICACIÓN (solo vela cerrada)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Cada bloque tocado entra en evaluación, como si lo operaras: entrada en el proximal, stop por mecha
+// un colchón más allá del distal, objetivo a la misma distancia (1R). AGUANTA si llega al objetivo
+// dentro de la ventana; FALLA si salta el stop, si el bloque se rompe, o si se agota la ventana.
+// Reglas simétricas y pesimistas — si los bloques no valieran nada, esto daría ~50%.
+
+var int   evN       = 0   // operaciones simuladas resueltas
+var int   evHeld    = 0   // ... que alcanzaron el objetivo (1R)
+var int   evHeld2   = 0   // ... que alcanzaron el doble (2R)
+var int   evTimeout = 0   // ... cerradas por agotarse la ventana, sin saltar el stop
+var float evRSum    = 0.0 // suma de recorridos máximos a favor
+// [v4.6] Las cerradas por ventana SIN haber alcanzado el objetivo doble no son una pérdida de 1R: se sale
+// a mercado y te llevas lo que haya. Se cuentan aparte y con su resultado real para que la esperanza deje
+// de castigarlas como si hubieran saltado el stop.
+var int   evMkt     = 0   // ... liquidadas a mercado al agotarse la ventana, sin llegar al objetivo doble
+var float evXSum    = 0.0 // suma de SUS resultados reales en R (puede ser negativa)
+// [v3.3] Doce cortes de los mismos datos. Los tres últimos son EL CORTE CLAVE: si los bloques de 1m son
+// ruido pero los de 15m o 1H tienen ventaja, el problema no es el motor sino el marco en el que se aplica.
+// [v3.5] Los dos últimos cortes parten el histórico por la mitad. Es la defensa más importante de todas:
+// una ventaja REAL aparece en las dos mitades. Si solo está en una, la produjo un periodo concreto y no
+// el bloque — que es exactamente lo que hace sospechar que MES saliera +0.28 y MNQ −0.18 en TODAS sus
+// filas a la vez: un desplazamiento uniforme delata al periodo, no al nivel.
+// [v3.9] Tres cortes nuevos de CONTEXTO —sesión, sesgo del marco superior y descuento/premium— porque
+// son las variables que quedaron fuera en v3.0 y nunca se volvieron a medir. No tocan el score: entran
+// aquí, que es donde se decide con datos si aportan algo.
+var array<int>   bN = array.new<int>(19, 0)    // operaciones del corte
+var array<int>   b1 = array.new<int>(19, 0)    // ... que llegaron al objetivo
+var array<int>   b2 = array.new<int>(19, 0)    // ... que llegaron al doble
+var array<float> bS = array.new<float>(19, 0.0) // suma de MFE
+var array<int>   bT = array.new<int>(19, 0)    // [v3.4] ... cerradas por ventana agotada
+var array<float> bC = array.new<float>(19, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
+var array<int>   bM = array.new<int>(19, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
+var array<float> bX = array.new<float>(19, 0.0) // [v4.6] suma de SUS resultados reales en R
+var float        evCSum = 0.0
+
+// [v4.6] FRONTERA DE LAS DOS MITADES, CONGELADA EN LA PRIMERA VELA. `last_bar_index / 2` se reevaluaba en
+// cada operación: en histórico da lo mismo, pero en cuanto el gráfico avanza en tiempo real la frontera se
+// desplaza y las operaciones ya contabilizadas quedan clasificadas con un corte distinto del de las nuevas.
+// Las dos mitades dejaban de ser comparables — y son la defensa más importante de toda la tabla.
+var int splitBar = int(last_bar_index / 2)
+
+bool  touched   = false
+bool  brokeAny  = false
+bool  touchDemQ = false   // [v3.8] toque en demanda que además pasa el score mínimo
+bool  touchSupQ = false
+// Los breakers se acumulan aparte: no se puede modificar el array mientras se recorre.
+var int brkSeq = 0
+array<Zone> newBrk = array.new<Zone>()
+
+// [v3.6] Evaluaciones abiertas, RECALCULADAS cada vela desde el estado real de los bloques. Antes era un
+// contador acumulado y se atascaba: un bloque descartado por el tope de memoria se llevaba su cuenta sin
+// devolverla, y con el modo "una operación a la vez" eso acababa bloqueando la muestra a media serie
+// (11 operaciones, todas en la primera mitad, cero en la segunda). Recalculado no puede desincronizarse.
+int evOpen = 0
+if zones.size() > 0
+    for z in zones
+        if z.evalOn and not z.resolved
+            evOpen += 1
+// [v4.6] El hueco se congela AQUÍ, antes de recorrer los bloques. Antes se liberaba dentro del bucle, al
+// resolverse una operación, de modo que un bloque tocado en esta misma vela podía ocupar el hueco — pero
+// solo si estaba más adelante en el array. Quién entraba en la muestra lo decidía el orden de creación de
+// los bloques, no lo que hizo el mercado. Ahora: como mucho una apertura por vela, y quien cierra libera
+// el hueco para la SIGUIENTE, que es como funcionaría una cuenta de verdad.
+bool slotFree = evOpen == 0
+
+if barstate.isconfirmed and zones.size() > 0
+    for z in zones
+        if not z.broken
+            bool inside = high >= z.bot and low <= z.top
+            bool brk    = z.isDem ? (invalidBy == "Cierre" ? close < z.bot : low < z.bot) : (invalidBy == "Cierre" ? close > z.top : high > z.top)
+            float h     = math.max(z.top - z.bot, syminfo.mintick)
+
+            // Toque nuevo: el precio salió y volvió.
+            if inside and not z.wasInside
+                z.touches += 1
+                touched := true
+                // [v3.8] Alerta útil = lado + calidad + nivel, no "algo ha pasado". Una alerta que no te
+                // dice cuál de los dieciséis bloques del gráfico se ha tocado no sirve para reaccionar.
+                float tsc = f_score(z, z.touches - 1)
+                if tsc >= minScore
+                    if z.isDem
+                        touchDemQ := true
+                    else
+                        touchSupQ := true
+                    alert('{"event":"SD_TOUCH","side":"' + (z.isDem ? "LONG" : "SHORT") + '","ticker":"' + syminfo.ticker + '","tf":"' + z.tfLbl + '","type":"' + f_typeTxt(z) + '","proximal":' + str.tostring(z.isDem ? z.top : z.bot, format.mintick) + ',"distal":' + str.tostring(z.isDem ? z.bot : z.top, format.mintick) + ',"score":' + str.tostring(math.round(tsc)) + ',"grade":"' + f_grade(tsc) + '","touch":' + str.tostring(z.touches) + ',"mitigated_pct":' + str.tostring(math.round(z.deepest * 100)) + '}', alert.freq_once_per_bar_close)
+                // [v3.5] Con "una operación a la vez", un bloque tocado mientras otro sigue abierto NO
+                // entra en la muestra: sería el mismo movimiento contado dos veces.
+                if not z.evalOn and not z.resolved and (not oneAtATime or slotFree)
+                    z.evalOn   := true
+                    z.evalBar  := bar_index
+                    slotFree   := false
+                    // [v3.7] Stop y riesgo se CONGELAN aquí. Antes se recalculaban cada vela con el ATR
+                    // del momento, así que el stop se movía solo durante la operación.
+                    // [v4.1] El colchón se escala con la volatilidad DEL MARCO DEL BLOQUE (raíz del tiempo,
+                    // que es como escala la volatilidad). Con el ATR del gráfico, un bloque de 1H en un
+                    // gráfico de 15m recibía un colchón de 15 minutos: un stop demasiado estrecho que lo
+                    // sacaba antes de tiempo y hundía artificialmente las filas de marco superior.
+                    float atrBlk = atrC * math.sqrt(math.max(1.0, z.tfSec / float(chartSec)))
+                    float prox0  = z.isDem ? z.top : z.bot
+                    // [v4.6] La UNIDAD DE LA CARRERA fija también el stop. Con "ATR" el objetivo se medía
+                    // en ATR mientras el stop seguía clavado en el distal más el colchón: dos distancias
+                    // distintas, justo la asimetría que v3.2 corrigió para el otro modo y que reaparecía
+                    // aquí. Con el stop derivado de la unidad, objetivo y stop están siempre a la misma
+                    // distancia y el ~50% de referencia sigue valiendo en los dos modos.
+                    if reactUnit == "R del bloque"
+                        z.stopPx  := z.isDem ? z.bot - atrBlk * evalBufAtr : z.top + atrBlk * evalBufAtr
+                        z.riskPts := math.max(z.isDem ? prox0 - z.stopPx : z.stopPx - prox0, syminfo.mintick)
+                    else
+                        z.riskPts := math.max(atrBlk, syminfo.mintick)
+                        z.stopPx  := z.isDem ? prox0 - z.riskPts : prox0 + z.riskPts
+                    z.htfAt    := z.htfConf >= 0.5
+                    z.scoreAt  := f_score(z, z.touches - 1)
+                    // [v3.9] Contexto CONGELADO en el momento del toque: es lo que sabías al decidir.
+                    z.rthAt    := inRTH
+                    z.biasAt   := not biasTfOK or htfDir == 0 ? 0 : (z.isDem ? htfDir : -htfDir)
+                    // [v4.1] MARGEN DE BENEFICIO (Seiden): borde del bloque contrario vivo más cercano en la
+                    // dirección del trade, en R. Sin bloque contrario delante = camino despejado = suficiente.
+                    float oppPx = na
+                    for o in zones
+                        if f_live(o) and o.isDem != z.isDem and (z.isDem ? o.bot > z.top : o.top < z.bot)
+                            float e = z.isDem ? o.bot : o.top
+                            oppPx := na(oppPx) ? e : (z.isDem ? math.min(oppPx, e) : math.max(oppPx, e))
+                    float rrTo = na(oppPx) ? na : (z.isDem ? oppPx - z.top : z.bot - oppPx) / z.riskPts
+                    // [v4.2] El corte exige que HAYA un muro y esté lejos. Contando también "no hay bloque
+                    // contrario delante" como margen suficiente, el atributo salía al 93% de frecuencia —el
+                    // mismo vicio que el FVG— porque con pocos bloques vivos casi nunca hay muro. Así mide
+                    // lo que de verdad distingue: un nivel con recorrido por delante frente a uno ahogado.
+                    z.rrAt     := not na(rrTo) and rrTo >= rrMin
+                    // [v4.1] LLEGADA (Seiden): recorrido neto de las últimas velas al tocar. Acelerando =
+                    // ofensiva que suele atravesar; controlada = retroceso que respeta.
+                    z.softAt   := math.abs(close - close[arrBars]) / math.max(atrC, syminfo.mintick) <= arrMax
+
+            // Mitigación: hasta dónde ha penetrado el precio, medido con la mecha.
+            if inside
+                z.deepest := math.max(z.deepest, z.isDem ? (z.top - low) / h : (high - z.bot) / h)
+
+            // Muerte del bloque (usa la invalidación que hayas elegido: es otra pregunta distinta).
+            bool resolvedNow = false
+            bool byTime      = false
+            if brk
+                z.broken := true
+                brokeAny := true
+                if z.evalOn and not z.resolved
+                    z.resolved  := true
+                    resolvedNow := true
+
+            // [v3.3] LA OPERACIÓN COMPLETA. Hasta v3.2 la prueba se cerraba al tocar 1R, así que no podía
+            // ver el recorrido posterior: respondía "¿aguantó?" pero no "¿hay ventaja?". Dos sistemas con
+            // el mismo 48% de aciertos son cosas opuestas si uno corre hasta 3R y el otro se para en 1R.
+            // Ahora la operación vive hasta que salta el stop o se agota la ventana, registrando el
+            // RECORRIDO MÁXIMO A FAVOR (MFE) en R. Con eso se puede calcular la esperanza a cualquier
+            // objetivo, que es la única pregunta que importa.
+            if z.evalOn and not z.resolved
+                float prox   = z.isDem ? z.top : z.bot
+                float stopPx = z.stopPx
+                // [v4.6] Una sola unidad: la distancia proximal→stop, sea cual sea el modo. Es lo que se
+                // arriesga y es lo que separa el objetivo del stop.
+                float unit   = z.riskPts
+                // El stop se comprueba PRIMERO y por mecha: si una vela hace las dos cosas no sabemos el
+                // orden intravela, y lo honesto es dar por perdida esa vela.
+                bool stopHit = z.isDem ? low <= stopPx : high >= stopPx
+                if not stopHit and bar_index > z.evalBar
+                    z.mfe := math.max(z.mfe, (z.isDem ? high - prox : prox - low) / unit)
+                // [v3.4] La ventana se cuenta en velas DEL MARCO DEL BLOQUE, no del gráfico. Antes un
+                // bloque de 15m tenía 20 velas de 1m — veinte minutos — para hacer un recorrido que
+                // necesita horas: salía con MFE 0.41 y esperanza −1, que no medía el bloque sino el reloj.
+                int win = reactWindow * f_blkBars(z)
+                if stopHit or (reactWindow > 0 and bar_index - z.evalBar >= win)
+                    z.resolved  := true
+                    resolvedNow := true
+                    if stopHit
+                        z.exitR := -1.0
+                    else
+                        byTime    := true
+                        evTimeout += 1
+                        // [v4.6] Salida A MERCADO: el resultado es el recorrido neto en el momento de
+                        // cerrar, que es lo que te llevas de verdad. Puede ser positivo o negativo, pero
+                        // no es −1R: el stop no llegó a saltar.
+                        z.exitR := (z.isDem ? close - prox : prox - close) / unit
+
+            if resolvedNow
+                float m  = z.mfe
+                float t1 = reactTarget
+                float t2 = reactTarget * 2
+                // [v3.7] Coste en R de ESTA operación: los mismos ticks pesan mucho más cuando la R es
+                // pequeña, así que no se puede restar un promedio global al final.
+                float cr = costTicks * syminfo.mintick / math.max(z.riskPts, syminfo.mintick)
+                // [v4.6] Tres desenlaces, no dos. Si el MFE alcanzó el objetivo doble, la operación se
+                // habría cerrado AHÍ aunque luego saltara el stop o expirara el reloj: cuenta como ganada.
+                // Si no lo alcanzó y la ventana se agotó, se liquida a mercado con su resultado real. Solo
+                // el resto —stop tocado sin haber pasado por el objetivo— pierde la R entera.
+                bool  toMkt = byTime and m < t2
+                float xr    = toMkt and not na(z.exitR) ? z.exitR : 0.0
+                evN    += 1
+                evRSum += m
+                evCSum += cr
+                if m >= t1
+                    evHeld += 1
+                if m >= t2
+                    evHeld2 += 1
+                if toMkt
+                    evMkt  += 1
+                    evXSum += xr
+                bool early = z.evalBar < splitBar
+                bool pdFav = na(z.pd) ? false : (z.isDem ? z.pd <= 0.5 : z.pd >= 0.5)
+                for k = 0 to 18
+                    bool has = k == 0 ? z.scoreAt >= gradeAp : k == 1 ? (z.scoreAt >= gradeA and z.scoreAt < gradeAp) : k == 2 ? z.scoreAt < gradeA : k == 3 ? z.fvg : k == 4 ? z.bos : k == 5 ? z.sweep : k == 6 ? z.htfAt : k == 7 ? (z.baseTight and z.baseN <= 1) : k == 8 ? z.momOut : k == 9 ? z.rthAt : k == 10 ? z.biasAt == 1 : k == 11 ? pdFav : k == 12 ? z.rrAt : k == 13 ? z.softAt : k == 14 ? z.tfIdx == 0 : k == 15 ? z.tfIdx == 1 : k == 16 ? z.tfIdx == 2 : k == 17 ? early : not early
+                    if has
+                        bN.set(k, bN.get(k) + 1)
+                        bS.set(k, bS.get(k) + m)
+                        bC.set(k, bC.get(k) + cr)
+                        if m >= t1
+                            b1.set(k, b1.get(k) + 1)
+                        if m >= t2
+                            b2.set(k, b2.get(k) + 1)
+                        if byTime
+                            bT.set(k, bT.get(k) + 1)
+                        if toMkt
+                            bM.set(k, bM.get(k) + 1)
+                            bX.set(k, bX.get(k) + xr)
+
+            // BREAKER: la rotura CON DESPLAZAMIENTO no solo mata el bloque, cambia el control. El mismo
+            // rango queda como bloque contrario. Sin desplazamiento la rotura es deriva y el bloque
+            // simplemente muere. Nace con el precio dentro: tiene que alejarse y volver.
+            if brk and useBreaker and math.abs(close - open) >= atrC * breakerDispAtr
+                brkSeq += 1
+                // [v3.9] Faltaba tfIdx: los breakers nacían con marco `na` y se caían de los tres cortes
+                // por marco de la tabla — se medían en el total pero en ninguna de sus filas.
+                Zone b = Zone.new(top = z.top, bot = z.bot, isDem = not z.isDem, t0 = time, guid = -brkSeq, tfSec = z.tfSec, tfLbl = z.tfLbl, disp = math.abs(close - open) / math.max(atrC, syminfo.mintick), ratio = legRatioMin, rvol = na, fvg = false, bos = true, ztype = 1, sweep = false, baseN = 1, legN = 1, momOut = false, baseTight = true, pd = f_pdPos((z.top + z.bot) / 2), tfIdx = z.tfIdx, bar0 = bar_index)
+                b.isBreaker := true
+                b.wasInside := true
+                newBrk.push(b)
+
+            z.wasInside := inside
+
+if newBrk.size() > 0
+    for b in newBrk
+        zones.push(b)
+        // [v4.6] El breaker nace después de la pasada de confluencia de esta vela: se la calcula él.
+        b.htfConf := f_htfConf(b)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ DIBUJO (objetos pre-asignados; solo se mueven coordenadas)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+var array<box>  slotBox  = array.new<box>()
+var array<box>  slotMit  = array.new<box>()
+var array<line> slotLine = array.new<line>()
+
+if barstate.isfirst
+    for i = 1 to maxRender
+        slotBox.push(box.new(na, na, na, na, xloc = xloc.bar_time, text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_bottom))
+        slotMit.push(box.new(na, na, na, na, xloc = xloc.bar_time, border_width = 0))
+        slotLine.push(line.new(na, na, na, na, xloc = xloc.bar_time, width = 2))
+
+f_render() =>
+    int nz       = zones.size()
+    int rendered = 0
+    if nz > 0
+        // [v3.8] Se dibujan los bloques MÁS CERCANOS AL PRECIO, no los más recientes. Antes el tope de
+        // dibujo se llenaba con los últimos nacidos, que suelen quedar lejos, y el nivel hacia el que el
+        // precio se dirige —el único que importa ahora mismo— podía no pintarse.
+        array<float> scs  = array.new<float>(nz, na)
+        array<bool>  used = array.new<bool>(nz, true)
+        for i = 0 to nz - 1
+            Zone z = zones.get(i)
+            if f_live(z)
+                float sc = f_score(z, z.touches)
+                if sc >= showMinScore and not (showFresh and z.touches > 0)
+                    scs.set(i, sc)
+                    used.set(i, false)
+        for slot = 1 to maxRender
+            int   best  = -1
+            float bestD = na
+            for i = 0 to nz - 1
+                if not used.get(i)
+                    Zone  o = zones.get(i)
+                    float d = math.abs(close - (o.isDem ? o.top : o.bot))
+                    if na(bestD) or d < bestD
+                        bestD := d
+                        best  := i
+            if best < 0
+                break
+            used.set(best, true)
+            Zone   z   = zones.get(best)
+            float  sc  = scs.get(best)
+            box    b   = slotBox.get(rendered)
+            box    mb  = slotMit.get(rendered)
+            line   l   = slotLine.get(rendered)
+            color  cz  = z.isDem ? colDem : colSup
+            // [v4.3] La transparencia iba atada a 80/70 fijos. Al endurecer FVG y momentum en v3.9 casi
+            // todos los bloques cayeron por debajo de 70 y acabaron pintándose al 84% —90% si estaban
+            // tocados—, es decir, invisibles sobre fondo oscuro. Ahora sigue a los umbrales de grado y
+            // parte de una opacidad que tú controlas.
+            // [v4.5] El clamp va DESPUÉS de sumar el recargo por bloque tocado. Antes se limitaba a 95 y
+            // luego se le sumaban 6: con zoneOpac alto daba 101, y Pine rechaza cualquier transparencia
+            // por encima de 100 — error en tiempo de ejecución, no un fallo visual.
+            int    tr0 = sc >= gradeAp ? zoneOpac - 8 : sc >= gradeA ? zoneOpac : zoneOpac + 8
+            int    tr  = math.max(0, math.min(100, tr0 + (z.touches > 0 ? 6 : 0)))
+            int    xr  = time + chartSec * 1000 * extendBars
+            float  hh  = z.top - z.bot
+            string tch = z.touches > 0 ? " · T" + str.tostring(z.touches) : ""
+            box.set_lefttop(b, z.t0, z.top)
+            box.set_rightbottom(b, xr, z.bot)
+            box.set_bgcolor(b, color.new(cz, tr))
+            box.set_border_color(b, color.new(cz, 40))
+            box.set_text(b, z.tfLbl + " " + f_typeTxt(z) + " · " + str.tostring(math.round(sc)) + " " + f_grade(sc) + f_tags(z) + tch)
+            box.set_text_color(b, color.new(color.white, 15))
+            // [v3.8] Franja de MITIGACIÓN: la parte del bloque que el precio ya se ha comido. Se veía
+            // solo como "M62%" en el texto; dibujada, se entiende de un vistazo cuánto queda vivo.
+            if z.deepest >= 0.03
+                box.set_lefttop(mb, z.t0, z.isDem ? z.top : z.bot + hh * z.deepest)
+                box.set_rightbottom(mb, xr, z.isDem ? z.top - hh * z.deepest : z.bot)
+                box.set_bgcolor(mb, color.new(cz, 55))
+            else
+                box.set_lefttop(mb, na, na)
+                box.set_rightbottom(mb, na, na)
+            float prox = z.isDem ? z.top : z.bot
+            line.set_xy1(l, z.t0, prox)
+            line.set_xy2(l, xr, prox)
+            line.set_color(l, color.new(cz, 0))
+            rendered += 1
+    // Los huecos sobrantes se aparcan fuera del gráfico.
+    if rendered < slotBox.size()
+        for j = rendered to slotBox.size() - 1
+            box.set_lefttop(slotBox.get(j), na, na)
+            box.set_rightbottom(slotBox.get(j), na, na)
+            box.set_lefttop(slotMit.get(j), na, na)
+            box.set_rightbottom(slotMit.get(j), na, na)
+            line.set_xy1(slotLine.get(j), na, na)
+            line.set_xy2(slotLine.get(j), na, na)
+
+if showZones and barstate.islast
+    f_render()
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ PANEL
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+f_row(table t, int r, string k, string v, color c) =>
+    table.cell(t, 0, r, k, text_color = color.gray, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(t, 1, r, v, text_color = c, text_size = size.tiny, text_halign = text.align_left)
+
+f_pctTxt(int part, int whole) =>
+    whole > 0 ? str.tostring(part / float(whole) * 100.0, "#") + "%" : "—"
+
+// [v3.8] Una fila del panel para el bloque más cercano por arriba o por abajo. Es lo único de toda la
+// pantalla que responde a la pregunta que de verdad te haces mirando el gráfico: ¿dónde está el siguiente
+// nivel y a cuánto lo tengo?
+f_nearRow(table t, int r, string k, bool found, float px, float sc, float dist, float hgt, color cz) =>
+    string v = "—"
+    color  c = color.gray
+    if found
+        bool dentro = dist <= 0
+        // Precio · a cuánto está · R del bloque (proximal→distal: lo que arriesgarías) · calidad.
+        v := str.tostring(px, format.mintick) + "  ·  " + (dentro ? "DENTRO" : str.tostring(dist, format.mintick) + " pts") + "  ·  R " + str.tostring(hgt, format.mintick) + "  ·  " + str.tostring(math.round(sc)) + " " + f_grade(sc)
+        c := dentro ? #FFD700 : cz
+    f_row(t, r, k, v, c)
+
+f_dash() =>
+    // Recuento de bloques vivos. Se hace aquí, no en el bucle de ciclo de vida, porque ese solo corre en
+    // vela cerrada y el panel se dibuja también sobre la vela en curso.
+    int   cntDem   = 0
+    int   cntSup   = 0
+    float bestLive = 0.0
+    // Bloque más cercano a cada lado: la demanda de proximal más ALTO que el precio aún no ha roto, y la
+    // oferta de proximal más BAJO. Si el precio está dentro de uno, ese gana por definición.
+    bool  hasD = false
+    bool  hasS = false
+    float dPx  = na
+    float dSc  = na
+    float dHt  = na
+    float sPx  = na
+    float sSc  = na
+    float sHt  = na
+    if zones.size() > 0
+        for z in zones
+            if f_live(z)
+                float sc = f_score(z, z.touches)
+                bestLive := math.max(bestLive, sc)
+                // [v4.5] La R que se muestra incluye el COLCHÓN más allá del distal, igual que la que usa
+                // la tabla de verificación. Antes mostraba solo la altura de la caja: la cifra con la que
+                // dimensionabas la posición era menor que la que el indicador usa para medirse a sí mismo.
+                float rk = (z.top - z.bot) + atrC * math.sqrt(math.max(1.0, z.tfSec / float(chartSec))) * evalBufAtr
+                if z.isDem
+                    cntDem += 1
+                    if z.bot <= close and (not hasD or z.top > dPx)
+                        hasD := true
+                        dPx  := z.top
+                        dSc  := sc
+                        dHt  := rk
+                else
+                    cntSup += 1
+                    if z.top >= close and (not hasS or z.bot < sPx)
+                        hasS := true
+                        sPx  := z.bot
+                        sSc  := sc
+                        sHt  := rk
+
+    var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
+    table.cell(tb, 0, 0, "S&D BLOCKS v4.5", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
+
+    // Lo accionable primero: dónde está el siguiente nivel a cada lado.
+    f_nearRow(tb, 1, "▲ Oferta arriba",   hasS, sPx, sSc, sPx - close, sHt, colSup)
+    f_nearRow(tb, 2, "▼ Demanda abajo",   hasD, dPx, dSc, close - dPx, dHt, colDem)
+
+    // [v3.9] Una sola fila de contexto: sesión, sesgo del marco superior y posición en el rango. Las tres
+    // cosas que cambian cómo lees un bloque, sin gastar tres filas en decirlas.
+    float  pdNow = f_pdPos(close)
+    string sSess = inRTH ? "RTH" : "nocturna"
+    string sBias = not biasTfOK ? "⚠ marco ≤ gráfico" : htfDir == 1 ? "▲ alcista" : htfDir == -1 ? "▼ bajista" : "— sin sesgo"
+    string sPd   = not pdOK ? "s/d" : str.tostring(pdNow * 100, "#") + "% " + (pdNow >= 0.5 ? "premium" : "descuento")
+    f_row(tb, 3, "Contexto", sSess + "  ·  " + sBias + " " + f_tfLabel(biasTf) + "  ·  " + sPd, not inRTH ? #FFA726 : htfDir == 1 ? #00E676 : htfDir == -1 ? #FF5252 : color.white)
+
+    string sMarcos = (tf1Use ? f_tfLabel(tf1) + " " : "") + (tf2Use ? f_tfLabel(tf2) + " " : "") + (tf3Use ? f_tfLabel(tf3) : "")
+    f_row(tb, 4, "Bloques vivos", "D " + str.tostring(cntDem) + " · S " + str.tostring(cntSup) + " · " + sMarcos + (tfIgnored ? " ⚠" : "") + (bestLive > 0 ? " · mejor " + str.tostring(math.round(bestLive)) : ""), tfIgnored ? #FFA726 : color.white)
+
+    // [v3.8] El embudo de formación es diagnóstico, no operativa: fuera del panel salvo que lo pidas.
+    if showFunnel
+        f_row(tb, 5, "Detectados", str.tostring(fnDet), color.white)
+        f_row(tb, 6, "Sin huella ✖", str.tostring(fnFp) + " · " + f_pctTxt(fnFp, fnDet), fnDet > 0 and fnFp > fnDet / 2 ? #FFA726 : color.gray)
+        f_row(tb, 7, "Duplicados ✖", str.tostring(fnDup) + " · " + f_pctTxt(fnDup, fnDet), color.gray)
+        f_row(tb, 8, "Registrados", str.tostring(fnReg) + " · " + f_pctTxt(fnReg, fnDet), fnReg > 0 ? #00E676 : #FF5252)
+
+if showDash and barstate.islast
+    f_dash()
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ TABLA DE VERIFICACIÓN
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Si A+ no aguanta más que B, el score está mal y hay que cambiarlo. Si una columna de atributo no se
+// separa de la media, ese odds enhancer no está aportando nada medible EN ESTE activo y marco.
+
+// FREC. es imprescindible: sin ella no se distingue un atributo que NO FUNCIONA de uno que tiene CASI
+// TODO EL MUNDO. Un atributo presente en el 90% de los bloques no puede separar nada por definición.
+// [v3.3] ESP. es la columna que decide: esperanza en R operando ese corte con objetivo al DOBLE del
+// objetivo base y stop a 1R. Positiva = ventaja real. Es lo único que no se puede discutir.
+// [v4.6] La esperanza tiene ahora TRES desenlaces. Antes toda operación que no llegaba al objetivo doble
+// restaba 1R entera, incluidas las que el reloj cerró sin que el stop llegara a saltar — y con filas al
+// 35-40% de cierres por tiempo, ese error se comía media fila. Ahora:
+//   · MFE ≥ objetivo doble           → +2T  (habrías salido en el objetivo)
+//   · ventana agotada sin llegar ahí → su resultado REAL a mercado, positivo o negativo
+//   · el resto (stop tocado)         → −T
+// `nm` = operaciones liquidadas a mercado · `sx` = suma de sus resultados en R.
+f_evRow(table t, int r, string k, int n, int n1, int n2, float sm, int nt, float sc, int nm, float sx, int total, bool head) =>
+    float p1   = n > 0 ? n1 / float(n) * 100.0 : na
+    float p2   = n > 0 ? n2 / float(n) : na
+    // [v3.7] NETA de costes: el coste medio en R de este corte, que no es el mismo para todos porque
+    // depende del tamaño de la R de cada operación.
+    float esp  = n <= 0 ? na : (n2 * (reactTarget * 2) + sx - (n - n2 - nm) * reactTarget - sc) / n
+    float freq = total > 0 ? n / float(total) * 100.0 : na
+    float pto  = n > 0 ? nt / float(n) * 100.0 : na
+    // Lo que de verdad se sacó de las cerradas por reloj. Si es muy negativo, esa fila no está midiendo
+    // niveles que aguanten: está midiendo precio que se queda muerto dentro del bloque.
+    float pxr  = nm > 0 ? sx / nm : na
+    color c    = n < evalMinN ? color.gray : color.white
+    color ce   = n < evalMinN or na(esp) ? color.gray : esp > 0.15 ? #00E676 : esp > 0 ? #FFD700 : #FF5252
+    color cf   = na(freq) ? color.gray : freq >= 80 ? #FFA726 : color.gray
+    // [v3.4] Muchos cierres por tiempo = la fila mide el reloj, no el bloque. Se avisa en naranja.
+    color ct   = na(pto) ? color.gray : pto >= 35 ? #FFA726 : color.gray
+    table.cell(t, 0, r, k, text_color = head ? color.white : color.gray, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(t, 1, r, str.tostring(n), text_color = c, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(t, 2, r, head or na(freq) ? "—" : str.tostring(freq, "#") + "%", text_color = cf, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(t, 3, r, na(p1) ? "—" : str.tostring(p1, "#") + "%", text_color = c, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(t, 4, r, na(p2) ? "—" : str.tostring(p2 * 100, "#") + "%", text_color = c, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(t, 5, r, n > 0 ? str.tostring(sm / n, "#.##") : "—", text_color = c, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(t, 6, r, na(pto) ? "—" : str.tostring(pto, "#") + "%", text_color = ct, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(t, 7, r, na(pxr) ? "—" : (pxr >= 0 ? "+" : "") + str.tostring(pxr, "#.##"), text_color = na(pxr) ? color.gray : c, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(t, 8, r, na(esp) ? "—" : (esp >= 0 ? "+" : "") + str.tostring(esp, "#.##"), text_color = ce, text_size = size.tiny, text_halign = text.align_right)
+
+// [v3.9] Fila compacta del modo Resumen: solo N, aciertos al objetivo doble y esperanza neta. Con esas
+// tres cifras y las dos mitades ya se decide; lo demás es investigación.
+f_evMini(table t, int r, string k, int n, int n2, float sc, int nm, float sx, bool head) =>
+    float p2  = n > 0 ? n2 / float(n) : na
+    // [v4.6] Misma fórmula de tres desenlaces que la tabla completa.
+    float esp = n <= 0 ? na : (n2 * (reactTarget * 2) + sx - (n - n2 - nm) * reactTarget - sc) / n
+    color c   = n < evalMinN ? color.gray : color.white
+    color ce  = n < evalMinN or na(esp) ? color.gray : esp > 0.15 ? #00E676 : esp > 0 ? #FFD700 : #FF5252
+    table.cell(t, 0, r, k, text_color = head ? color.white : color.gray, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(t, 1, r, str.tostring(n), text_color = c, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(t, 2, r, na(p2) ? "—" : str.tostring(p2 * 100, "#") + "%", text_color = c, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(t, 3, r, na(esp) ? "—" : (esp >= 0 ? "+" : "") + str.tostring(esp, "#.##"), text_color = ce, text_size = size.tiny, text_halign = text.align_right)
+
+f_evalTable() =>
+    bool   full = evalMode == "Completo"
+    string sT1  = str.tostring(reactTarget, "#.#") + "R"
+    string sT2  = str.tostring(reactTarget * 2, "#.#") + "R"
+    var table ev = table.new(position.bottom_right, 9, 23, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
+    array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "con LIQ", "con MTF", "base 1 vela", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
+
+    if full
+        table.cell(ev, 0, 0, "Operación simulada", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
+        table.cell(ev, 1, 0, "N",      text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 2, 0, "Frec.",  text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 3, 0, "≥" + sT1, text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 4, 0, "≥" + sT2, text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 5, 0, "MFE",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 6, 0, "T/o",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 7, 0, "T/R",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 8, 0, "Esp.",   text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        f_evRow(ev, 1, "TODOS", evN, evHeld, evHeld2, evRSum, evTimeout, evCSum, evMkt, evXSum, evN, true)
+        for k = 0 to 18
+            f_evRow(ev, k + 2, bNames.get(k), bN.get(k), b1.get(k), b2.get(k), bS.get(k), bT.get(k), bC.get(k), bM.get(k), bX.get(k), evN, false)
+        table.cell(ev, 0, 21, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
+        for c = 1 to 7
+            table.cell(ev, c, 21, "", text_size = size.tiny)
+        table.cell(ev, 8, 21, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 0, 22, "Esp. NETA · T/R = R media sacada de las cerradas por reloj · las dos MITADES deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+        for c = 1 to 8
+            table.cell(ev, c, 22, "", text_size = size.tiny)
+    else
+        table.cell(ev, 0, 0, "Verificación", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
+        table.cell(ev, 1, 0, "N",       text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 2, 0, "≥" + sT2, text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 3, 0, "Esp.",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        f_evMini(ev, 1, "TODOS",      evN,        evHeld2,    evCSum,     evMkt,      evXSum,     true)
+        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(17), b2.get(17), bC.get(17), bM.get(17), bX.get(17), false)
+        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(18), b2.get(18), bC.get(18), bM.get(18), bX.get(18), false)
+        table.cell(ev, 0, 4, "las mitades deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+        for c = 1 to 3
+            table.cell(ev, c, 4, "", text_size = size.tiny)
+
+if showEval and barstate.islast
+    f_evalTable()
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ PRICE ACTION · OLIVER VELEZ  —  MÓDULO AISLADO, SOLO PINTA  [v4.0]
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// AISLADO A PROPÓSITO. Todo lo que hay debajo de esta línea calcula sus propios valores, lee los bloques
+// solo para consultar si el precio está dentro de alguno, y su única salida al gráfico es barcolor() más
+// una etiqueta opcional. Ninguna variable de aquí entra en la detección, el score, el ciclo de vida ni la
+// tabla de verificación: puedes encender y apagar este módulo entero y las estadísticas no se mueven un
+// decimal. Por eso está al final — para que sea imposible que se cuele hacia arriba.
+//
+// Todas las definiciones se miden en ATR y en porcentaje del rango, no en puntos, así que valen igual en
+// MNQ que en MES y en cualquier marco.
+
+float paRng  = high - low
+float paBody = math.abs(close - open)
+float paUpW  = high - math.max(open, close)
+float paDnW  = math.min(open, close) - low
+bool  paUp   = close > open
+bool  paDn   = close < open
+float paPrvB = math.abs(close[1] - open[1])
+float paPrvR = high[1] - low[1]
+float paHH   = ta.highest(high, eleClear)[1]
+float paLL   = ta.lowest(low,  eleClear)[1]
+float paAvgV = ta.sma(volume, 20)
+bool  paVol  = not eleVol or na(paAvgV) or paAvgV <= 0 or volume > paAvgV
+bool  paOK   = paMode != "Desactivado" and not na(atrC) and atrC > 0 and paRng > 0
+
+// ── Definiciones ──────────────────────────────────────────────────────────────────────────────
+// ELEPHANT (Velez): cuerpo institucional que limpia las velas previas, con volumen detrás.
+bool eleU = paOK and eleOn and paUp and paBody >= atrC * eleBody and paBody >= paRng * eleBodyP / 100.0 and close > paHH and paVol
+bool eleD = paOK and eleOn and paDn and paBody >= atrC * eleBody and paBody >= paRng * eleBodyP / 100.0 and close < paLL and paVol
+// SHAVED: cierra en su extremo, sin mecha a favor.
+bool shvU = paOK and shvOn and paUp and paRng >= atrC * shvRng and paBody >= paRng * 0.6 and paUpW <= paRng * shvWick / 100.0
+bool shvD = paOK and shvOn and paDn and paRng >= atrC * shvRng and paBody >= paRng * 0.6 and paDnW <= paRng * shvWick / 100.0
+// PIN / TAIL (Velez): mecha dominante y cuerpo pequeño — rechazo puro.
+bool pinU = paOK and pinOn and paRng >= atrC * pinRng and paDnW >= paRng * pinWick / 100.0 and paBody <= paRng * pinBodyP / 100.0
+bool pinD = paOK and pinOn and paRng >= atrC * pinRng and paUpW >= paRng * pinWick / 100.0 and paBody <= paRng * pinBodyP / 100.0
+// 180 (Velez): vela con cuerpo real anulada por la siguiente, que cierra más allá de su apertura.
+bool v18U = paOK and v18On and paPrvR > 0 and close[1] < open[1] and paPrvB >= paPrvR * 0.6 and paUp and paBody >= paRng * v18Body / 100.0 and paBody >= paPrvB * v18Size / 100.0 and close > open[1]
+bool v18D = paOK and v18On and paPrvR > 0 and close[1] > open[1] and paPrvB >= paPrvR * 0.6 and paDn and paBody >= paRng * v18Body / 100.0 and paBody >= paPrvB * v18Size / 100.0 and close < open[1]
+// OUTSIDE: envuelve el rango previo y cierra más allá de su extremo.
+bool outU = paOK and outOn and high > high[1] and low < low[1] and close > high[1] and paRng >= atrC * outRng
+bool outD = paOK and outOn and high > high[1] and low < low[1] and close < low[1]  and paRng >= atrC * outRng
+// RBI / GBI (Velez): vela contraria pequeña que la siguiente ignora. Continuación.
+bool rbiU = paOK and rbiOn and close[1] < open[1] and paPrvB <= atrC * rbiSmall and paUp and close > high[1]
+bool rbiD = paOK and rbiOn and close[1] > open[1] and paPrvB <= atrC * rbiSmall and paDn and close < low[1]
+// INSIDE: compresión dentro de la vela madre.
+bool insB = paOK and insOn and high <= high[1] and low >= low[1]
+
+// AGOTAMIENTO 3-5-8 (Velez): velas consecutivas del mismo color. Solo muta en vela cerrada, como el resto
+// del script, así que la cuenta que ves es la de la última vela confirmada.
+var int paRunU = 0
+var int paRunD = 0
+if barstate.isconfirmed
+    paRunU := paUp ? paRunU + 1 : 0
+    paRunD := paDn ? paRunD + 1 : 0
+bool exhU = paOK and exhOn and paRunU >= exhA
+bool exhD = paOK and exhOn and paRunD >= exhA
+
+// ── ¿Está el precio dentro de un bloque vivo? SOLO LECTURA ────────────────────────────────────
+bool paInDem = false
+bool paInSup = false
+if paMode == "Solo dentro de bloques" and zones.size() > 0
+    for z in zones
+        if f_live(z) and high >= z.bot and low <= z.top
+            if z.isDem
+                paInDem := true
+            else
+                paInSup := true
+
+// ── Prioridad: de lo más específico a lo más genérico. Una vela = un patrón, o el gráfico se vuelve
+// ilegible. Para cambiar el orden efectivo, apaga el patrón que te esté tapando al de debajo.
+string paName = ""
+color  paCol  = na
+bool   paBull = true
+if eleU
+    paName := "ELE"
+    paCol  := eleCUp
+else if eleD
+    paName := "ELE"
+    paCol  := eleCDn
+    paBull := false
+else if v18U
+    paName := "180"
+    paCol  := v18CUp
+else if v18D
+    paName := "180"
+    paCol  := v18CDn
+    paBull := false
+else if outU
+    paName := "OUT"
+    paCol  := outCUp
+else if outD
+    paName := "OUT"
+    paCol  := outCDn
+    paBull := false
+else if pinU
+    paName := "PIN"
+    paCol  := pinCUp
+else if pinD
+    paName := "PIN"
+    paCol  := pinCDn
+    paBull := false
+else if shvU
+    paName := "SHV"
+    paCol  := shvCUp
+else if shvD
+    paName := "SHV"
+    paCol  := shvCDn
+    paBull := false
+else if rbiU
+    paName := "RBI"
+    paCol  := rbiCUp
+else if rbiD
+    paName := "GBI"
+    paCol  := rbiCDn
+    paBull := false
+else if insB
+    paName := "IN"
+    paCol  := insCol
+else if exhU
+    paName := paRunU >= exhB ? "8" : "5"
+    paCol  := exhCol
+else if exhD
+    paName := paRunD >= exhB ? "8" : "5"
+    paCol  := exhCol
+    paBull := false
+
+// El inside bar y el agotamiento no tienen dirección propia, así que el filtro por bloque los deja pasar
+// esté el precio donde esté; los demás solo pintan con el nivel a favor.
+bool paNeutral = paName == "IN" or paName == "5" or paName == "8"
+bool paCtxOK   = paMode != "Solo dentro de bloques" or paNeutral or (paBull ? paInDem : paInSup)
+color paFinal  = paName != "" and paCtxOK ? color.new(paCol, paOpac) : na
+
+barcolor(paFinal, title = "Price Action · Velez")
+
+if paTagOn and not na(paFinal) and barstate.isconfirmed
+    label.new(bar_index, paBull ? low : high, paName, style = paBull ? label.style_label_up : label.style_label_down, color = color.new(paCol, 25), textcolor = color.white, size = size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ ALERTAS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Para webhook usa "Cualquier llamada a alert()": entrega el JSON completo del bloque (SD_BLOCK).
+
+alertcondition(newBlock,  "🧱 Bloque nuevo",      "{{ticker}} {{interval}} · Bloque de oferta/demanda registrado")
+alertcondition(touchDemQ, "🟢 DEMANDA tocada",    "{{ticker}} {{interval}} · El precio entra en una demanda de score suficiente @ {{close}}")
+alertcondition(touchSupQ, "🔴 OFERTA tocada",     "{{ticker}} {{interval}} · El precio entra en una oferta de score suficiente @ {{close}}")
+alertcondition(touched,   "👀 Bloque tocado (cualquiera)", "{{ticker}} {{interval}} · El precio entra en un bloque @ {{close}}")
+alertcondition(brokeAny,  "⚠️ Bloque roto",       "{{ticker}} {{interval}} · Bloque invalidado @ {{close}}")
