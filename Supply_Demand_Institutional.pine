@@ -1,8 +1,28 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v4.9
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v5.0
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v5.0 — EL PREMIUM/DISCOUNT SE MEDÍA CONTRA UNA VENTANA MÓVIL, NO CONTRA UN RANGO
+//   · EL RANGO NO ERA UN RANGO. `ta.highest(high, 50)` / `ta.lowest(low, 50)` sobre el marco de curva
+//     no es un dealing range, y fallaba por dos sitios a la vez. Uno: la ventana SE DESLIZA, así que el
+//     descuento de un bloque cambiaba solo con que pasara el tiempo, sin que hubiera ocurrido nada
+//     estructural. Dos: arrastraba el extremo de hace cincuenta velas, que puede no tener ya ninguna
+//     relación con lo que se está negociando. El componente Curva/PD del score —5 puntos— llevaba desde
+//     v3.0 midiéndose contra eso.
+//     Ahora el rango va del último pivote BAJO confirmado al último pivote ALTO confirmado, con el
+//     equilibrio en su 50%, que es la definición de ICT. Solo se mueve cuando confirma un pivote nuevo
+//     o cuando el precio se sale del rango: entonces se estira hasta el nuevo extremo, porque un máximo
+//     que el precio ya superó no es el techo de nada, y vuelve a encogerse cuando un pivote lo reancla.
+//     ESTO CAMBIA EL SCORE. Las muestras anteriores a v5.0 no son comparables. El modo antiguo sigue
+//     disponible en ④ Contexto para poder medir uno contra otro en la tabla.
+//   · Y SE MEDÍA SOLO AL NACER. `z.pd` es el punto medio del bloque en el rango del día en que nació:
+//     una propiedad de su formación, legítima para el score. Pero lo que decide una entrada es si el
+//     PROXIMAL está en descuento AHORA, con el rango de ahora — y esa pregunta no se hacía. Nuevo corte
+//     "· y al tocar", justo debajo del de siempre, para verlas una al lado de la otra.
+//   · EL RANGO Y SU EQUILIBRIO, DIBUJADOS. Ver el 50% en pantalla es la mitad del valor de tener un
+//     dealing range de verdad: por encima pagas premium, por debajo compras con descuento.
 //
 // v4.9 — LA CAPA DE CONTEXTO QUE EL MOTOR NO CONOCÍA: VWAP, KILL ZONES Y LIQUIDEZ D/W
 //   Una auditoría contra la doctrina institucional dejó claro que el indicador medía el bloque contra
@@ -401,7 +421,8 @@
 //   6. LIQUIDEZ (5)        la base barrió el último pivote antes de girar
 //   7. TIPO (5)            reversión (DBR / RBD) frente a continuación
 //   8. CONFLUENCIA MTF (5) fracción de solape con un bloque vivo de marco SUPERIOR
-//   9. CURVA / PD (5)      demanda con descuento · oferta con premium
+//   9. CURVA / PD (5)      demanda con descuento · oferta con premium, medido sobre el DEALING RANGE
+//                          [v5.0] entre pivotes confirmados (ICT), no sobre una ventana móvil
 //   Grados: A+ ≥ 80 · A ≥ 70 · B por debajo.
 //
 // GARANTÍAS DE NO REPINTADO
@@ -427,7 +448,7 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v4.9", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v5.0", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -485,6 +506,7 @@ type Zone
     bool   sigmaAt     = false  // el toque alcanzó la banda σ (extremo estadístico de la sesión)
     bool   kzAt        = false  // el toque cayó dentro de una kill zone activada
     bool   liqAt       = false  // el bloque se construyó sobre liquidez del día o la semana previos
+    bool   pdAtFav     = false  // [v5.0] el PROXIMAL estaba en descuento/premium favorable AL TOCAR
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ INPUTS
@@ -539,7 +561,11 @@ invalidBy  = input.string("Cierre", "Invalidación (rotura del distal)", options
 mitigPct   = input.int(100, "Mitigado al penetrar el (%)", minval=30, maxval=100, group=gQl, tooltip="[v3.0] Un bloque consumido al 80% casi no tiene órdenes vivas aunque el distal siga intacto. Por debajo de 100 el bloque se retira al alcanzar ese % de penetración. 100 = solo muere por rotura del distal (comportamiento clásico).")
 
 curveTf  = input.timeframe("240", "Rango operativo: marco", group=gPd, tooltip="Rango dentro del cual se mide si el bloque nace con descuento o con premium. Debe ser SUPERIOR al del gráfico.")
-curveLen = input.int(50, "Rango operativo: velas", minval=10, maxval=300, group=gPd)
+curveLen = input.int(50, "Rango operativo: velas (solo modo legado)", minval=10, maxval=300, group=gPd)
+pdMode     = input.string("Rango entre swings (ICT)", "Rango operativo: cómo se define", options=["Rango entre swings (ICT)", "Ventana móvil (legado)"], group=gPd, tooltip="[v5.0] VENTANA MÓVIL era lo que había hasta v4.9: el máximo y el mínimo de las últimas N velas del marco de curva. No es un dealing range, y falla por dos sitios a la vez — se desliza cada vela aunque no haya pasado nada estructural, así que el 'descuento' de un bloque cambia solo con que el tiempo avance; y arrastra extremos de hace N velas que pueden no tener ya ninguna relación con lo que se está negociando.\n\nRANGO ENTRE SWINGS es la definición de ICT: el rango va del último pivote BAJO confirmado al último pivote ALTO confirmado, y el equilibrio es su 50%. Solo se mueve cuando confirma un pivote nuevo o cuando el precio se sale del rango — en cuyo caso el rango se estira hasta donde llegó, porque ese extremo ya no es el techo de nada.\n\nOJO: esto CAMBIA EL SCORE (el componente Curva/PD, 5 puntos). Las muestras de la tabla anteriores a v5.0 no son comparables. El modo legado se conserva para que puedas medir uno contra otro.")
+rangeSwing = input.int(10, "Rango entre swings: velas del pivote", minval=2, maxval=50, group=gPd, tooltip="Velas a cada lado exigidas para confirmar los pivotes que anclan el rango. Más alto = rango más estable y más lento en reanclarse.")
+showEq     = input.bool(true, "Dibujar el rango operativo y su equilibrio", group=gPd)
+eqCol      = input.color(#7E57C2, "Color del rango / equilibrio", group=gPd)
 usePd    = input.bool(true, "Puntuar premium / discount", group=gPd, tooltip="ICT: una demanda vale más en la mitad baja del rango (descuento) y una oferta en la mitad alta (premium). Comprar caro es comprar donde ya no queda recorrido.")
 // [v3.9] Las dos variables de contexto que FALTABAN. No entran en el score — entran en la tabla de
 // verificación como cortes nuevos, que es donde se decide si algo aporta. El motor está para eso.
@@ -924,7 +950,29 @@ f_detect() =>
 // ██ RANGO OPERATIVO (premium / discount) · velas cerradas del marco superior
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-[cHi, cLo] = request.security(syminfo.tickerid, curveTf, [ta.highest(high, curveLen)[1], ta.lowest(low, curveLen)[1]], lookahead = barmerge.lookahead_on)
+// [v5.0] DEALING RANGE. El rango va del último pivote BAJO confirmado al último pivote ALTO confirmado,
+// que es la definición de ICT, y no del máximo/mínimo de una ventana móvil. La diferencia importa: una
+// ventana se DESLIZA, así que el descuento de un bloque cambiaba solo con que pasara el tiempo, y
+// arrastraba extremos de hace N velas sin relación con lo que se está negociando.
+// Si el precio se sale del rango, el rango se ESTIRA hasta el nuevo extremo: un máximo que el precio ya
+// superó no es el techo de nada. Vuelve a encogerse cuando confirma un pivote nuevo que lo reancla.
+// Todo con [1], como el resto del archivo: definitivo desde el primer tick y seguro con lookahead_on.
+f_range() =>
+    float ph = ta.pivothigh(high[1], rangeSwing, rangeSwing)
+    float pl = ta.pivotlow(low[1], rangeSwing, rangeSwing)
+    var float rH = na
+    var float rL = na
+    if not na(ph)
+        rH := ph
+    if not na(pl)
+        rL := pl
+    if not na(rH)
+        rH := math.max(rH, high[1])
+    if not na(rL)
+        rL := math.min(rL, low[1])
+    [rH, rL, ta.highest(high, curveLen)[1], ta.lowest(low, curveLen)[1]]
+
+[rHi, rLo, cHi, cLo] = request.security(syminfo.tickerid, curveTf, f_range(), lookahead = barmerge.lookahead_on)
 
 // [v3.9] Sesgo ESTRUCTURAL del marco superior: la dirección la marca el último rompimiento por CIERRE de
 // un pivote confirmado. Un nivel roto se consume (queda en na) y se rearma con el siguiente pivote, así
@@ -950,7 +998,12 @@ f_bias() =>
 int htfDir = request.security(syminfo.tickerid, biasTf, f_bias(), lookahead = barmerge.lookahead_on)
 
 bool  curveTfOK = f_tfSec(curveTf) > chartSec
-bool  pdOK      = usePd and curveTfOK and not na(cHi) and not na(cLo) and cHi > cLo
+// [v5.0] El rango vigente según el modo elegido. Todo lo que mide premium/discount —score, cortes,
+// panel y las líneas dibujadas— lee estos dos valores y solo estos.
+bool  pdLegacy  = pdMode == "Ventana móvil (legado)"
+float dealHi    = pdLegacy ? cHi : rHi
+float dealLo    = pdLegacy ? cLo : rLo
+bool  pdOK      = usePd and curveTfOK and not na(dealHi) and not na(dealLo) and dealHi > dealLo
 bool  biasTfOK  = f_tfSec(biasTf) > chartSec
 bool  inRTH     = not timeframe.isintraday or not na(time(timeframe.period, sessStr, "America/New_York"))
 float atrC      = ta.atr(14)
@@ -1004,7 +1057,7 @@ f_onLiq(float px) =>
 
 // Posición de un precio dentro del rango: 0 = mínimo del rango · 1 = máximo.
 f_pdPos(float px) =>
-    pdOK ? math.max(0.0, math.min(1.0, (px - cLo) / (cHi - cLo))) : na
+    pdOK ? math.max(0.0, math.min(1.0, (px - dealLo) / (dealHi - dealLo))) : na
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ ALMACÉN DE BLOQUES
@@ -1222,14 +1275,14 @@ var float evXSum    = 0.0 // suma de SUS resultados reales en R (puede ser negat
 // [v3.9] Tres cortes nuevos de CONTEXTO —sesión, sesgo del marco superior y descuento/premium— porque
 // son las variables que quedaron fuera en v3.0 y nunca se volvieron a medir. No tocan el score: entran
 // aquí, que es donde se decide con datos si aportan algo.
-var array<int>   bN = array.new<int>(24, 0)    // operaciones del corte
-var array<int>   b1 = array.new<int>(24, 0)    // ... que llegaron al objetivo
-var array<int>   b2 = array.new<int>(24, 0)    // ... que llegaron al doble
-var array<float> bS = array.new<float>(24, 0.0) // suma de MFE
-var array<int>   bT = array.new<int>(24, 0)    // [v3.4] ... cerradas por ventana agotada
-var array<float> bC = array.new<float>(24, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
-var array<int>   bM = array.new<int>(24, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
-var array<float> bX = array.new<float>(24, 0.0) // [v4.6] suma de SUS resultados reales en R
+var array<int>   bN = array.new<int>(25, 0)    // operaciones del corte
+var array<int>   b1 = array.new<int>(25, 0)    // ... que llegaron al objetivo
+var array<int>   b2 = array.new<int>(25, 0)    // ... que llegaron al doble
+var array<float> bS = array.new<float>(25, 0.0) // suma de MFE
+var array<int>   bT = array.new<int>(25, 0)    // [v3.4] ... cerradas por ventana agotada
+var array<float> bC = array.new<float>(25, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
+var array<int>   bM = array.new<int>(25, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
+var array<float> bX = array.new<float>(25, 0.0) // [v4.6] suma de SUS resultados reales en R
 var float        evCSum = 0.0
 
 // [v4.6] FRONTERA DE LAS DOS MITADES, CONGELADA EN LA PRIMERA VELA. `last_bar_index / 2` se reevaluaba en
@@ -1340,6 +1393,13 @@ if barstate.isconfirmed and zones.size() > 0
                     // Liquidez D/W: un bloque construido sobre PDH/PDL/PWH/PWL no se formó en cualquier
                     // sitio, se formó sobre stops preparados.
                     z.liqAt    := f_onLiq(prox0)
+                    // [v5.0] DESCUENTO EN EL MOMENTO DE DECIDIR. `z.pd` es una propiedad del NACIMIENTO
+                    // del bloque (su punto medio, en el rango de entonces) y como tal alimenta el score.
+                    // Pero lo que decide una entrada es si el PROXIMAL está en descuento AHORA, con el
+                    // rango de ahora. Son dos preguntas distintas y solo se medía la primera; van las dos
+                    // a la tabla, en filas contiguas, para poder compararlas.
+                    float pdNow = f_pdPos(prox0)
+                    z.pdAtFav  := not na(pdNow) and (z.isDem ? pdNow <= 0.5 : pdNow >= 0.5)
 
             // Mitigación: hasta dónde ha penetrado el precio, medido con la mecha.
             if inside
@@ -1414,9 +1474,9 @@ if barstate.isconfirmed and zones.size() > 0
                     evXSum += xr
                 bool early = z.evalBar < splitBar
                 bool pdFav = na(z.pd) ? false : (z.isDem ? z.pd <= 0.5 : z.pd >= 0.5)
-                for k = 0 to 23
-                    // [v4.8] "con CHoCH" en k==5. [v4.9] Los cuatro cortes institucionales en k==15..18.
-                    bool has = k == 0 ? z.scoreAt >= gradeAp : k == 1 ? (z.scoreAt >= gradeA and z.scoreAt < gradeAp) : k == 2 ? z.scoreAt < gradeA : k == 3 ? z.fvg : k == 4 ? z.bos : k == 5 ? z.choch : k == 6 ? z.sweep : k == 7 ? z.htfAt : k == 8 ? (z.baseTight and z.baseN <= 1) : k == 9 ? z.momOut : k == 10 ? z.rthAt : k == 11 ? z.biasAt == 1 : k == 12 ? pdFav : k == 13 ? z.rrAt : k == 14 ? z.softAt : k == 15 ? z.vwapAt : k == 16 ? z.sigmaAt : k == 17 ? z.kzAt : k == 18 ? z.liqAt : k == 19 ? z.tfIdx == 0 : k == 20 ? z.tfIdx == 1 : k == 21 ? z.tfIdx == 2 : k == 22 ? early : not early
+                for k = 0 to 24
+                    // [v4.8] "con CHoCH" en k==5. [v4.9] Institucionales en k==16..19. [v5.0] "al tocar" en k==13.
+                    bool has = k == 0 ? z.scoreAt >= gradeAp : k == 1 ? (z.scoreAt >= gradeA and z.scoreAt < gradeAp) : k == 2 ? z.scoreAt < gradeA : k == 3 ? z.fvg : k == 4 ? z.bos : k == 5 ? z.choch : k == 6 ? z.sweep : k == 7 ? z.htfAt : k == 8 ? (z.baseTight and z.baseN <= 1) : k == 9 ? z.momOut : k == 10 ? z.rthAt : k == 11 ? z.biasAt == 1 : k == 12 ? pdFav : k == 13 ? z.pdAtFav : k == 14 ? z.rrAt : k == 15 ? z.softAt : k == 16 ? z.vwapAt : k == 17 ? z.sigmaAt : k == 18 ? z.kzAt : k == 19 ? z.liqAt : k == 20 ? z.tfIdx == 0 : k == 21 ? z.tfIdx == 1 : k == 22 ? z.tfIdx == 2 : k == 23 ? early : not early
                     if has
                         bN.set(k, bN.get(k) + 1)
                         bS.set(k, bS.get(k) + m)
@@ -1557,14 +1617,15 @@ plot(vwapOn and vwapShow ? vwapL : na, "VWAP banda −", color = color.new(vwapB
 var array<line>  liqLn = array.new<line>()
 var array<label> liqLb = array.new<label>()
 if barstate.isfirst
-    for i = 1 to 4
+    // [v5.0] 7 ranuras: 4 de liquidez D/W + el techo, el equilibrio y el suelo del rango operativo.
+    for i = 1 to 7
         liqLn.push(line.new(na, na, na, na, xloc = xloc.bar_time, style = line.style_dashed, width = 1))
         liqLb.push(label.new(na, na, "", xloc = xloc.bar_time, style = label.style_none, size = size.tiny))
 
-f_liqLine(int slot, float px, string txt, color c) =>
+f_lvlLine(int slot, bool show, float px, string txt, color c) =>
     line  l = liqLn.get(slot)
     label b = liqLb.get(slot)
-    if liqOn and liqShow and not na(px)
+    if show and not na(px)
         int x1 = time - chartSec * 1000 * 100
         int x2 = time + chartSec * 1000 * extendBars
         line.set_xy1(l, x1, px)
@@ -1579,10 +1640,17 @@ f_liqLine(int slot, float px, string txt, color c) =>
         label.set_xy(b, na, na)
 
 if barstate.islast
-    f_liqLine(0, pdH, "PDH", liqDCol)
-    f_liqLine(1, pdL, "PDL", liqDCol)
-    f_liqLine(2, pwH, "PWH", liqWCol)
-    f_liqLine(3, pwL, "PWL", liqWCol)
+    bool lqShow = liqOn and liqShow
+    f_lvlLine(0, lqShow, pdH, "PDH", liqDCol)
+    f_lvlLine(1, lqShow, pdL, "PDL", liqDCol)
+    f_lvlLine(2, lqShow, pwH, "PWH", liqWCol)
+    f_lvlLine(3, lqShow, pwL, "PWL", liqWCol)
+    // [v5.0] El rango operativo y su equilibrio. Ver el 50% dibujado es la mitad del valor de tener un
+    // dealing range de verdad: por encima estás pagando premium y por debajo comprando con descuento.
+    bool eqShow = pdOK and showEq
+    f_lvlLine(4, eqShow, dealHi, "Rango ↑", eqCol)
+    f_lvlLine(5, eqShow, pdOK ? (dealHi + dealLo) / 2 : na, "EQ 50%", eqCol)
+    f_lvlLine(6, eqShow, dealLo, "Rango ↓", eqCol)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ PANEL
@@ -1649,7 +1717,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v4.9", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v5.0", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
@@ -1744,8 +1812,8 @@ f_evalTable() =>
     bool   full = evalMode == "Completo"
     string sT1  = str.tostring(reactTarget, "#.#") + "R"
     string sT2  = str.tostring(reactTarget * 2, "#.#") + "R"
-    var table ev = table.new(position.bottom_right, 9, 28, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "  · de ellos CHoCH", "con LIQ", "con MTF", "base 1 vela", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "a favor del VWAP", "en banda " + str.tostring(vwapSigma, "#.#") + "σ", "en kill zone", "sobre liquidez D/W", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
+    var table ev = table.new(position.bottom_right, 9, 29, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
+    array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "  · de ellos CHoCH", "con LIQ", "con MTF", "base 1 vela", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento (al nacer)", "  · y al tocar", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "a favor del VWAP", "en banda " + str.tostring(vwapSigma, "#.#") + "σ", "en kill zone", "sobre liquidez D/W", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
 
     if full
         table.cell(ev, 0, 0, "Operación simulada", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
@@ -1758,23 +1826,23 @@ f_evalTable() =>
         table.cell(ev, 7, 0, "T/R",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 8, 0, "Esp.",   text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         f_evRow(ev, 1, "TODOS", evN, evHeld, evHeld2, evRSum, evTimeout, evCSum, evMkt, evXSum, evN, true)
-        for k = 0 to 23
+        for k = 0 to 24
             f_evRow(ev, k + 2, bNames.get(k), bN.get(k), b1.get(k), b2.get(k), bS.get(k), bT.get(k), bC.get(k), bM.get(k), bX.get(k), evN, false)
-        table.cell(ev, 0, 26, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
+        table.cell(ev, 0, 27, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 7
-            table.cell(ev, c, 26, "", text_size = size.tiny)
-        table.cell(ev, 8, 26, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(ev, 0, 27, "Esp. NETA · T/R = R media sacada de las cerradas por reloj · las dos MITADES deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
-        for c = 1 to 8
             table.cell(ev, c, 27, "", text_size = size.tiny)
+        table.cell(ev, 8, 27, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 0, 28, "Esp. NETA · T/R = R media sacada de las cerradas por reloj · las dos MITADES deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+        for c = 1 to 8
+            table.cell(ev, c, 28, "", text_size = size.tiny)
     else
         table.cell(ev, 0, 0, "Verificación", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
         table.cell(ev, 1, 0, "N",       text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 2, 0, "≥" + sT2, text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 3, 0, "Esp.",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         f_evMini(ev, 1, "TODOS",      evN,        evHeld2,    evCSum,     evMkt,      evXSum,     true)
-        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(22), b2.get(22), bC.get(22), bM.get(22), bX.get(22), false)
-        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(23), b2.get(23), bC.get(23), bM.get(23), bX.get(23), false)
+        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(23), b2.get(23), bC.get(23), bM.get(23), bX.get(23), false)
+        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(24), b2.get(24), bC.get(24), bM.get(24), bX.get(24), false)
         table.cell(ev, 0, 4, "las mitades deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 3
             table.cell(ev, c, 4, "", text_size = size.tiny)
