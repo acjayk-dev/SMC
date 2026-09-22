@@ -1,8 +1,27 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v5.2
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v5.3
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v5.3 — LA TABLA ENSEÑABA UN PUNTO SIN MARGEN DE ERROR
+//   Quince versiones midiendo, y la columna que lo decide todo —la esperanza— se mostraba como una cifra
+//   desnuda. Sin margen no se puede distinguir una ventaja real de la suerte de una muestra corta, que es
+//   exactamente la pregunta que esta tabla existe para responder.
+//   · INTERVALO DE CONFIANZA AL 95%. Nueva columna. Solo hacía falta acumular la suma de CUADRADOS del
+//     resultado neto de cada operación: con la media ya conocida sale la varianza, de ahí el error típico
+//     y de ahí el margen. La esperanza no cambia ni un decimal — la suma de resultados netos da la misma
+//     cifra que la fórmula reconstruida de v4.6, solo que ahora también se sabe cuánto vale.
+//   · EL COLOR YA NO MIENTE. Pintaba VERDE cualquier fila por encima de +0.15R sin mirar la muestra, así
+//     que con n=20 —el mínimo por defecto— coloreaba de verde filas cuyo intervalo era de ±0.57R. Eso no
+//     es medir, es decorar con pasos intermedios. Ahora: VERDE solo si el intervalo EXCLUYE EL CERO,
+//     ROJO si lo excluye por abajo, AMARILLO si la muestra no permite decidir. Con n corta casi todo
+//     saldrá amarillo, y saberlo es justamente el punto.
+//   · LAS CIFRAS QUE ESTO DESTAPA, para que no sorprendan. Con σ≈1.3R por operación hacen falta ~170
+//     operaciones para resolver una ventaja de +0.20R y ~650 para una de +0.10R. POR CORTE. Con 26
+//     cortes, la mayoría no va a llegar nunca, y el amarillo lo va a decir sin rodeos.
+//   Normal en vez de t de Student: con n≥30 la diferencia es despreciable, y por debajo de 30 el problema
+//   no es qué distribución eliges sino que no hay muestra.
 //
 // v5.2 — CUATRO DEFECTOS DE LAS PROPIAS VERSIONES v4.9-v5.1
 //   Auditar lo recién añadido es parte del trabajo, no una cortesía. Tres de estos cuatro los introduje
@@ -492,7 +511,7 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v5.2", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v5.3", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -668,7 +687,7 @@ costTicks   = input.float(3.0, "Coste por operación ida y vuelta (ticks)", minv
 oneAtATime  = input.bool(false, "Una operación a la vez", group=gEv, tooltip="[v3.5] Si hay 8 bloques vivos y el precio los cruza todos en el mismo movimiento, ganan o pierden JUNTOS: la muestra parece grande pero son el mismo suceso contado ocho veces, y eso hace que un puñado de sesiones decida el signo del resultado. Activado, solo se evalúa un bloque cada vez — como operarías de verdad. La muestra baja mucho, pero cada operación cuenta una decisión independiente. Si la ventaja desaparece al activarlo, nunca existió. [v4.6] El hueco se congela al empezar la vela: como mucho una apertura por vela, y quien cierra lo libera para la SIGUIENTE. Antes lo liberaba en la misma vela y entraba quien estuviera más adelante en el array, así que la muestra la elegía el orden de creación de los bloques.")
 showEval    = input.bool(true, "Tabla de verificación", group=gEv)
 evalMode    = input.string("Resumen", "Detalle de la tabla", options=["Resumen", "Completo"], group=gEv, tooltip="[v3.9] Resumen: el veredicto y las dos mitades, cuatro filas. Es lo único que necesitas mirar habitualmente — el resto es investigación y ocupaba media pantalla. Completo: los diecisiete cortes con todas las columnas.")
-evalMinN    = input.int(20, "Muestra mínima para dar color", minval=5, maxval=200, group=gEv, tooltip="Por debajo de este número de bloques resueltos la fila se muestra en gris: todavía no dice nada.")
+evalMinN    = input.int(20, "Muestra mínima para dar color", minval=5, maxval=200, group=gEv, tooltip="Por debajo de este número de bloques resueltos la fila se muestra en gris.\n\n[v5.3] Ya NO es el criterio principal: el color lo decide ahora el INTERVALO DE CONFIANZA. Verde solo si el IC al 95% excluye el cero, amarillo si la muestra no permite decidir. Con σ≈1.3R por operación, un IC de ±0.20R exige n≈170 y uno de ±0.10R exige n≈650: con 20 operaciones el margen es de ±0.57R, así que una fila que marque +0.30 es indistinguible del azar. Esto es un suelo, no un aval.")
 
 showZones    = input.bool(true, "Dibujar bloques", group=gVs)
 showMinScore = input.int(38, "Score mínimo para dibujar", minval=0, maxval=100, group=gVs)
@@ -1372,6 +1391,11 @@ var array<int>   bT = array.new<int>(26, 0)    // [v3.4] ... cerradas por ventan
 var array<float> bC = array.new<float>(26, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
 var array<int>   bM = array.new<int>(26, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
 var array<float> bX = array.new<float>(26, 0.0) // [v4.6] suma de SUS resultados reales en R
+// [v5.3] Suma de CUADRADOS del resultado neto en R de cada operación. Es lo único que faltaba para poder
+// calcular la varianza del corte y, con ella, el error típico de la esperanza: sin eso la tabla enseñaba
+// un punto sin margen y no había forma de distinguir una ventaja real de la suerte de una muestra corta.
+var array<float> bR2 = array.new<float>(26, 0.0)
+var float        evR2Sum = 0.0
 var float        evCSum = 0.0
 
 // [v4.6] FRONTERA DE LAS DOS MITADES, CONGELADA EN LA PRIMERA VELA. `last_bar_index / 2` se reevaluaba en
@@ -1554,9 +1578,14 @@ if barstate.isconfirmed and zones.size() > 0
                 // el resto —stop tocado sin haber pasado por el objetivo— pierde la R entera.
                 bool  toMkt = byTime and m < t2
                 float xr    = toMkt and not na(z.exitR) ? z.exitR : 0.0
-                evN    += 1
-                evRSum += m
-                evCSum += cr
+                // [v5.3] Resultado NETO en R de esta operación concreta, con la regla de los tres
+                // desenlaces y descontado su coste. Sumado da exactamente la misma esperanza que la
+                // fórmula reconstruida de v4.6; elevado al cuadrado da la varianza, que es lo que faltaba.
+                float rNet  = (m >= t2 ? t2 : toMkt ? xr : -t1) - cr
+                evN     += 1
+                evRSum  += m
+                evCSum  += cr
+                evR2Sum += rNet * rNet
                 if m >= t1
                     evHeld += 1
                 if m >= t2
@@ -1579,6 +1608,7 @@ if barstate.isconfirmed and zones.size() > 0
                             b2.set(k, b2.get(k) + 1)
                         if byTime
                             bT.set(k, bT.get(k) + 1)
+                        bR2.set(k, bR2.get(k) + rNet * rNet)
                         if toMkt
                             bM.set(k, bM.get(k) + 1)
                             bX.set(k, bX.get(k) + xr)
@@ -1834,7 +1864,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v5.2", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v5.3", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
@@ -1889,7 +1919,26 @@ if showDash and barstate.islast
 //   · ventana agotada sin llegar ahí → su resultado REAL a mercado, positivo o negativo
 //   · el resto (stop tocado)         → −T
 // `nm` = operaciones liquidadas a mercado · `sx` = suma de sus resultados en R.
-f_evRow(table t, int r, string k, int n, int n1, int n2, float sm, int nt, float sc, int nm, float sx, int total, bool head) =>
+// [v5.3] SEMIANCHO DEL INTERVALO DE CONFIANZA AL 95% de la esperanza. `sq` es la suma de cuadrados del
+// resultado neto por operación; con la media ya conocida sale la varianza muestral, de ahí el error
+// típico y de ahí el margen. Normal en vez de t de Student: con n≥30 la diferencia es despreciable y por
+// debajo de 30 el problema no es la distribución elegida, es que no hay muestra.
+// Esto es lo que convierte la columna Esp. de "parece positivo" a "distinguible de cero o no".
+f_ci95(int n, float mean, float sq) =>
+    float o = na
+    if n > 1 and not na(mean) and not na(sq)
+        float varr = math.max(0.0, (sq - n * mean * mean) / (n - 1))
+        o := 1.96 * math.sqrt(varr / n)
+    o
+
+// [v5.3] El color de Esp. ya NO depende de un umbral fijo (+0.15) que ignoraba el tamaño de la muestra:
+// depende de si el INTERVALO excluye el cero. Verde = ventaja distinguible del azar. Rojo = desventaja
+// distinguible. Amarillo = la muestra no permite decidir, que con n corta es casi siempre — y saberlo es
+// justamente el punto. Gris = por debajo de la muestra mínima.
+f_espCol(int n, float esp, float ci) =>
+    n < evalMinN or na(esp) or na(ci) ? color.gray : esp - ci > 0 ? #00E676 : esp + ci < 0 ? #FF5252 : #FFD700
+
+f_evRow(table t, int r, string k, int n, int n1, int n2, float sm, int nt, float sc, int nm, float sx, float sq, int total, bool head) =>
     float p1   = n > 0 ? n1 / float(n) * 100.0 : na
     float p2   = n > 0 ? n2 / float(n) : na
     // [v3.7] NETA de costes: el coste medio en R de este corte, que no es el mismo para todos porque
@@ -1900,8 +1949,9 @@ f_evRow(table t, int r, string k, int n, int n1, int n2, float sm, int nt, float
     // Lo que de verdad se sacó de las cerradas por reloj. Si es muy negativo, esa fila no está midiendo
     // niveles que aguanten: está midiendo precio que se queda muerto dentro del bloque.
     float pxr  = nm > 0 ? sx / nm : na
+    float ci   = f_ci95(n, esp, sq)
     color c    = n < evalMinN ? color.gray : color.white
-    color ce   = n < evalMinN or na(esp) ? color.gray : esp > 0.15 ? #00E676 : esp > 0 ? #FFD700 : #FF5252
+    color ce   = f_espCol(n, esp, ci)
     color cf   = na(freq) ? color.gray : freq >= 80 ? #FFA726 : color.gray
     // [v3.4] Muchos cierres por tiempo = la fila mide el reloj, no el bloque. Se avisa en naranja.
     color ct   = na(pto) ? color.gray : pto >= 35 ? #FFA726 : color.gray
@@ -1914,25 +1964,28 @@ f_evRow(table t, int r, string k, int n, int n1, int n2, float sm, int nt, float
     table.cell(t, 6, r, na(pto) ? "—" : str.tostring(pto, "#") + "%", text_color = ct, text_size = size.tiny, text_halign = text.align_right)
     table.cell(t, 7, r, na(pxr) ? "—" : (pxr >= 0 ? "+" : "") + str.tostring(pxr, "#.##"), text_color = na(pxr) ? color.gray : c, text_size = size.tiny, text_halign = text.align_right)
     table.cell(t, 8, r, na(esp) ? "—" : (esp >= 0 ? "+" : "") + str.tostring(esp, "#.##"), text_color = ce, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(t, 9, r, na(ci) ? "—" : "±" + str.tostring(ci, "#.##"), text_color = na(ci) ? color.gray : c, text_size = size.tiny, text_halign = text.align_right)
 
 // [v3.9] Fila compacta del modo Resumen: solo N, aciertos al objetivo doble y esperanza neta. Con esas
 // tres cifras y las dos mitades ya se decide; lo demás es investigación.
-f_evMini(table t, int r, string k, int n, int n2, float sc, int nm, float sx, bool head) =>
+f_evMini(table t, int r, string k, int n, int n2, float sc, int nm, float sx, float sq, bool head) =>
     float p2  = n > 0 ? n2 / float(n) : na
     // [v4.6] Misma fórmula de tres desenlaces que la tabla completa.
     float esp = n <= 0 ? na : (n2 * (reactTarget * 2) + sx - (n - n2 - nm) * reactTarget - sc) / n
+    float ci  = f_ci95(n, esp, sq)
     color c   = n < evalMinN ? color.gray : color.white
-    color ce  = n < evalMinN or na(esp) ? color.gray : esp > 0.15 ? #00E676 : esp > 0 ? #FFD700 : #FF5252
+    color ce  = f_espCol(n, esp, ci)
     table.cell(t, 0, r, k, text_color = head ? color.white : color.gray, text_size = size.tiny, text_halign = text.align_left)
     table.cell(t, 1, r, str.tostring(n), text_color = c, text_size = size.tiny, text_halign = text.align_right)
     table.cell(t, 2, r, na(p2) ? "—" : str.tostring(p2 * 100, "#") + "%", text_color = c, text_size = size.tiny, text_halign = text.align_right)
     table.cell(t, 3, r, na(esp) ? "—" : (esp >= 0 ? "+" : "") + str.tostring(esp, "#.##"), text_color = ce, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(t, 4, r, na(ci) ? "—" : "±" + str.tostring(ci, "#.##"), text_color = na(ci) ? color.gray : c, text_size = size.tiny, text_halign = text.align_right)
 
 f_evalTable() =>
     bool   full = evalMode == "Completo"
     string sT1  = str.tostring(reactTarget, "#.#") + "R"
     string sT2  = str.tostring(reactTarget * 2, "#.#") + "R"
-    var table ev = table.new(position.bottom_right, 9, 30, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
+    var table ev = table.new(position.bottom_right, 10, 30, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
     array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "  · de ellos CHoCH", "con LIQ", "con MTF", "base 1 vela", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento (al nacer)", "  · y al tocar", "  · y en OTE " + str.tostring(math.min(oteLo, oteHi) * 100, "#") + "-" + str.tostring(math.max(oteLo, oteHi) * 100, "#") + "%", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "a favor del VWAP", "en banda " + str.tostring(vwapSigma, "#.#") + "σ", "en kill zone", "sobre liquidez D/W", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
 
     if full
@@ -1945,26 +1998,28 @@ f_evalTable() =>
         table.cell(ev, 6, 0, "T/o",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 7, 0, "T/R",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 8, 0, "Esp.",   text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
-        f_evRow(ev, 1, "TODOS", evN, evHeld, evHeld2, evRSum, evTimeout, evCSum, evMkt, evXSum, evN, true)
+        table.cell(ev, 9, 0, "IC 95%", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        f_evRow(ev, 1, "TODOS", evN, evHeld, evHeld2, evRSum, evTimeout, evCSum, evMkt, evXSum, evR2Sum, evN, true)
         for k = 0 to 25
-            f_evRow(ev, k + 2, bNames.get(k), bN.get(k), b1.get(k), b2.get(k), bS.get(k), bT.get(k), bC.get(k), bM.get(k), bX.get(k), evN, false)
+            f_evRow(ev, k + 2, bNames.get(k), bN.get(k), b1.get(k), b2.get(k), bS.get(k), bT.get(k), bC.get(k), bM.get(k), bX.get(k), bR2.get(k), evN, false)
         table.cell(ev, 0, 28, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
-        for c = 1 to 7
-            table.cell(ev, c, 28, "", text_size = size.tiny)
-        table.cell(ev, 8, 28, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(ev, 0, 29, "Esp. NETA · T/R = R media sacada de las cerradas por reloj · las dos MITADES deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 8
+            table.cell(ev, c, 28, "", text_size = size.tiny)
+        table.cell(ev, 9, 28, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 0, 29, "VERDE = el IC excluye el cero (ventaja distinguible del azar) · AMARILLO = la muestra no decide · 26 cortes: exige que coincida en las dos MITADES y en los dos activos", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+        for c = 1 to 9
             table.cell(ev, c, 29, "", text_size = size.tiny)
     else
         table.cell(ev, 0, 0, "Verificación", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
         table.cell(ev, 1, 0, "N",       text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 2, 0, "≥" + sT2, text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 3, 0, "Esp.",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
-        f_evMini(ev, 1, "TODOS",      evN,        evHeld2,    evCSum,     evMkt,      evXSum,     true)
-        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(24), b2.get(24), bC.get(24), bM.get(24), bX.get(24), false)
-        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(25), b2.get(25), bC.get(25), bM.get(25), bX.get(25), false)
-        table.cell(ev, 0, 4, "las mitades deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
-        for c = 1 to 3
+        table.cell(ev, 4, 0, "IC 95%",  text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        f_evMini(ev, 1, "TODOS",      evN,        evHeld2,    evCSum,     evMkt,      evXSum,     evR2Sum,     true)
+        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(24), b2.get(24), bC.get(24), bM.get(24), bX.get(24), bR2.get(24), false)
+        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(25), b2.get(25), bC.get(25), bM.get(25), bX.get(25), bR2.get(25), false)
+        table.cell(ev, 0, 4, "verde solo si el IC excluye el cero · las mitades deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+        for c = 1 to 4
             table.cell(ev, c, 4, "", text_size = size.tiny)
 
 if showEval and barstate.islast
