@@ -1,8 +1,39 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v4.8
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v4.9
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v4.9 — LA CAPA DE CONTEXTO QUE EL MOTOR NO CONOCÍA: VWAP, KILL ZONES Y LIQUIDEZ D/W
+//   Una auditoría contra la doctrina institucional dejó claro que el indicador medía el bloque contra
+//   sí mismo y contra la estructura, pero no contra las tres referencias externas que el flujo real sí
+//   mira. Ninguna de las tres existía aquí, ni siquiera como dato.
+//   · VWAP DE SESIÓN CON BANDAS σ. El precio medio ponderado por volumen desde la apertura es la
+//     referencia contra la que se mide la ejecución institucional. Comprar una demanda POR DEBAJO del
+//     VWAP es comprar por debajo del precio medio al que se ha negociado la sesión; hacerlo por encima
+//     es pagar de más por el mismo nivel. Dos cortes: "a favor del VWAP" (el proximal está del lado
+//     bueno) y "en banda σ" (el toque alcanzó el extremo estadístico de la sesión).
+//     Calculado a mano y no con ta.vwap: ta.vwap ABORTA el script en un símbolo sin volumen, y lo haría
+//     aunque el módulo estuviera apagado. Así degrada a na y el indicador sigue vivo.
+//   · KILL ZONES (ICT). La hora del día no es ruido, y el único corte temporal que había era un RTH
+//     binario de siete horas. Cuatro ventanas configurables —Londres, NY AM, Silver Bullet y tarde— y
+//     un corte "en kill zone". Es un CORTE, no un filtro: los bloques se siguen detectando a todas
+//     horas, solo se mide aparte si el toque cayó en horario de alta participación.
+//   · LIQUIDEZ DEL DÍA Y LA SEMANA PREVIOS (PDH/PDL/PWH/PWL). Los niveles donde se acumulan stops de
+//     la forma más previsible de todo el gráfico. Un bloque construido justo ahí no se formó en
+//     cualquier sitio: se formó sobre liquidez preparada. Corte "sobre liquidez D/W", más las cuatro
+//     líneas dibujadas, que en 1 minuto es de lo más útil que puede haber en pantalla.
+//
+//   NINGUNA DE LAS TRES TOCA EL SCORE, igual que todo lo añadido desde v3.0. Se congelan en el toque
+//   —es lo que sabías al decidir— y entran en la tabla de verificación. La tabla pasa de 20 a 24 cortes.
+//   Que la doctrina diga que el VWAP importa no es un dato: míralo separar en las DOS mitades y en los
+//   dos activos, y solo entonces dale peso.
+//
+//   LO QUE SIGUE FALTANDO, y por qué: perfil de volumen (POC/VAH/VAL) exige datos de TF inferior y
+//   resulta caro y frágil en Pine; Wyckoff es demasiado subjetivo para medirlo así; y OTE necesita
+//   antes un dealing range de verdad —el premium/discount actual usa una ventana móvil de N velas, no
+//   el rango entre swings, que es la definición de ICT—. Ese arreglo cambia el score y merece decisión
+//   aparte.
 //
 // v4.8 — CHoCH, Y EL PIVOTE ROTO DEJA DE REGALAR ESTRUCTURA
 //   · EL NIVEL ROTO NO SE CONSUMÍA. `swHi`/`swLo` guardaban el último pivote confirmado y no se tocaban
@@ -396,7 +427,7 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v4.8", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v4.9", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -449,6 +480,11 @@ type Zone
     int    biasAt      = 0      // [v3.9] 1 a favor del sesgo del marco superior · -1 en contra · 0 sin sesgo
     bool   rrAt        = false  // [v4.1] había margen hasta el bloque contrario (odds enhancer de Seiden)
     bool   softAt      = false  // [v4.1] el precio llegó en retroceso controlado, no acelerando
+    // [v4.9] Contexto institucional, congelado también en el toque: es lo que sabías al decidir.
+    bool   vwapAt      = false  // el proximal estaba del lado favorable del VWAP de sesión
+    bool   sigmaAt     = false  // el toque alcanzó la banda σ (extremo estadístico de la sesión)
+    bool   kzAt        = false  // el toque cayó dentro de una kill zone activada
+    bool   liqAt       = false  // el bloque se construyó sobre liquidez del día o la semana previos
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ INPUTS
@@ -461,6 +497,7 @@ gPd = "④ Contexto"
 gEv = "⑤ Verificación"
 gVs = "⑥ Visual"
 gPa = "⑦ Price Action · Oliver Velez"
+gIn = "⑧ Contexto institucional"
 
 tf1On = input.bool(true,  "Marco 1", inline="t1", group=gTf)
 tf1   = input.timeframe("", " ", inline="t1", group=gTf, tooltip="Vacío = marco del gráfico. Cada marco ejecuta la detección completa en su propio contexto. Marcos menores que el gráfico o repetidos se ignoran.")
@@ -516,6 +553,33 @@ biasSwing = input.int(5, "Sesgo estructural: velas del pivote", minval=2, maxval
 // no tocan el score: entran como cortes medibles.
 rrMin    = input.float(2.0, "Margen: R mínimo hasta el bloque contrario", minval=0.5, step=0.25, group=gPd, tooltip="[v4.1] Distancia del proximal al siguiente bloque contrario vivo, medida en R de esta operación. Si no hay ningún bloque contrario delante, cuenta como margen suficiente: es camino despejado.")
 arrBars  = input.int(5, "Llegada: velas del tramo de aproximación", minval=2, maxval=30, group=gPd)
+
+// ── ⑧ CONTEXTO INSTITUCIONAL · VWAP · KILL ZONES · LIQUIDEZ D/W ───────────────────────────────
+// [v4.9] Las tres referencias que el indicador no conocía y que sí mira el flujo institucional. Como
+// TODO lo añadido desde v3.0: NO TOCAN EL SCORE. Entran como cortes de la tabla de verificación, que es
+// donde se decide con datos si algo separa. Si alguno separa de verdad —en las DOS mitades y en los dos
+// activos— entonces y solo entonces se le da peso.
+vwapOn    = input.bool(true, "Medir VWAP de sesión", group=gIn, tooltip="[v4.9] El precio medio ponderado por volumen desde la apertura de la sesión es LA referencia de ejecución institucional: las mesas se miden contra él. Comprar una demanda por debajo del VWAP es comprar por debajo del precio medio al que se ha negociado hoy. Requiere que el símbolo tenga volumen (MNQ/MES lo tienen).")
+vwapShow  = input.bool(true, "Dibujar VWAP y bandas", group=gIn)
+vwapSigma = input.float(2.0, "Bandas: desviaciones típicas", minval=0.5, maxval=4.0, step=0.5, group=gIn, tooltip="El corte 'en banda σ' se marca cuando el toque alcanza la banda de ESTE ancho. Con 2.0 mide el extremo estadístico de la sesión, donde se espera reversión a la media.")
+vwapCol   = input.color(#FF6D00, "VWAP", inline="vw", group=gIn)
+vwapBCol  = input.color(#5C6BC0, "bandas", inline="vw", group=gIn)
+
+kzOn  = input.bool(true, "Medir kill zones (hora de Nueva York)", group=gIn, tooltip="[v4.9] ICT: la hora del día no es ruido. El corte 'en kill zone' marca los toques ocurridos dentro de CUALQUIERA de las ventanas activadas abajo. Es un corte, no un filtro: los bloques se siguen detectando a todas horas, solo se mide aparte si el toque cayó en horario de alta participación.")
+kz1On = input.bool(true,  "Londres",       inline="k1", group=gIn)
+kz1   = input.session("0200-0500", "", inline="k1", group=gIn)
+kz2On = input.bool(true,  "NY AM",         inline="k2", group=gIn)
+kz2   = input.session("0700-1000", "", inline="k2", group=gIn)
+kz3On = input.bool(true,  "Silver Bullet", inline="k3", group=gIn)
+kz3   = input.session("1000-1100", "", inline="k3", group=gIn)
+kz4On = input.bool(false, "Tarde",         inline="k4", group=gIn)
+kz4   = input.session("1330-1600", "", inline="k4", group=gIn)
+
+liqOn    = input.bool(true, "Medir liquidez del día y la semana previos", group=gIn, tooltip="[v4.9] PDH/PDL y PWH/PWL: máximo y mínimo del día y de la semana anteriores. Son los niveles donde se acumulan stops de forma más previsible de todo el gráfico. Un bloque construido justo ahí no se formó en cualquier sitio: se formó sobre liquidez preparada. El corte 'sobre liquidez D/W' lo mide.")
+liqShow  = input.bool(true, "Dibujar PDH/PDL y PWH/PWL", group=gIn)
+liqNear  = input.float(0.5, "Distancia para contar como 'sobre el nivel' (×ATR)", minval=0.1, maxval=3.0, step=0.1, group=gIn)
+liqDCol  = input.color(#BDBDBD, "día", inline="lq", group=gIn)
+liqWCol  = input.color(#FFB300, "semana", inline="lq", group=gIn)
 arrMax   = input.float(2.0, "Llegada: recorrido máximo para contarla suave (×ATR)", minval=0.5, step=0.1, group=gPd, tooltip="[v4.1] Recorrido neto del precio en las últimas N velas al tocar el bloque. Por encima de este umbral la llegada es una ofensiva, no un retroceso, y Seiden esperaría que atravesara el nivel.")
 
 reactUnit   = input.string("R del bloque", "Unidad de la reacción", options=["R del bloque", "ATR"], group=gEv, tooltip="[v3.1] R DEL BLOQUE: la reacción se mide en múltiplos de la distancia proximal→distal (más el colchón), que es exactamente lo que arriesgas operando ese bloque. ATR: distancia absoluta, igual para todos los bloques. [v4.6] La unidad que elijas FIJA TAMBIÉN EL STOP. Hasta v4.5, con ATR el objetivo se medía en ATR pero el stop seguía en el distal: dos distancias distintas, y la carrera dejaba de ser simétrica. Ahora objetivo y stop están siempre a la misma distancia, así que el ~50% de referencia vale en los dos modos y cualquier cifra por encima significa algo.")
@@ -891,6 +955,53 @@ bool  biasTfOK  = f_tfSec(biasTf) > chartSec
 bool  inRTH     = not timeframe.isintraday or not na(time(timeframe.period, sessStr, "America/New_York"))
 float atrC      = ta.atr(14)
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ CONTEXTO INSTITUCIONAL  [v4.9]  ·  VWAP · KILL ZONES · LIQUIDEZ D/W
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Las tres referencias que faltaban. Se calculan siempre (las funciones con estado de Pine tienen que
+// llamarse en TODAS las velas o se desincronizan) y se consumen solo si están activadas.
+// Nada de aquí entra en el score: se congela en el toque y se mide en la tabla.
+
+// VWAP de sesión con bandas σ, anclado a la apertura del día: la referencia contra la que se mide la
+// ejecución institucional. Calculado a mano y NO con ta.vwap a propósito — ta.vwap aborta el script con
+// "The symbol has no volume data" en cuanto lo cargas en un símbolo sin volumen, y lo haría aunque el
+// módulo estuviera desactivado. Así, sin volumen el acumulador se queda en cero, el VWAP sale na y los
+// cortes simplemente no se marcan: el indicador sigue funcionando.
+var float vwSum = 0.0
+var float vwVol = 0.0
+var float vwSq  = 0.0
+if timeframe.change("D")
+    vwSum := 0.0
+    vwVol := 0.0
+    vwSq  := 0.0
+float vwVol0 = na(volume) ? 0.0 : volume
+vwSum += hlc3 * vwVol0
+vwVol += vwVol0
+vwSq  += hlc3 * hlc3 * vwVol0
+float vwapV  = vwVol > 0 ? vwSum / vwVol : na
+float vwapSd = na(vwapV) ? na : math.sqrt(math.max(vwSq / vwVol - vwapV * vwapV, 0.0))
+float vwapU  = na(vwapSd) ? na : vwapV + vwapSd * vwapSigma
+float vwapL  = na(vwapSd) ? na : vwapV - vwapSd * vwapSigma
+// Fuera de intradía un "VWAP de sesión" no significa nada: el ancla saltaría en cada vela.
+bool vwapOK = vwapOn and timeframe.isintraday and not na(vwapV)
+
+// Kill zones ICT. `time()` con sesión devuelve na fuera de la ventana. Solo tienen sentido en intradía.
+bool kzIn = timeframe.isintraday and kzOn and ((kz1On and not na(time(timeframe.period, kz1, "America/New_York"))) or (kz2On and not na(time(timeframe.period, kz2, "America/New_York"))) or (kz3On and not na(time(timeframe.period, kz3, "America/New_York"))) or (kz4On and not na(time(timeframe.period, kz4, "America/New_York"))))
+
+// Liquidez del día y la semana previos. El [1] dentro del contexto superior hace que el valor sea el de
+// la vela D/W ya CERRADA, así que está determinado desde la apertura del día: lookahead_on no adelanta
+// nada. Es el mismo patrón que curveTf y biasTf.
+[pdH, pdL] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[pwH, pwL] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+
+// ¿Está `px` pegado a alguno de los cuatro niveles de liquidez?
+f_onLiq(float px) =>
+    float tol = atrC * liqNear
+    bool  o   = false
+    if liqOn and not na(atrC)
+        o := (not na(pdH) and math.abs(px - pdH) <= tol) or (not na(pdL) and math.abs(px - pdL) <= tol) or (not na(pwH) and math.abs(px - pwH) <= tol) or (not na(pwL) and math.abs(px - pwL) <= tol)
+    o
+
 // Posición de un precio dentro del rango: 0 = mínimo del rango · 1 = máximo.
 f_pdPos(float px) =>
     pdOK ? math.max(0.0, math.min(1.0, (px - cLo) / (cHi - cLo))) : na
@@ -1111,14 +1222,14 @@ var float evXSum    = 0.0 // suma de SUS resultados reales en R (puede ser negat
 // [v3.9] Tres cortes nuevos de CONTEXTO —sesión, sesgo del marco superior y descuento/premium— porque
 // son las variables que quedaron fuera en v3.0 y nunca se volvieron a medir. No tocan el score: entran
 // aquí, que es donde se decide con datos si aportan algo.
-var array<int>   bN = array.new<int>(20, 0)    // operaciones del corte
-var array<int>   b1 = array.new<int>(20, 0)    // ... que llegaron al objetivo
-var array<int>   b2 = array.new<int>(20, 0)    // ... que llegaron al doble
-var array<float> bS = array.new<float>(20, 0.0) // suma de MFE
-var array<int>   bT = array.new<int>(20, 0)    // [v3.4] ... cerradas por ventana agotada
-var array<float> bC = array.new<float>(20, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
-var array<int>   bM = array.new<int>(20, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
-var array<float> bX = array.new<float>(20, 0.0) // [v4.6] suma de SUS resultados reales en R
+var array<int>   bN = array.new<int>(24, 0)    // operaciones del corte
+var array<int>   b1 = array.new<int>(24, 0)    // ... que llegaron al objetivo
+var array<int>   b2 = array.new<int>(24, 0)    // ... que llegaron al doble
+var array<float> bS = array.new<float>(24, 0.0) // suma de MFE
+var array<int>   bT = array.new<int>(24, 0)    // [v3.4] ... cerradas por ventana agotada
+var array<float> bC = array.new<float>(24, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
+var array<int>   bM = array.new<int>(24, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
+var array<float> bX = array.new<float>(24, 0.0) // [v4.6] suma de SUS resultados reales en R
 var float        evCSum = 0.0
 
 // [v4.6] FRONTERA DE LAS DOS MITADES, CONGELADA EN LA PRIMERA VELA. `last_bar_index / 2` se reevaluaba en
@@ -1217,6 +1328,18 @@ if barstate.isconfirmed and zones.size() > 0
                     // [v4.1] LLEGADA (Seiden): recorrido neto de las últimas velas al tocar. Acelerando =
                     // ofensiva que suele atravesar; controlada = retroceso que respeta.
                     z.softAt   := math.abs(close - close[arrBars]) / math.max(atrC, syminfo.mintick) <= arrMax
+                    // [v4.9] CONTEXTO INSTITUCIONAL. VWAP: comprar una demanda por debajo del precio medio
+                    // ponderado de la sesión —o vender una oferta por encima— es operar del lado bueno de
+                    // la referencia contra la que se mide la ejecución. Se mide en el PROXIMAL, que es
+                    // donde entrarías, no en el cierre.
+                    z.vwapAt   := vwapOK and (z.isDem ? prox0 < vwapV : prox0 > vwapV)
+                    // Banda σ: el toque alcanzó el extremo estadístico de la sesión, donde se espera
+                    // reversión a la media. Por mecha, que es como se tocan las bandas.
+                    z.sigmaAt  := vwapOK and (z.isDem ? low <= vwapL : high >= vwapU)
+                    z.kzAt     := kzIn
+                    // Liquidez D/W: un bloque construido sobre PDH/PDL/PWH/PWL no se formó en cualquier
+                    // sitio, se formó sobre stops preparados.
+                    z.liqAt    := f_onLiq(prox0)
 
             // Mitigación: hasta dónde ha penetrado el precio, medido con la mecha.
             if inside
@@ -1291,9 +1414,9 @@ if barstate.isconfirmed and zones.size() > 0
                     evXSum += xr
                 bool early = z.evalBar < splitBar
                 bool pdFav = na(z.pd) ? false : (z.isDem ? z.pd <= 0.5 : z.pd >= 0.5)
-                for k = 0 to 19
-                    // [v4.8] "con CHoCH" entra en k==5 y desplaza un puesto a todo lo que iba detrás.
-                    bool has = k == 0 ? z.scoreAt >= gradeAp : k == 1 ? (z.scoreAt >= gradeA and z.scoreAt < gradeAp) : k == 2 ? z.scoreAt < gradeA : k == 3 ? z.fvg : k == 4 ? z.bos : k == 5 ? z.choch : k == 6 ? z.sweep : k == 7 ? z.htfAt : k == 8 ? (z.baseTight and z.baseN <= 1) : k == 9 ? z.momOut : k == 10 ? z.rthAt : k == 11 ? z.biasAt == 1 : k == 12 ? pdFav : k == 13 ? z.rrAt : k == 14 ? z.softAt : k == 15 ? z.tfIdx == 0 : k == 16 ? z.tfIdx == 1 : k == 17 ? z.tfIdx == 2 : k == 18 ? early : not early
+                for k = 0 to 23
+                    // [v4.8] "con CHoCH" en k==5. [v4.9] Los cuatro cortes institucionales en k==15..18.
+                    bool has = k == 0 ? z.scoreAt >= gradeAp : k == 1 ? (z.scoreAt >= gradeA and z.scoreAt < gradeAp) : k == 2 ? z.scoreAt < gradeA : k == 3 ? z.fvg : k == 4 ? z.bos : k == 5 ? z.choch : k == 6 ? z.sweep : k == 7 ? z.htfAt : k == 8 ? (z.baseTight and z.baseN <= 1) : k == 9 ? z.momOut : k == 10 ? z.rthAt : k == 11 ? z.biasAt == 1 : k == 12 ? pdFav : k == 13 ? z.rrAt : k == 14 ? z.softAt : k == 15 ? z.vwapAt : k == 16 ? z.sigmaAt : k == 17 ? z.kzAt : k == 18 ? z.liqAt : k == 19 ? z.tfIdx == 0 : k == 20 ? z.tfIdx == 1 : k == 21 ? z.tfIdx == 2 : k == 22 ? early : not early
                     if has
                         bN.set(k, bN.get(k) + 1)
                         bS.set(k, bS.get(k) + m)
@@ -1423,6 +1546,45 @@ if showZones and barstate.islast
     f_render()
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ DIBUJO DEL CONTEXTO INSTITUCIONAL  [v4.9]
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+plot(vwapOn and vwapShow ? vwapV : na, "VWAP sesión",  color = color.new(vwapCol, 0),  linewidth = 2)
+plot(vwapOn and vwapShow ? vwapU : na, "VWAP banda +", color = color.new(vwapBCol, 40))
+plot(vwapOn and vwapShow ? vwapL : na, "VWAP banda −", color = color.new(vwapBCol, 40))
+
+// PDH/PDL/PWH/PWL con objetos pre-asignados, igual que los bloques: solo se mueven coordenadas.
+var array<line>  liqLn = array.new<line>()
+var array<label> liqLb = array.new<label>()
+if barstate.isfirst
+    for i = 1 to 4
+        liqLn.push(line.new(na, na, na, na, xloc = xloc.bar_time, style = line.style_dashed, width = 1))
+        liqLb.push(label.new(na, na, "", xloc = xloc.bar_time, style = label.style_none, size = size.tiny))
+
+f_liqLine(int slot, float px, string txt, color c) =>
+    line  l = liqLn.get(slot)
+    label b = liqLb.get(slot)
+    if liqOn and liqShow and not na(px)
+        int x1 = time - chartSec * 1000 * 100
+        int x2 = time + chartSec * 1000 * extendBars
+        line.set_xy1(l, x1, px)
+        line.set_xy2(l, x2, px)
+        line.set_color(l, color.new(c, 30))
+        label.set_xy(b, x2, px)
+        label.set_text(b, txt)
+        label.set_textcolor(b, color.new(c, 0))
+    else
+        line.set_xy1(l, na, na)
+        line.set_xy2(l, na, na)
+        label.set_xy(b, na, na)
+
+if barstate.islast
+    f_liqLine(0, pdH, "PDH", liqDCol)
+    f_liqLine(1, pdL, "PDL", liqDCol)
+    f_liqLine(2, pwH, "PWH", liqWCol)
+    f_liqLine(3, pwL, "PWL", liqWCol)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ PANEL
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -1487,7 +1649,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v4.8", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v4.9", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
@@ -1505,12 +1667,19 @@ f_dash() =>
     string sMarcos = (tf1Use ? f_tfLabel(tf1) + " " : "") + (tf2Use ? f_tfLabel(tf2) + " " : "") + (tf3Use ? f_tfLabel(tf3) : "")
     f_row(tb, 4, "Bloques vivos", "D " + str.tostring(cntDem) + " · S " + str.tostring(cntSup) + " · " + sMarcos + (tfIgnored ? " ⚠" : "") + (bestLive > 0 ? " · mejor " + str.tostring(math.round(bestLive)) : ""), tfIgnored ? #FFA726 : color.white)
 
+    // [v4.9] Fila institucional: de qué lado del VWAP estás, si es kill zone y si el precio anda pegado
+    // a la liquidez del día o la semana previos. Las tres se leen de un vistazo antes de apretar.
+    string sVw = not vwapOK ? "s/d" : close >= vwapV ? "▲ sobre VWAP" : "▼ bajo VWAP"
+    string sKz = not (timeframe.isintraday and kzOn) ? "—" : kzIn ? "KZ ✓" : "fuera de KZ"
+    string sLq = not liqOn ? "—" : f_onLiq(close) ? "⚠ sobre liquidez D/W" : "sin liquidez cerca"
+    f_row(tb, 5, "Institucional", sVw + "  ·  " + sKz + "  ·  " + sLq, not vwapOK ? color.gray : kzIn ? #00E676 : color.white)
+
     // [v3.8] El embudo de formación es diagnóstico, no operativa: fuera del panel salvo que lo pidas.
     if showFunnel
-        f_row(tb, 5, "Detectados", str.tostring(fnDet), color.white)
-        f_row(tb, 6, "Sin huella ✖", str.tostring(fnFp) + " · " + f_pctTxt(fnFp, fnDet), fnDet > 0 and fnFp > fnDet / 2 ? #FFA726 : color.gray)
-        f_row(tb, 7, "Duplicados ✖", str.tostring(fnDup) + " · " + f_pctTxt(fnDup, fnDet), color.gray)
-        f_row(tb, 8, "Registrados", str.tostring(fnReg) + " · " + f_pctTxt(fnReg, fnDet), fnReg > 0 ? #00E676 : #FF5252)
+        f_row(tb, 6, "Detectados", str.tostring(fnDet), color.white)
+        f_row(tb, 7, "Sin huella ✖", str.tostring(fnFp) + " · " + f_pctTxt(fnFp, fnDet), fnDet > 0 and fnFp > fnDet / 2 ? #FFA726 : color.gray)
+        f_row(tb, 8, "Duplicados ✖", str.tostring(fnDup) + " · " + f_pctTxt(fnDup, fnDet), color.gray)
+        f_row(tb, 9, "Registrados", str.tostring(fnReg) + " · " + f_pctTxt(fnReg, fnDet), fnReg > 0 ? #00E676 : #FF5252)
 
 if showDash and barstate.islast
     f_dash()
@@ -1575,8 +1744,8 @@ f_evalTable() =>
     bool   full = evalMode == "Completo"
     string sT1  = str.tostring(reactTarget, "#.#") + "R"
     string sT2  = str.tostring(reactTarget * 2, "#.#") + "R"
-    var table ev = table.new(position.bottom_right, 9, 24, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "  · de ellos CHoCH", "con LIQ", "con MTF", "base 1 vela", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
+    var table ev = table.new(position.bottom_right, 9, 28, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
+    array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "  · de ellos CHoCH", "con LIQ", "con MTF", "base 1 vela", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "a favor del VWAP", "en banda " + str.tostring(vwapSigma, "#.#") + "σ", "en kill zone", "sobre liquidez D/W", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
 
     if full
         table.cell(ev, 0, 0, "Operación simulada", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
@@ -1589,23 +1758,23 @@ f_evalTable() =>
         table.cell(ev, 7, 0, "T/R",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 8, 0, "Esp.",   text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         f_evRow(ev, 1, "TODOS", evN, evHeld, evHeld2, evRSum, evTimeout, evCSum, evMkt, evXSum, evN, true)
-        for k = 0 to 19
+        for k = 0 to 23
             f_evRow(ev, k + 2, bNames.get(k), bN.get(k), b1.get(k), b2.get(k), bS.get(k), bT.get(k), bC.get(k), bM.get(k), bX.get(k), evN, false)
-        table.cell(ev, 0, 22, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
+        table.cell(ev, 0, 26, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 7
-            table.cell(ev, c, 22, "", text_size = size.tiny)
-        table.cell(ev, 8, 22, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(ev, 0, 23, "Esp. NETA · T/R = R media sacada de las cerradas por reloj · las dos MITADES deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+            table.cell(ev, c, 26, "", text_size = size.tiny)
+        table.cell(ev, 8, 26, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 0, 27, "Esp. NETA · T/R = R media sacada de las cerradas por reloj · las dos MITADES deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 8
-            table.cell(ev, c, 23, "", text_size = size.tiny)
+            table.cell(ev, c, 27, "", text_size = size.tiny)
     else
         table.cell(ev, 0, 0, "Verificación", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
         table.cell(ev, 1, 0, "N",       text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 2, 0, "≥" + sT2, text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 3, 0, "Esp.",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         f_evMini(ev, 1, "TODOS",      evN,        evHeld2,    evCSum,     evMkt,      evXSum,     true)
-        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(18), b2.get(18), bC.get(18), bM.get(18), bX.get(18), false)
-        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(19), b2.get(19), bC.get(19), bM.get(19), bX.get(19), false)
+        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(22), b2.get(22), bC.get(22), bM.get(22), bX.get(22), false)
+        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(23), b2.get(23), bC.get(23), bM.get(23), bX.get(23), false)
         table.cell(ev, 0, 4, "las mitades deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 3
             table.cell(ev, c, 4, "", text_size = size.tiny)
