@@ -1,8 +1,35 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v5.1
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v5.2
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v5.2 — CUATRO DEFECTOS DE LAS PROPIAS VERSIONES v4.9-v5.1
+//   Auditar lo recién añadido es parte del trabajo, no una cortesía. Tres de estos cuatro los introduje
+//   yo construyendo encima sin revisar sobre qué construía.
+//   · UN INTERRUPTOR DE SCORE APAGABA SEIS MEDICIONES. `pdOK` metía `usePd` en su condición, y `pdOK`
+//     gobierna f_pdPos y f_pdPx. Resultado: quitar los 5 puntos de premium/discount del score apagaba
+//     además los dos cortes de descuento, el de OTE, el rango dibujado con su equilibrio, las franjas
+//     OTE y la lectura del panel. MEDIR Y PUNTUAR SON DECISIONES DISTINTAS y el archivo lleva desde
+//     v3.0 diciéndolo: ahora `rangeOK` dice si el rango sirve y `usePd` solo si suma puntos.
+//   · EL OTE SE PODÍA DIBUJAR SOBRE LA VENTANA MÓVIL. Las franjas salían de dealHi/dealLo —que en modo
+//     legado es la ventana deslizante— mientras el gate direccional leía `rLeg`, que SIEMPRE viene de
+//     las anclas de swing. Una franja sin sentido con una dirección que no le correspondía. Que el OTE
+//     necesita un dealing range de verdad es justo lo que decía v5.1 al implementarlo; no lo exigía.
+//     Ahora lo exige, y el panel avisa en vez de callar: una columna vacía parecía "no hay setup"
+//     cuando en realidad era "no se está midiendo".
+//   · EL VWAP SE DIBUJABA DONDE NO SIGNIFICA NADA. La medición se filtraba con `vwapOK` (que exige
+//     intradía) y el dibujo solo con `vwapOn`. Fuera de intradía el ancla salta en cada vela, así que
+//     la línea pintada era el hlc3 de cada barra.
+//   · Y una reducción de riesgo: f_oteBox recibía un `box` como parámetro en vez del índice de ranura,
+//     que es el patrón ya probado en f_lvlLine y f_render. Mismo resultado, un patrón menos que validar.
+//
+//   LO QUE ESTA AUDITORÍA NO ARREGLA, porque no es código: la tabla tiene 26 cortes sobre la MISMA
+//   muestra. Con el listón en "las dos mitades coinciden en signo", un corte de puro ruido lo pasa con
+//   probabilidad 0.25, así que se esperan ~6 ganadores falsos de 26 y la probabilidad de que al menos
+//   uno engañe es del 99.9%. Y los cortes no son independientes: CHoCH ⊂ BOS, OTE ⊂ descuento al tocar
+//   ≈ descuento al nacer. Exigir además que coincida en LOS DOS activos lleva lo esperado a ~1.6.
+//   Ampliar la tabla ha restado poder de decisión, no sumado. El siguiente paso no es otro corte.
 //
 // v5.1 — OTE (OPTIMAL TRADE ENTRY), QUE YA SE PODÍA MEDIR
 //   Hasta v5.0 el premium/discount se calculaba contra una ventana móvil, y sobre eso el OTE no
@@ -465,7 +492,7 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v5.1", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v5.2", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -583,7 +610,7 @@ curveLen = input.int(50, "Rango operativo: velas (solo modo legado)", minval=10,
 pdMode     = input.string("Rango entre swings (ICT)", "Rango operativo: cómo se define", options=["Rango entre swings (ICT)", "Ventana móvil (legado)"], group=gPd, tooltip="[v5.0] VENTANA MÓVIL era lo que había hasta v4.9: el máximo y el mínimo de las últimas N velas del marco de curva. No es un dealing range, y falla por dos sitios a la vez — se desliza cada vela aunque no haya pasado nada estructural, así que el 'descuento' de un bloque cambia solo con que el tiempo avance; y arrastra extremos de hace N velas que pueden no tener ya ninguna relación con lo que se está negociando.\n\nRANGO ENTRE SWINGS es la definición de ICT: el rango va del último pivote BAJO confirmado al último pivote ALTO confirmado, y el equilibrio es su 50%. Solo se mueve cuando confirma un pivote nuevo o cuando el precio se sale del rango — en cuyo caso el rango se estira hasta donde llegó, porque ese extremo ya no es el techo de nada.\n\nOJO: esto CAMBIA EL SCORE (el componente Curva/PD, 5 puntos). Las muestras de la tabla anteriores a v5.0 no son comparables. El modo legado se conserva para que puedas medir uno contra otro.")
 rangeSwing = input.int(10, "Rango entre swings: velas del pivote", minval=2, maxval=50, group=gPd, tooltip="Velas a cada lado exigidas para confirmar los pivotes que anclan el rango. Más alto = rango más estable y más lento en reanclarse.")
 showEq     = input.bool(true, "Dibujar el rango operativo y su equilibrio", group=gPd)
-oteOn      = input.bool(true, "Medir OTE (Optimal Trade Entry)", group=gPd, tooltip="[v5.1] ICT: dentro del retroceso de un impulso, la zona óptima de entrada está entre el 62% y el 79% de retroceso. No es el descuento genérico —eso es media escala— sino una franja estrecha del 17% del rango.\n\nSe apoya en el DEALING RANGE de v5.0: sin un rango bien definido, el OTE no significa nada, y por eso no se pudo implementar antes.\n\nEn posición dentro del rango: la franja de COMPRA cae entre el 21% y el 38% (retroceder un 79% desde el máximo deja el precio al 21% del rango), y la de VENTA entre el 62% y el 79%. Son simétricas.")
+oteOn      = input.bool(true, "Medir OTE (Optimal Trade Entry)", group=gPd, tooltip="[v5.2] REQUIERE el modo de rango \"Rango entre swings (ICT)\": sobre la ventana móvil legada los porcentajes se referirían a un rango que se desliza solo, y el OTE no significaría nada. En modo legado el corte queda vacío y las franjas no se dibujan; el panel lo avisa.\n\n[v5.1] ICT: dentro del retroceso de un impulso, la zona óptima de entrada está entre el 62% y el 79% de retroceso. No es el descuento genérico —eso es media escala— sino una franja estrecha del 17% del rango.\n\nSe apoya en el DEALING RANGE de v5.0: sin un rango bien definido, el OTE no significa nada, y por eso no se pudo implementar antes.\n\nEn posición dentro del rango: la franja de COMPRA cae entre el 21% y el 38% (retroceder un 79% desde el máximo deja el precio al 21% del rango), y la de VENTA entre el 62% y el 79%. Son simétricas.")
 oteLo      = input.float(0.62, "OTE: retroceso mínimo", minval=0.3, maxval=0.95, step=0.01, inline="ot", group=gPd)
 oteHi      = input.float(0.79, "máximo", minval=0.3, maxval=0.99, step=0.01, inline="ot", group=gPd)
 oteDir     = input.bool(true, "OTE: exigir que el impulso vaya a favor", group=gPd, tooltip="[v5.1] El OTE es el retroceso DE UN IMPULSO, así que estrictamente solo aplica si el último tramo del rango va en la dirección del trade: compras en el retroceso de un impulso alcista, vendes en el de uno bajista. Se determina por cuál de los dos extremos del rango es más reciente.\n\nActivado es la doctrina y reduce bastante la muestra. Desactivado mide solo la franja de precio, ignorando de dónde venía el movimiento. Compara las dos en la tabla: es exactamente el tipo de pregunta que esta herramienta existe para responder.")
@@ -591,7 +618,7 @@ showOte    = input.bool(true, "Dibujar las franjas OTE", group=gPd)
 oteBuyCol  = input.color(#26A69A, "OTE compra", inline="oc", group=gPd)
 oteSellCol = input.color(#EF5350, "OTE venta", inline="oc", group=gPd)
 eqCol      = input.color(#7E57C2, "Color del rango / equilibrio", group=gPd)
-usePd    = input.bool(true, "Puntuar premium / discount", group=gPd, tooltip="ICT: una demanda vale más en la mitad baja del rango (descuento) y una oferta en la mitad alta (premium). Comprar caro es comprar donde ya no queda recorrido.")
+usePd    = input.bool(true, "Puntuar premium / discount", group=gPd, tooltip="ICT: una demanda vale más en la mitad baja del rango (descuento) y una oferta en la mitad alta (premium). Comprar caro es comprar donde ya no queda recorrido.\n\n[v5.2] Afecta SOLO a los 5 puntos del score. El rango se sigue calculando, dibujando y midiendo en la tabla con esto apagado: medir y puntuar son decisiones distintas. Hasta v5.1 este interruptor apagaba también los cortes y el dibujo, que era un error.")
 // [v3.9] Las dos variables de contexto que FALTABAN. No entran en el score — entran en la tabla de
 // verificación como cortes nuevos, que es donde se decide si algo aporta. El motor está para eso.
 sessStr  = input.session("0930-1600", "Sesión regular (hora de Nueva York)", group=gPd, tooltip="[v3.9] Todas las mediciones anteriores mezclaban sesión regular y nocturna. Un bloque tocado a las 3 de la madrugada, con una fracción del volumen y del interés, no es el mismo suceso que uno tocado a las 10 de la mañana — y sin embargo contaban igual. Ahora hay una fila 'toque en RTH' en la tabla que lo separa.")
@@ -1036,7 +1063,11 @@ bool  curveTfOK = f_tfSec(curveTf) > chartSec
 bool  pdLegacy  = pdMode == "Ventana móvil (legado)"
 float dealHi    = pdLegacy ? cHi : rHi
 float dealLo    = pdLegacy ? cLo : rLo
-bool  pdOK      = usePd and curveTfOK and not na(dealHi) and not na(dealLo) and dealHi > dealLo
+// [v5.2] El rango ES UTILIZABLE o no lo es; PUNTUARLO es otra decisión. Hasta v5.1 `usePd` —un
+// interruptor de score— entraba en esta condición, así que apagarlo no quitaba 5 puntos: se llevaba por
+// delante los dos cortes de descuento, el de OTE, el rango dibujado con su equilibrio, las franjas OTE y
+// la lectura del panel. El score ya se filtra por su cuenta en f_score, que es donde toca.
+bool  rangeOK   = curveTfOK and not na(dealHi) and not na(dealLo) and dealHi > dealLo
 bool  biasTfOK  = f_tfSec(biasTf) > chartSec
 bool  inRTH     = not timeframe.isintraday or not na(time(timeframe.period, sessStr, "America/New_York"))
 float atrC      = ta.atr(14)
@@ -1090,11 +1121,11 @@ f_onLiq(float px) =>
 
 // Posición de un precio dentro del rango: 0 = mínimo del rango · 1 = máximo.
 f_pdPos(float px) =>
-    pdOK ? math.max(0.0, math.min(1.0, (px - dealLo) / (dealHi - dealLo))) : na
+    rangeOK ? math.max(0.0, math.min(1.0, (px - dealLo) / (dealHi - dealLo))) : na
 
 // [v5.1] Precio que corresponde a una posición del rango (la inversa de f_pdPos), para dibujar el OTE.
 f_pdPx(float pp) =>
-    pdOK ? dealLo + pp * (dealHi - dealLo) : na
+    rangeOK ? dealLo + pp * (dealHi - dealLo) : na
 
 // OTE (ICT): la franja 62-79% del RETROCESO de un impulso. En posición dentro del rango sale simétrica —
 // retroceder un 79% desde el máximo deja el precio al 21% del rango—, así que la franja de compra es
@@ -1109,7 +1140,11 @@ f_inOte(float px, bool isDem) =>
     // El OTE es el retroceso DE UN IMPULSO: estrictamente solo aplica si el último tramo del rango va a
     // favor del trade. `rLeg` vale 1 si el máximo es el ancla más reciente (último tramo alcista) y -1 si
     // lo es el mínimo. Con oteDir desactivado se mide solo la franja de precio.
-    if oteOn and not na(pp) and (not oteDir or rLeg == (isDem ? 1 : -1))
+    // [v5.2] El OTE EXIGE el rango entre swings. Sobre la ventana móvil los porcentajes se refieren a un
+    // rango que se desliza solo —que es justo por lo que el OTE no se pudo implementar antes de v5.0— y
+    // además el gate direccional lee `rLeg`, que siempre viene de las anclas de swing: mezclar las dos
+    // cosas daba una franja sin sentido con una dirección que no le correspondía.
+    if oteOn and not pdLegacy and not na(pp) and (not oteDir or rLeg == (isDem ? 1 : -1))
         o := isDem ? (pp >= 1.0 - f_oteHi() and pp <= 1.0 - f_oteLo()) : (pp >= f_oteLo() and pp <= f_oteHi())
     o
 
@@ -1666,9 +1701,11 @@ if showZones and barstate.islast
 // ██ DIBUJO DEL CONTEXTO INSTITUCIONAL  [v4.9]
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-plot(vwapOn and vwapShow ? vwapV : na, "VWAP sesión",  color = color.new(vwapCol, 0),  linewidth = 2)
-plot(vwapOn and vwapShow ? vwapU : na, "VWAP banda +", color = color.new(vwapBCol, 40))
-plot(vwapOn and vwapShow ? vwapL : na, "VWAP banda −", color = color.new(vwapBCol, 40))
+// [v5.2] `vwapOK`, no `vwapOn`: fuera de intradía el ancla salta en cada vela y el "VWAP" dibujado era
+// el hlc3 de cada barra — una línea sin significado. La medición ya lo filtraba; el dibujo no.
+plot(vwapOK and vwapShow ? vwapV : na, "VWAP sesión",  color = color.new(vwapCol, 0),  linewidth = 2)
+plot(vwapOK and vwapShow ? vwapU : na, "VWAP banda +", color = color.new(vwapBCol, 40))
+plot(vwapOK and vwapShow ? vwapL : na, "VWAP banda −", color = color.new(vwapBCol, 40))
 
 // PDH/PDL/PWH/PWL con objetos pre-asignados, igual que los bloques: solo se mueven coordenadas.
 var array<line>  liqLn  = array.new<line>()
@@ -1683,7 +1720,8 @@ if barstate.isfirst
         oteBox.push(box.new(na, na, na, na, xloc = xloc.bar_time, text_size = size.tiny, text_halign = text.align_left, text_valign = text.align_top))
 
 // [v5.1] Franja OTE: caja extendida a la derecha, con su etiqueta en el borde superior.
-f_oteBox(box b, bool show, float top, float bot, string txt, color c) =>
+f_oteBox(int slot, bool show, float top, float bot, string txt, color c) =>
+    box b = oteBox.get(slot)
     if show and not na(top) and not na(bot) and top > bot
         box.set_lefttop(b, time - chartSec * 1000 * 100, top)
         box.set_rightbottom(b, time + chartSec * 1000 * extendBars, bot)
@@ -1720,16 +1758,16 @@ if barstate.islast
     f_lvlLine(3, lqShow, pwL, "PWL", liqWCol)
     // [v5.0] El rango operativo y su equilibrio. Ver el 50% dibujado es la mitad del valor de tener un
     // dealing range de verdad: por encima estás pagando premium y por debajo comprando con descuento.
-    bool eqShow = pdOK and showEq
+    bool eqShow = rangeOK and showEq
     f_lvlLine(4, eqShow, dealHi, "Rango ↑", eqCol)
-    f_lvlLine(5, eqShow, pdOK ? (dealHi + dealLo) / 2 : na, "EQ 50%", eqCol)
+    f_lvlLine(5, eqShow, rangeOK ? (dealHi + dealLo) / 2 : na, "EQ 50%", eqCol)
     f_lvlLine(6, eqShow, dealLo, "Rango ↓", eqCol)
     // [v5.1] Las dos franjas OTE. Caja y no líneas porque el OTE es una ZONA, no un nivel: lo que
     // importa es ver de un vistazo si el proximal del bloque cae dentro. La de compra ocupa la parte
     // baja del rango y la de venta la alta; son simétricas y no se solapan.
-    bool otShow = pdOK and oteOn and showOte
-    f_oteBox(oteBox.get(0), otShow and (not oteDir or rLeg == 1),  f_pdPx(1.0 - f_oteLo()), f_pdPx(1.0 - f_oteHi()), "OTE compra", oteBuyCol)
-    f_oteBox(oteBox.get(1), otShow and (not oteDir or rLeg == -1), f_pdPx(f_oteHi()),       f_pdPx(f_oteLo()),       "OTE venta",  oteSellCol)
+    bool otShow = rangeOK and oteOn and not pdLegacy and showOte
+    f_oteBox(0, otShow and (not oteDir or rLeg == 1),  f_pdPx(1.0 - f_oteLo()), f_pdPx(1.0 - f_oteHi()), "OTE compra", oteBuyCol)
+    f_oteBox(1, otShow and (not oteDir or rLeg == -1), f_pdPx(f_oteHi()),       f_pdPx(f_oteLo()),       "OTE venta",  oteSellCol)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ PANEL
@@ -1796,7 +1834,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v5.1", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v5.2", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
@@ -1808,8 +1846,10 @@ f_dash() =>
     float  pdNow = f_pdPos(close)
     string sSess = inRTH ? "RTH" : "nocturna"
     string sBias = not biasTfOK ? "⚠ marco ≤ gráfico" : htfDir == 1 ? "▲ alcista" : htfDir == -1 ? "▼ bajista" : "— sin sesgo"
-    string sOte  = f_inOte(close, true) ? " · OTE compra" : f_inOte(close, false) ? " · OTE venta" : ""
-    string sPd   = not pdOK ? "s/d" : str.tostring(pdNow * 100, "#") + "% " + (pdNow >= 0.5 ? "premium" : "descuento") + sOte
+    // [v5.2] Si el OTE está pedido pero el modo de rango no lo permite, se dice — antes callaba y la
+    // columna vacía parecía "no hay setup" cuando en realidad era "no se está midiendo".
+    string sOte  = oteOn and pdLegacy ? " · OTE n/d (rango legado)" : f_inOte(close, true) ? " · OTE compra" : f_inOte(close, false) ? " · OTE venta" : ""
+    string sPd   = not rangeOK ? "s/d" : str.tostring(pdNow * 100, "#") + "% " + (pdNow >= 0.5 ? "premium" : "descuento") + sOte
     f_row(tb, 3, "Contexto", sSess + "  ·  " + sBias + " " + f_tfLabel(biasTf) + "  ·  " + sPd, not inRTH ? #FFA726 : htfDir == 1 ? #00E676 : htfDir == -1 ? #FF5252 : color.white)
 
     string sMarcos = (tf1Use ? f_tfLabel(tf1) + " " : "") + (tf2Use ? f_tfLabel(tf2) + " " : "") + (tf3Use ? f_tfLabel(tf3) : "")
