@@ -1,8 +1,37 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v5.7
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v6.0
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v6.0 — LAS CINCO FORMACIONES DEL NÚCLEO ICT QUE FALTABAN
+//   Auditado el catálogo doctrinal completo contra el código, faltaban cinco formaciones de peso. No
+//   eran matices: eran objetos que el motor no podía ni representar.
+//   · POOLS DE LIQUIDEZ (máximos/mínimos iguales). El indicador detectaba barridos pero NO TENÍA NINGUNA
+//     NOCIÓN DE DÓNDE ESTABA LA LIQUIDEZ. En ICT eso es la estructura objetivo: el barrido va HACIA ella.
+//     Barrer un pivote suelto y llevarse un pool de stops contaban exactamente igual. Ahora se guarda el
+//     pivote ANTERIOR de cada lado; dos al mismo precio son un pool, y el barrido se clasifica 0/1/2.
+//   · FIDELIDAD DEL BARRIDO, de paso. Un barrido toma liquidez CON MECHA y vuelve: si el precio CIERRA
+//     más allá del nivel eso es una ROTURA, no un barrido, y hasta v5.7 contaban igual.
+//   · DISPLACEMENT como veredicto formal. En ICT tiene definición propia —movimiento energético que
+//     ADEMÁS deja FVG y rompe estructura— y las tres piezas se medían por separado sin combinarse nunca
+//     en la conjunción que exige la doctrina. Nuevo atributo, etiqueta DISP, y opción de huella
+//     "Displacement (ICT estricto)" para quien quiera exigirlo en la formación.
+//   · ORDER BLOCK vs MITIGATION BLOCK. Son la MISMA formación distinguidas por una sola cosa: si el
+//     precio se llevó liquidez antes de desplazarse (OB) o giró sin llegar a tomarla (MB). Caían en el
+//     mismo saco. Ahora hay taxonomía: compresión · OB · Mitigation · Rejection · Breaker.
+//   · REJECTION BLOCK. Todo el motor era body-based, así que esta clase entera era INVISIBLE para él:
+//     ICT la define por las MECHAS. Cuando la base tiene mecha dominante, la zona deja de ir de cuerpo a
+//     mecha y pasa a ser LA REGIÓN DE LA MECHA — proximal en el borde del cuerpo, distal en el extremo.
+//     Es otra geometría, no otra etiqueta.
+//   · INVERSION FVG. El FVG era un BOOLEANO del bloque: se preguntaba si el impulso dejó un hueco y ahí
+//     moría. Pero un hueco atravesado POR CIERRE no desaparece, CAMBIA DE POLARIDAD. Eso no se puede
+//     expresar sin un almacén con estado, así que ahora los FVG son objetos con ciclo de vida propio.
+//     Limitación asumida: se detectan en el marco DEL GRÁFICO, no en los tres del motor de bloques.
+//
+//   LA TABLA LLEGA A 32 CORTES. Los niveles que son estructuras por sí mismas (FVG, pools) se DIBUJAN y
+//   no añaden fila; solo los atributos del bloque entran como corte. Aun así, con 32 el listón de "las
+//   dos mitades" espera ~8 ganadores falsos: exígelo también en los dos activos.
 //
 // v5.7 — ORIGEN DEL MOVIMIENTO O PAUSA DENTRO DE ÉL: EL MOTOR NO SABÍA CUÁL DIBUJABA
 //   El barrido del impulso se detiene en la primera vela pequeña u opuesta. Si un desplazamiento de seis
@@ -591,7 +620,7 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v5.7", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v6.0", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -614,7 +643,9 @@ type Zone
     bool   bos
     bool   choch                // [v4.8] la rotura fue CONTRA la estructura vigente: cambio de manos
     int    ztype                // 1 reversión · -1 continuación · 0 neutro
-    bool   sweep
+    int    sweep                // [v6.0] 0 sin barrido · 1 pivote suelto · 2 POOL de extremos iguales
+    bool   hasDisp = false      // [v6.0] displacement ICT completo: energía + FVG + BOS
+    int    kind    = 0          // [v6.0] 0 compresión · 1 OB · 2 Mitigation · 3 Rejection · 4 Breaker
     int    baseN                // velas de la base
     int    legN                 // velas reales del impulso
     bool   momOut               // el impulso contiene una vela Elephant o Shaved
@@ -654,6 +685,17 @@ type Zone
     bool   pdAtFav     = false  // [v5.0] el PROXIMAL estaba en descuento/premium favorable AL TOCAR
     bool   oteAt       = false  // [v5.1] el proximal caía dentro de la franja OTE 62-79% al tocar
 
+// [v6.0] FVG como OBJETO con ciclo de vida propio, no como un booleano del bloque. Hace falta para el
+// INVERSION FVG: un hueco que el precio atraviesa POR CIERRE no muere — cambia de polaridad y pasa a
+// actuar del lado contrario. Sin almacén no se puede expresar esa transición.
+type Fvg
+    float top
+    float bot
+    bool  isBull
+    int   t0
+    int   bar0
+    bool  inverted = false
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ INPUTS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -690,6 +732,11 @@ swingLen       = input.int(5, "Estructura: velas a cada lado del pivote", minval
 sweepMode      = input.string("Pivote (estructura)", "Liquidez: cómo se mide el barrido", options=["Pivote (estructura)", "Extremo previo (legado)"], group=gZn, tooltip="Pivote: la base tiene que perforar el último PIVOTE confirmado, que es donde se acumulan los stops. Extremo previo: cualquier mínimo/máximo de las N velas anteriores, incluidos los de mitad de un impulso, donde no hay stops que barrer.")
 sweepLookback  = input.int(10, "Liquidez: ventana (velas)", minval=2, maxval=50, group=gZn, tooltip="Modo legado: velas previas revisadas. Modo pivote: el pivote no puede ser más antiguo que el doble de este valor.")
 originBars     = input.int(2, "Origen: velas de impulso previas que lo descartan", minval=1, maxval=5, group=gZn, tooltip="[v5.7] El barrido del impulso se detiene en la primera vela pequeña u opuesta, así que si un desplazamiento de seis velas trae una pausa en medio, esa pausa pasa a ser 'la base' y el bloque se dibuja ahí — no en el origen del movimiento.\n\nLas dos cosas son niveles legítimos en SMC (la pausa es un bloque intermedio o de mitigación), pero Seiden solo querría el ORIGEN, y hasta v5.6 el indicador no distinguía cuál era cuál.\n\nAhora mira las velas justo ANTES de la base con el mismo criterio que define el impulso —cuerpo real y mismo color—. Si hay N consecutivas, el movimiento ya estaba en marcha y esto es una pausa, no un origen. Los bloques de origen se etiquetan ORG y tienen su corte en la tabla.\n\nNO filtra: se miden los dos y que los datos digan si el origen vale más. `ztype` no cubría esto — mide el recorrido NETO de un tramo fijo de velas, que es otra pregunta.")
+rejOn          = input.bool(true, "Detectar Rejection Blocks (zona = la mecha)", group=gZn, tooltip="[v6.0] REJECTION BLOCK (ICT). Todo el motor era body-based, así que esta clase entera era invisible para él: un rejection block lo definen las MECHAS, no los cuerpos.\n\nCuando la base tiene una mecha dominante en la dirección del rechazo, la zona deja de ir del cuerpo a la mecha y pasa a ser LA REGIÓN DE LA MECHA: proximal en el borde del cuerpo, distal en el extremo de la mecha. Es donde el precio fue rechazado con violencia, y es un nivel distinto del bloque de oferta/demanda clásico.\n\nUna base con mecha dominante produce un rejection block EN VEZ del bloque estándar — no los dos: es la misma base leída como lo que es.")
+rejWickPct     = input.int(60, "Rejection: mecha mínima (% del rango de la base)", minval=30, maxval=90, group=gZn)
+rejMinAtr      = input.float(0.5, "Rejection: mecha mínima (×ATR)", minval=0.1, step=0.05, group=gZn)
+eqTolAtr       = input.float(0.15, "Pool de liquidez: tolerancia entre extremos iguales (×ATR)", minval=0.02, step=0.01, group=gZn, tooltip="[v6.0] MÁXIMOS/MÍNIMOS IGUALES. En ICT es la estructura OBJETIVO: dos pivotes al mismo precio acumulan stops justo detrás, y el barrido va HACIA ellos. Hasta v5.7 el indicador detectaba barridos pero no tenía ninguna noción de dónde estaba la liquidez — barría un pivote suelto y un pool de stops exactamente igual.\n\nDos pivotes del mismo lado que disten menos de esto cuentan como iguales. Un barrido que se lleva un POOL es un suceso distinto —y mucho más fuerte— que uno que se lleva un pivote aislado.")
+dispMinAtr     = input.float(2.0, "Displacement: desplazamiento mínimo (×ATR)", minval=0.5, step=0.1, group=gZn, tooltip="[v6.0] DISPLACEMENT es un término con definición propia en ICT: movimiento ENERGÉTICO que además deja un FVG y rompe estructura. Las tres piezas ya se medían por separado (`net`, `fvg`, `bos`) y nunca se combinaban en la conjunción que exige la doctrina.\n\nEsto es el umbral de energía, más alto que el desplazamiento mínimo de ⓶ porque un displacement es más que un movimiento cualquiera. El veredicto completo exige las TRES cosas, y se etiqueta DISP.\n\nEn ICT estricto un Order Block solo es válido si va seguido de displacement: para exigirlo, pon la huella en 'Displacement' arriba en ③.")
 legInBars      = input.int(5, "Tramo de llegada a la base (velas)", minval=2, maxval=20, group=gZn, tooltip="Velas anteriores a la base con las que se clasifica el bloque: llegó cayendo (DBR, reversión) o subiendo (RBR, continuación).")
 minBarsBetween = input.int(3, "Velas mínimas entre bloques del mismo tipo", minval=1, maxval=50, group=gZn)
 baseVolMax     = input.float(1.0, "Base: volumen relativo para contarla tranquila", minval=0.2, maxval=3.0, step=0.1, group=gZn, tooltip="[v5.6] La premisa de Seiden es que la base es donde una orden institucional quedó SIN EJECUTAR, y la huella de eso es actividad BAJA en la base seguida de alta en la salida. Hasta v5.5 el indicador medía el volumen del IMPULSO (rvol) y daba por supuesta la primera mitad: nunca preguntaba si la base había estado tranquila.\n\nUna base con volumen ALTO dice lo contrario — la orden se absorbió ahí y al volver el precio no queda nada que la defienda. Son dos sucesos opuestos y contaban igual.\n\n1.0 = volumen de la base igual a la media de 20. NO filtra ni puntúa: entra como corte 'base tranquila' en la tabla de verificación, que es donde se decide si algo aporta. Si separa de verdad, entonces dale peso.")
@@ -699,7 +746,7 @@ useBreaker     = input.bool(false, "Breaker: el bloque roto se da la vuelta", gr
 breakerDispAtr = input.float(0.8, "Breaker: cuerpo mínimo de la vela que rompe (×ATR)", minval=0.2, step=0.1, group=gZn, tooltip="Sin desplazamiento la rotura es deriva, no un cambio de control: ese bloque no se da la vuelta, simplemente muere.")
 maxZonesMem    = input.int(150, "Bloques en memoria", minval=20, maxval=150, group=gZn, tooltip="[v5.5] Subido de 60 a 150. Con 60, un bloque de marco superior no llegaba a resolver su evaluación: en un gráfico de 1m, su ventana son 300 velas (bloque de 15m) o 1200 (bloque de 1H), y si en ese tramo nacían más de 60 bloques el más antiguo se descartaba a medio medir. El sesgo iba en la peor dirección posible —cuanto más alto el marco, más probable que su fila se truncara— y afectaba justo a los cortes 'Marco 15m' y 'Marco 1H'.\n\nVIGILA 'sin resolver' EN EL PIE DE LA TABLA: es el contador de evaluaciones que murieron sin cerrarse. Si sigue alto con 150, el problema no es la memoria sino que nacen demasiados bloques — endurece la detección en vez de subir esto.\n\nCOSTE: la pasada de confluencia MTF es O(n²) por vela cerrada. Con 60 son ~3.600 iteraciones; con 150, ~22.500. Si TradingView se queja del tiempo de ejecución, baja este número o desactiva marcos.")
 
-footprint  = input.string("FVG o BOS", "Huella institucional exigida", options=["Ninguna", "FVG o BOS", "FVG y BOS"], group=gQl, tooltip="Sin huella el bloque ni siquiera se registra: un impulso que no dejó desequilibrio ni rompió estructura rara vez tiene órdenes institucionales detrás.")
+footprint  = input.string("FVG o BOS", "Huella institucional exigida", options=["Ninguna", "FVG o BOS", "FVG y BOS", "Displacement (ICT estricto)"], group=gQl, tooltip="Sin huella el bloque ni siquiera se registra: un impulso que no dejó desequilibrio ni rompió estructura rara vez tiene órdenes institucionales detrás.")
 gradeAp    = input.int(62, "Grado A+ a partir de", minval=40, maxval=100, inline="gr", group=gQl, tooltip="[v4.2] Estaban fijos en 80/70. Al endurecer FVG y momentum en v3.9 la mayoría de bloques perdió ~16 puntos y dejaron de existir los A+: una escala en la que nadie llega arriba no clasifica nada. Ajústalos a tu distribución — mira la columna Frec. de los tres grados en la tabla y muévelos hasta que repartan.")
 gradeA     = input.int(50, "A", minval=30, maxval=100, inline="gr", group=gQl)
 chochEdge  = input.float(0.0, "Estructura: puntos que el BOS de continuación cede al CHoCH", minval=0.0, maxval=10.0, step=0.5, group=gQl, tooltip="[v4.8] Los 15 puntos de estructura se repartían por igual entre romper en la dirección que ya llevaba el mercado (BOS) y romper en contra (CHoCH), que en SMC son cosas distintas: uno continúa lo que ya pasaba, el otro es donde cambian las manos.\n\nCon N aquí, el CHoCH conserva los 15 y la continuación se queda en 15−N. La escala sigue siendo 0-100, no se infla.\n\nPOR DEFECTO 0, o sea sin efecto, y es deliberado: la disciplina de este indicador desde v3.0 es que nada entra en el score antes de separarse en la tabla. Mira la fila 'con CHoCH' contra 'con BOS' —frecuencia y esperanza, en las DOS mitades y en los dos activos— y solo entonces dale peso. Que la doctrina diga que el CHoCH vale más no es un dato.")
@@ -757,6 +804,12 @@ kz3   = input.session("1000-1100", "", inline="k3", group=gIn)
 kz4On = input.bool(false, "Tarde",         inline="k4", group=gIn)
 kz4   = input.session("1330-1600", "", inline="k4", group=gIn)
 
+fvgOn    = input.bool(true, "FVG con ciclo de vida e inversión", group=gIn, tooltip="[v6.0] INVERSION FVG (ICT). Hasta v5.7 el FVG era un BOOLEANO del bloque: se preguntaba si el impulso había dejado un hueco y ahí moría la historia. Pero un FVG que el precio atraviesa POR CIERRE no desaparece — CAMBIA DE POLARIDAD: un hueco alcista atravesado pasa a actuar como resistencia. Esa transición no se puede expresar sin un almacén con estado.\n\nAhora los FVG son objetos con ciclo propio: nacen, y un cierre al otro lado los invierte. Se dibujan en dos colores según su estado.\n\nLIMITACIÓN CONOCIDA: se detectan solo en el marco DEL GRÁFICO, no en los tres marcos del motor de bloques. Es una decisión de contención, no un descuido.")
+fvgShow  = input.bool(true, "Dibujar los FVG", group=gIn)
+fvgMinIn = input.float(0.25, "FVG: hueco mínimo (×ATR)", minval=0.05, step=0.05, group=gIn)
+fvgMaxN  = input.int(20, "FVG en memoria", minval=5, maxval=40, group=gIn)
+fvgCol   = input.color(#42A5F5, "abierto", inline="fv", group=gIn)
+fvgInvCol= input.color(#AB47BC, "invertido", inline="fv", group=gIn)
 liqOn    = input.bool(true, "Medir liquidez del día y la semana previos", group=gIn, tooltip="[v4.9] PDH/PDL y PWH/PWL: máximo y mínimo del día y de la semana anteriores. Son los niveles donde se acumulan stops de forma más previsible de todo el gráfico. Un bloque construido justo ahí no se formó en cualquier sitio: se formó sobre liquidez preparada. El corte 'sobre liquidez D/W' lo mide.")
 liqShow  = input.bool(true, "Dibujar PDH/PDL y PWH/PWL", group=gIn)
 liqNear  = input.float(0.5, "Distancia para contar como 'sobre el nivel' (×ATR)", minval=0.1, maxval=3.0, step=0.1, group=gIn)
@@ -879,6 +932,10 @@ f_detect() =>
     // la detección necesita distinguir "lo rompió ESTE impulso" de "ya estaba roto antes".
     var int   swHiBrk    = na
     var int   swLoBrk    = na
+    // [v6.0] El pivote ANTERIOR de cada lado. Dos pivotes al mismo precio son un POOL de liquidez: es
+    // la estructura hacia la que va el barrido, y el motor no la conocía.
+    var float swHi2      = na
+    var float swLo2      = na
     var int   structDir  = 0    // 1 alcista · -1 bajista · 0 sin estructura definida todavía
     var int   structPrev = 0    // la dirección ANTERIOR al último giro
     var int   structFlip = na   // vela del último giro, para recuperar la dirección previa al impulso
@@ -899,7 +956,9 @@ f_detect() =>
     //   0 el impulso no rompió estructura · 1 BOS de continuación · 2 CHoCH (rotura a contracorriente)
     int   evBos   = 0
     int   evType  = 0
-    bool  evSweep = false
+    int   evSweep = 0    // [v6.0] 0 sin barrido · 1 pivote suelto · 2 POOL de liquidez (extremos iguales)
+    bool  evDisp  = false // [v6.0] displacement ICT: energía + FVG + rotura de estructura, las tres
+    int   evKind  = 0     // [v6.0] 0 compresión · 1 Order Block · 2 Mitigation · 3 Rejection · 4 Breaker
     int   evBaseN = 0
     int   evLegN  = 0
     bool  evMom   = false
@@ -988,9 +1047,16 @@ f_detect() =>
                     // Mecha a cuerpo: proximal en el CUERPO de la base (donde se colocaron las órdenes);
                     // distal en la mecha más extrema de la base o de la primera vela del impulso, que a
                     // menudo barre justo por debajo/encima antes de irse.
-                    float top = isDem ? oHi : math.max(wHi, high[bNear - 1])
-                    float bot = isDem ? math.min(wLo, low[bNear - 1]) : oLo
-                    if top - bot < a * 0.05
+                    // [v6.0] REJECTION BLOCK: si la base tiene mecha dominante en la dirección del
+                    // rechazo, la zona ES la región de la mecha —proximal en el borde del cuerpo, distal
+                    // en el extremo— y no la geometría cuerpo→mecha del bloque clásico. ICT define esta
+                    // clase por las MECHAS, y un motor body-based no podía verla.
+                    float rejW  = isDem ? (oLo - wLo) : (wHi - oHi)
+                    float bRng  = wHi - wLo
+                    bool  isRej = rejOn and bRng > 0 and rejW >= bRng * rejWickPct / 100.0 and rejW >= a * rejMinAtr
+                    float top = isRej ? (isDem ? oLo : wHi) : (isDem ? oHi : math.max(wHi, high[bNear - 1]))
+                    float bot = isRej ? (isDem ? wLo : oHi) : (isDem ? math.min(wLo, low[bNear - 1]) : oLo)
+                    if not isRej and top - bot < a * 0.05
                         top := isDem ? wHi : top
                         bot := isDem ? bot : wLo
                     // [v4.3] La PROPORCIÓN se mide contra la BASE —la consolidación real— y no contra la
@@ -1044,21 +1110,34 @@ f_detect() =>
                         // Antes solo miraba las velas de la base y se perdía el caso más característico.
                         float swpLo = math.min(wLo, low[bNear - 1])
                         float swpHi = math.max(wHi, high[bNear - 1])
-                        bool sweep = false
+                        // [v6.0] FIDELIDAD DEL BARRIDO. Un barrido toma liquidez CON MECHA y vuelve: si el
+                        // precio CIERRA más allá del nivel, eso es una rotura, no un barrido, y hasta v5.7
+                        // contaban igual. Se mide sobre las mismas velas que definen swpLo/swpHi.
+                        float swpCloLo = close[bNear - 1]
+                        float swpCloHi = close[bNear - 1]
+                        for k = bNear to bFar
+                            swpCloLo := math.min(swpCloLo, close[k])
+                            swpCloHi := math.max(swpCloHi, close[k])
+                        int  sweep = 0
                         if sweepMode == "Pivote (estructura)"
                             // [v4.8] Mismo criterio de nivel vivo: no se puede barrer liquidez que un
                             // cierre anterior ya se llevó. Se mide contra el arranque de la BASE, que es
                             // quien hace el barrido, no contra el del impulso.
                             int   baseStart = bar_index - bFar
                             float lvl  = isDem ? swLo : swHi
+                            float lvl2 = isDem ? swLo2 : swHi2
                             int   lvlB = isDem ? swLoBar : swHiBar
                             int   lvlK = isDem ? swLoBrk : swHiBrk
-                            sweep := not na(lvl) and not na(lvlB) and (na(lvlK) or lvlK >= baseStart) and (bar_index - lvlB) <= sweepLookback * 2 and (isDem ? swpLo < lvl : swpHi > lvl)
+                            bool  got  = not na(lvl) and not na(lvlB) and (na(lvlK) or lvlK >= baseStart) and (bar_index - lvlB) <= sweepLookback * 2 and (isDem ? swpLo < lvl : swpHi > lvl) and (isDem ? swpCloLo >= lvl : swpCloHi <= lvl)
+                            // [v6.0] ¿El nivel barrido era un POOL —dos pivotes al mismo precio— o un
+                            // pivote suelto? Barrer un pool de stops es otro suceso.
+                            bool  pool = got and not na(lvl2) and math.abs(lvl - lvl2) <= a * eqTolAtr
+                            sweep := got ? (pool ? 2 : 1) : 0
                         else
                             float prior = isDem ? low[bFar + 1] : high[bFar + 1]
                             for k = bFar + 2 to bFar + sweepLookback
                                 prior := isDem ? math.min(prior, low[k]) : math.max(prior, high[k])
-                            sweep := isDem ? swpLo < prior : swpHi > prior
+                            sweep := (isDem ? swpLo < prior and swpCloLo >= prior : swpHi > prior and swpCloHi <= prior) ? 1 : 0
                         // [v5.7] ¿ORIGEN O PAUSA? Las velas justo ANTES de la base, con el mismo criterio
                         // que define el impulso: cuerpo real y mismo color. Si hay `originBars`
                         // consecutivas, el movimiento ya venía en marcha y esta base es una pausa dentro
@@ -1090,6 +1169,8 @@ f_detect() =>
                         evBos   := bos ? (choch ? 2 : 1) : 0
                         evType  := zt
                         evSweep := sweep
+                        // [v6.0] DISPLACEMENT (ICT): energía + FVG + rotura de estructura. Las TRES.
+                        evDisp  := net >= a * dispMinAtr and fvg and bos
                         evBaseN := bFar - bNear + 1
                         evLegN  := legN
                         evMom   := momOut
@@ -1097,6 +1178,12 @@ f_detect() =>
                         // Block válido, pero no prueba que el precio apenas se parara ahí.
                         evTight := math.abs(close[bNear] - open[bNear]) <= a * baseBodyAtr and (high[bNear] - low[bNear]) <= a * baseRngAtr
                         evOrig  := isOrig
+                        // [v6.0] TAXONOMÍA. En ICT, Order Block y Mitigation Block son la MISMA formación
+                        // distinguidas por una sola cosa: si el precio se llevó liquidez antes de
+                        // desplazarse (OB) o si giró sin llegar a tomarla (MB). Hasta v5.7 las dos caían
+                        // en el mismo saco. 0 compresión (S/D Seiden) · 1 Order Block · 2 Mitigation
+                        // Block · 3 Rejection Block · 4 Breaker (se fija al nacer el breaker).
+                        evKind  := isRej ? 3 : evTight ? 0 : (sweep > 0 ? 1 : 2)
                         if isDem
                             lastDemBar := bar_index
                         else
@@ -1121,18 +1208,20 @@ f_detect() =>
             structFlip := bar_index - 1
             structDir  := -1
     if not na(ph)
+        swHi2   := swHi
         swHi    := ph
         swHiBar := bar_index - swingLen
         swHiBrk := na
     if not na(pl)
+        swLo2   := swLo
         swLo    := pl
         swLoBar := bar_index - swingLen
         swLoBrk := na
-    [evNew, evDem, evTop, evBot, evT0, evDisp, evRatio, evRvol, evBvol, evFvg, evBos, evType, evSweep, evBaseN, evLegN, evMom, evTight, evOrig]
+    [evNew, evDem, evTop, evBot, evT0, evDisp, evRatio, evRvol, evBvol, evFvg, evBos, evType, evSweep, evBaseN, evLegN, evMom, evTight, evOrig, evDisp, evKind]
 
-[e1n, e1d, e1t, e1b, e1t0, e1ds, e1r, e1v, e1bv, e1f, e1bo, e1y, e1s, e1bn, e1ln, e1m, e1tg, e1og] = request.security(syminfo.tickerid, tf1, f_detect(), lookahead = barmerge.lookahead_on)
-[e2n, e2d, e2t, e2b, e2t0, e2ds, e2r, e2v, e2bv, e2f, e2bo, e2y, e2s, e2bn, e2ln, e2m, e2tg, e2og] = request.security(syminfo.tickerid, tf2, f_detect(), lookahead = barmerge.lookahead_on)
-[e3n, e3d, e3t, e3b, e3t0, e3ds, e3r, e3v, e3bv, e3f, e3bo, e3y, e3s, e3bn, e3ln, e3m, e3tg, e3og] = request.security(syminfo.tickerid, tf3, f_detect(), lookahead = barmerge.lookahead_on)
+[e1n, e1d, e1t, e1b, e1t0, e1ds, e1r, e1v, e1bv, e1f, e1bo, e1y, e1s, e1bn, e1ln, e1m, e1tg, e1og, e1dp, e1kd] = request.security(syminfo.tickerid, tf1, f_detect(), lookahead = barmerge.lookahead_on)
+[e2n, e2d, e2t, e2b, e2t0, e2ds, e2r, e2v, e2bv, e2f, e2bo, e2y, e2s, e2bn, e2ln, e2m, e2tg, e2og, e2dp, e2kd] = request.security(syminfo.tickerid, tf2, f_detect(), lookahead = barmerge.lookahead_on)
+[e3n, e3d, e3t, e3b, e3t0, e3ds, e3r, e3v, e3bv, e3f, e3bo, e3y, e3s, e3bn, e3ln, e3m, e3tg, e3og, e3dp, e3kd] = request.security(syminfo.tickerid, tf3, f_detect(), lookahead = barmerge.lookahead_on)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ RANGO OPERATIVO (premium / discount) · velas cerradas del marco superior
@@ -1247,6 +1336,30 @@ bool kzIn = timeframe.isintraday and kzOn and ((kz1On and not na(time(timeframe.
 [pdH, pdL] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
 [pwH, pwL] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ FVG CON CICLO DE VIDA E INVERSIÓN  [v6.0]
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Marco del GRÁFICO. Todo con [1] o anterior, igual que el resto: definitivo desde el primer tick.
+// El hueco de tres velas clásico: alcista si el mínimo de la vela i es mayor que el máximo de la i+2.
+
+var array<Fvg> fvgs = array.new<Fvg>()
+
+if barstate.isconfirmed and fvgOn and not na(atrC) and atrC > 0
+    float gapUp = low[1] - high[3]
+    float gapDn = low[3] - high[1]
+    if gapUp > 0 and gapUp >= atrC * fvgMinIn
+        fvgs.push(Fvg.new(top = low[1], bot = high[3], isBull = true,  t0 = time[3], bar0 = bar_index))
+    else if gapDn > 0 and gapDn >= atrC * fvgMinIn
+        fvgs.push(Fvg.new(top = low[3], bot = high[1], isBull = false, t0 = time[3], bar0 = bar_index))
+    // INVERSIÓN: un CIERRE al otro lado no mata el hueco, le da la vuelta. Por cierre y no por mecha,
+    // igual que el resto del archivo: una mecha que atraviesa y vuelve no ha invertido nada.
+    if fvgs.size() > 0
+        for f in fvgs
+            if not f.inverted and (f.isBull ? close < f.bot : close > f.top)
+                f.inverted := true
+    while fvgs.size() > fvgMaxN
+        fvgs.shift()
+
 // ¿Está `px` pegado a alguno de los cuatro niveles de liquidez?
 f_onLiq(float px) =>
     float tol = atrC * liqNear
@@ -1347,7 +1460,8 @@ f_score(Zone z, int prior) =>
     // 5. Frescura 15
     float sFresh = prior == 0 ? 15.0 : prior == 1 ? 5.0 : 0.0
     // 6-7. Liquidez 5 + tipo 5
-    float sSweep = z.sweep ? 5.0 : 0.0
+    // [v6.0] Barrer un POOL de liquidez puntúa el máximo; un pivote suelto, la mitad.
+    float sSweep = z.sweep == 2 ? 5.0 : z.sweep == 1 ? 2.5 : 0.0
     float sType  = z.ztype == 1 ? 5.0 : z.ztype == 0 ? 2.5 : 0.0
     // 8. Confluencia MTF 5, graduada
     float sMtf   = 5.0 * z.htfConf
@@ -1367,7 +1481,7 @@ f_grade(float s) =>
     s >= gradeAp ? "A+" : s >= gradeA ? "A" : "B"
 
 f_tags(Zone z) =>
-    (z.fvg ? " FVG" : "") + (z.choch ? " CHoCH" : z.bos ? " BOS" : "") + (z.sweep ? " LIQ" : "") + (z.momOut ? " MOM" : "") + (not z.baseTight ? " OB" : "") + (z.isOrigin ? " ORG" : "") + (z.isBreaker ? " BRK" : "")
+    (z.fvg ? " FVG" : "") + (z.choch ? " CHoCH" : z.bos ? " BOS" : "") + (z.sweep == 2 ? " POOL" : z.sweep == 1 ? " LIQ" : "") + (z.hasDisp ? " DISP" : "") + (z.momOut ? " MOM" : "") + (z.kind == 1 ? " OB" : z.kind == 2 ? " MIT" : z.kind == 3 ? " REJ" : "") + (z.isOrigin ? " ORG" : "") + (z.isBreaker ? " BRK" : "")
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ ALTA DE BLOQUES
@@ -1376,7 +1490,7 @@ f_tags(Zone z) =>
 // guid en una `var` propia de cada llamada. Devuelve el resultado para el embudo del panel:
 //   0 sin evento · 1 rechazado por huella · 2 descartado por duplicado · 3 registrado
 
-f_addZone(bool use, bool ev, bool isDem, float top, float bot, int t0, float disp, float ratio, float rvol, float bvol, bool fvg, int bosKind, int zt, bool sweep, int baseN, int legN, bool momOut, bool tight, bool orig, int tfIdx, string tfStr) =>
+f_addZone(bool use, bool ev, bool isDem, float top, float bot, int t0, float disp, float ratio, float rvol, float bvol, bool fvg, int bosKind, int zt, int sweep, int baseN, int legN, bool momOut, bool tight, bool orig, bool hasDisp, int kind, int tfIdx, string tfStr) =>
     var int lastGuid = na
     int res = 0
     // [v4.8] `bosKind` llega codificado desde f_detect: 0 sin rotura · 1 continuación · 2 CHoCH.
@@ -1389,10 +1503,10 @@ f_addZone(bool use, bool ev, bool isDem, float top, float bot, int t0, float dis
         int guid = t0 * 8 + tfIdx * 2 + (isDem ? 0 : 1)
         if na(lastGuid) or guid != lastGuid
             lastGuid := guid
-            bool fpOK = footprint == "Ninguna" ? true : footprint == "FVG o BOS" ? (fvg or bos) : (fvg and bos)
+            bool fpOK = footprint == "Ninguna" ? true : footprint == "FVG o BOS" ? (fvg or bos) : footprint == "FVG y BOS" ? (fvg and bos) : hasDisp
             res := 1
             if fpOK
-                Zone z = Zone.new(top = top, bot = bot, isDem = isDem, t0 = t0, guid = guid, tfSec = f_tfSec(tfStr), tfLbl = f_tfLabel(tfStr), disp = disp, ratio = ratio, rvol = rvol, bvol = bvol, fvg = fvg, bos = bos, choch = choch, ztype = zt, sweep = sweep, baseN = baseN, legN = legN, momOut = momOut, baseTight = tight, isOrigin = orig, pd = f_pdPos((top + bot) / 2), tfIdx = tfIdx, bar0 = bar_index)
+                Zone z = Zone.new(top = top, bot = bot, isDem = isDem, t0 = t0, guid = guid, tfSec = f_tfSec(tfStr), tfLbl = f_tfLabel(tfStr), disp = disp, ratio = ratio, rvol = rvol, bvol = bvol, fvg = fvg, bos = bos, choch = choch, ztype = zt, sweep = sweep, hasDisp = hasDisp, kind = kind, baseN = baseN, legN = legN, momOut = momOut, baseTight = tight, isOrigin = orig, pd = f_pdPos((top + bot) / 2), tfIdx = tfIdx, bar0 = bar_index)
                 // Si nace con el precio dentro no cuenta como toque: tiene que salir y volver.
                 z.wasInside := high >= bot and low <= top
                 // El bloque todavía no está en el array, así que su confluencia se calcula aquí; los demás
@@ -1448,9 +1562,9 @@ if barstate.isconfirmed and zones.size() > 0
         if old.evalOn and not old.resolved
             zUnres += 1
 
-int r1 = f_addZone(tf1Use, e1n, e1d, e1t, e1b, e1t0, e1ds, e1r, e1v, e1bv, e1f, e1bo, e1y, e1s, e1bn, e1ln, e1m, e1tg, e1og, 0, tf1)
-int r2 = f_addZone(tf2Use, e2n, e2d, e2t, e2b, e2t0, e2ds, e2r, e2v, e2bv, e2f, e2bo, e2y, e2s, e2bn, e2ln, e2m, e2tg, e2og, 1, tf2)
-int r3 = f_addZone(tf3Use, e3n, e3d, e3t, e3b, e3t0, e3ds, e3r, e3v, e3bv, e3f, e3bo, e3y, e3s, e3bn, e3ln, e3m, e3tg, e3og, 2, tf3)
+int r1 = f_addZone(tf1Use, e1n, e1d, e1t, e1b, e1t0, e1ds, e1r, e1v, e1bv, e1f, e1bo, e1y, e1s, e1bn, e1ln, e1m, e1tg, e1og, e1dp, e1kd, 0, tf1)
+int r2 = f_addZone(tf2Use, e2n, e2d, e2t, e2b, e2t0, e2ds, e2r, e2v, e2bv, e2f, e2bo, e2y, e2s, e2bn, e2ln, e2m, e2tg, e2og, e2dp, e2kd, 1, tf2)
+int r3 = f_addZone(tf3Use, e3n, e3d, e3t, e3b, e3t0, e3ds, e3r, e3v, e3bv, e3f, e3bo, e3y, e3s, e3bn, e3ln, e3m, e3tg, e3og, e3dp, e3kd, 2, tf3)
 
 // Embudo de formación: dónde se pierden los candidatos.
 var int fnDet = 0   // eventos de bloque detectados por los marcos
@@ -1500,18 +1614,18 @@ var float evXSum    = 0.0 // suma de SUS resultados reales en R (puede ser negat
 // [v3.9] Tres cortes nuevos de CONTEXTO —sesión, sesgo del marco superior y descuento/premium— porque
 // son las variables que quedaron fuera en v3.0 y nunca se volvieron a medir. No tocan el score: entran
 // aquí, que es donde se decide con datos si aportan algo.
-var array<int>   bN = array.new<int>(28, 0)    // operaciones del corte
-var array<int>   b1 = array.new<int>(28, 0)    // ... que llegaron al objetivo
-var array<int>   b2 = array.new<int>(28, 0)    // ... que llegaron al doble
-var array<float> bS = array.new<float>(28, 0.0) // suma de MFE
-var array<int>   bT = array.new<int>(28, 0)    // [v3.4] ... cerradas por ventana agotada
-var array<float> bC = array.new<float>(28, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
-var array<int>   bM = array.new<int>(28, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
-var array<float> bX = array.new<float>(28, 0.0) // [v4.6] suma de SUS resultados reales en R
+var array<int>   bN = array.new<int>(32, 0)    // operaciones del corte
+var array<int>   b1 = array.new<int>(32, 0)    // ... que llegaron al objetivo
+var array<int>   b2 = array.new<int>(32, 0)    // ... que llegaron al doble
+var array<float> bS = array.new<float>(32, 0.0) // suma de MFE
+var array<int>   bT = array.new<int>(32, 0)    // [v3.4] ... cerradas por ventana agotada
+var array<float> bC = array.new<float>(32, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
+var array<int>   bM = array.new<int>(32, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
+var array<float> bX = array.new<float>(32, 0.0) // [v4.6] suma de SUS resultados reales en R
 // [v5.3] Suma de CUADRADOS del resultado neto en R de cada operación. Es lo único que faltaba para poder
 // calcular la varianza del corte y, con ella, el error típico de la esperanza: sin eso la tabla enseñaba
 // un punto sin margen y no había forma de distinguir una ventaja real de la suerte de una muestra corta.
-var array<float> bR2 = array.new<float>(28, 0.0)
+var array<float> bR2 = array.new<float>(32, 0.0)
 var float        evR2Sum = 0.0
 var float        evCSum = 0.0
 
@@ -1730,10 +1844,11 @@ if barstate.isconfirmed and zones.size() > 0
                     evXSum += xr
                 bool early = z.evalBar < splitBar
                 bool pdFav = na(z.pd) ? false : (z.isDem ? z.pd <= 0.5 : z.pd >= 0.5)
-                for k = 0 to 27
+                for k = 0 to 31
                     // [v4.8] CHoCH en k==5. [v5.6] "base tranquila" en k==9. [v5.0] "al tocar" en k==14.
                     // [v5.1] OTE en k==15. [v4.9] Institucionales en k==18..21.
-                    bool has = k == 0 ? z.scoreAt >= gradeAp : k == 1 ? (z.scoreAt >= gradeA and z.scoreAt < gradeAp) : k == 2 ? z.scoreAt < gradeA : k == 3 ? z.fvg : k == 4 ? z.bos : k == 5 ? z.choch : k == 6 ? z.sweep : k == 7 ? z.htfAt : k == 8 ? (z.baseTight and z.baseN <= 1) : k == 9 ? (not na(z.bvol) and z.bvol <= baseVolMax) : k == 10 ? z.isOrigin : k == 11 ? z.momOut : k == 12 ? z.rthAt : k == 13 ? z.biasAt == 1 : k == 14 ? pdFav : k == 15 ? z.pdAtFav : k == 16 ? z.oteAt : k == 17 ? z.rrAt : k == 18 ? z.softAt : k == 19 ? z.vwapAt : k == 20 ? z.sigmaAt : k == 21 ? z.kzAt : k == 22 ? z.liqAt : k == 23 ? z.tfIdx == 0 : k == 24 ? z.tfIdx == 1 : k == 25 ? z.tfIdx == 2 : k == 26 ? early : not early
+                    // [v6.0] DISP en k==6, LIQ pasa a "sweep > 0" en k==7 y POOL entra en k==8.
+                    bool has = k == 0 ? z.scoreAt >= gradeAp : k == 1 ? (z.scoreAt >= gradeA and z.scoreAt < gradeAp) : k == 2 ? z.scoreAt < gradeA : k == 3 ? z.fvg : k == 4 ? z.bos : k == 5 ? z.choch : k == 6 ? z.hasDisp : k == 7 ? z.sweep > 0 : k == 8 ? z.sweep == 2 : k == 9 ? z.htfAt : k == 10 ? (z.baseTight and z.baseN <= 1) : k == 11 ? (not na(z.bvol) and z.bvol <= baseVolMax) : k == 12 ? z.isOrigin : k == 13 ? z.kind == 2 : k == 14 ? z.kind == 3 : k == 15 ? z.momOut : k == 16 ? z.rthAt : k == 17 ? z.biasAt == 1 : k == 18 ? pdFav : k == 19 ? z.pdAtFav : k == 20 ? z.oteAt : k == 21 ? z.rrAt : k == 22 ? z.softAt : k == 23 ? z.vwapAt : k == 24 ? z.sigmaAt : k == 25 ? z.kzAt : k == 26 ? z.liqAt : k == 27 ? z.tfIdx == 0 : k == 28 ? z.tfIdx == 1 : k == 29 ? z.tfIdx == 2 : k == 30 ? early : not early
                     if has
                         bN.set(k, bN.get(k) + 1)
                         bS.set(k, bS.get(k) + m)
@@ -1756,7 +1871,7 @@ if barstate.isconfirmed and zones.size() > 0
                 brkSeq += 1
                 // [v3.9] Faltaba tfIdx: los breakers nacían con marco `na` y se caían de los tres cortes
                 // por marco de la tabla — se medían en el total pero en ninguna de sus filas.
-                Zone b = Zone.new(top = z.top, bot = z.bot, isDem = not z.isDem, t0 = time, guid = -brkSeq, tfSec = z.tfSec, tfLbl = z.tfLbl, disp = math.abs(close - open) / math.max(atrC, syminfo.mintick), ratio = legRatioMin, rvol = na, bvol = na, fvg = false, bos = true, choch = true, ztype = 1, sweep = false, baseN = 1, legN = 1, momOut = false, baseTight = true, isOrigin = false, pd = f_pdPos((z.top + z.bot) / 2), tfIdx = z.tfIdx, bar0 = bar_index)
+                Zone b = Zone.new(top = z.top, bot = z.bot, isDem = not z.isDem, t0 = time, guid = -brkSeq, tfSec = z.tfSec, tfLbl = z.tfLbl, disp = math.abs(close - open) / math.max(atrC, syminfo.mintick), ratio = legRatioMin, rvol = na, bvol = na, fvg = false, bos = true, choch = true, ztype = 1, sweep = 0, hasDisp = false, kind = 4, baseN = 1, legN = 1, momOut = false, baseTight = true, isOrigin = false, pd = f_pdPos((z.top + z.bot) / 2), tfIdx = z.tfIdx, bar0 = bar_index)
                 b.isBreaker := true
                 b.wasInside := true
                 newBrk.push(b)
@@ -1885,6 +2000,30 @@ if barstate.isfirst
     for i = 1 to 2
         oteBox.push(box.new(na, na, na, na, xloc = xloc.bar_time, text_size = size.tiny, text_halign = text.align_left, text_valign = text.align_top))
 
+// [v6.0] FVG: una ranura por hueco en memoria. Abiertos en un color, invertidos en otro — que es el
+// punto: un FVG invertido ya no es el mismo nivel, actúa del lado contrario.
+var array<box> fvgBx = array.new<box>()
+if barstate.isfirst
+    for i = 1 to 40
+        fvgBx.push(box.new(na, na, na, na, xloc = xloc.bar_time, border_width = 0))
+
+f_fvgDraw() =>
+    int n = 0
+    if fvgOn and fvgShow and fvgs.size() > 0
+        for f in fvgs
+            if n < fvgBx.size()
+                box b = fvgBx.get(n)
+                color c = f.inverted ? fvgInvCol : fvgCol
+                box.set_lefttop(b, f.t0, f.top)
+                box.set_rightbottom(b, time + chartSec * 1000 * extendBars, f.bot)
+                box.set_bgcolor(b, color.new(c, f.inverted ? 80 : 88))
+                box.set_border_color(b, color.new(c, 55))
+                n += 1
+    if n < fvgBx.size()
+        for j = n to fvgBx.size() - 1
+            box.set_lefttop(fvgBx.get(j), na, na)
+            box.set_rightbottom(fvgBx.get(j), na, na)
+
 // [v5.1] Franja OTE: caja extendida a la derecha, con su etiqueta en el borde superior.
 f_oteBox(int slot, bool show, float top, float bot, string txt, color c) =>
     box b = oteBox.get(slot)
@@ -1917,6 +2056,7 @@ f_lvlLine(int slot, bool show, float px, string txt, color c) =>
         label.set_xy(b, na, na)
 
 if barstate.islast
+    f_fvgDraw()
     bool lqShow = liqOn and liqShow
     f_lvlLine(0, lqShow, pdH, "PDH", liqDCol)
     f_lvlLine(1, lqShow, pdL, "PDL", liqDCol)
@@ -2000,7 +2140,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v5.7", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v6.0", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
@@ -2026,7 +2166,15 @@ f_dash() =>
     string sVw = not vwapOK ? "s/d" : close >= vwapV ? "▲ sobre VWAP" : "▼ bajo VWAP"
     string sKz = not (timeframe.isintraday and kzOn) ? "—" : kzIn ? "KZ ✓" : "fuera de KZ"
     string sLq = not liqOn ? "—" : f_onLiq(close) ? "⚠ sobre liquidez D/W" : "sin liquidez cerca"
-    f_row(tb, 5, "Institucional", sVw + "  ·  " + sKz + "  ·  " + sLq, not vwapOK ? color.gray : kzIn ? #00E676 : color.white)
+    int fvgOpen = 0
+    int fvgInv  = 0
+    if fvgOn and fvgs.size() > 0
+        for f in fvgs
+            if f.inverted
+                fvgInv += 1
+            else
+                fvgOpen += 1
+    f_row(tb, 5, "Institucional", sVw + "  ·  " + sKz + "  ·  " + sLq + (fvgOn ? "  ·  FVG " + str.tostring(fvgOpen) + "/" + str.tostring(fvgInv) + " inv" : ""), not vwapOK ? color.gray : kzIn ? #00E676 : color.white)
 
     // [v3.8] El embudo de formación es diagnóstico, no operativa: fuera del panel salvo que lo pidas.
     if showFunnel
@@ -2122,8 +2270,8 @@ f_evalTable() =>
     bool   full = evalMode == "Completo"
     string sT1  = str.tostring(reactTarget, "#.#") + "R"
     string sT2  = str.tostring(reactTarget * 2, "#.#") + "R"
-    var table ev = table.new(position.bottom_right, 10, 32, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "  · de ellos CHoCH", "con LIQ", "con MTF", "base 1 vela", "base tranquila ≤" + str.tostring(baseVolMax, "#.#") + "x", "origen del movimiento", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento (al nacer)", "  · y al tocar", "  · y en OTE " + str.tostring(math.min(oteLo, oteHi) * 100, "#") + "-" + str.tostring(math.max(oteLo, oteHi) * 100, "#") + "%", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "a favor del VWAP", "en banda " + str.tostring(vwapSigma, "#.#") + "σ", "en kill zone", "sobre liquidez D/W", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
+    var table ev = table.new(position.bottom_right, 10, 36, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
+    array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "  · de ellos CHoCH", "con DISPLACEMENT", "con LIQ", "  · de ellos POOL", "con MTF", "base 1 vela", "base tranquila ≤" + str.tostring(baseVolMax, "#.#") + "x", "origen del movimiento", "Mitigation Block", "Rejection Block", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento (al nacer)", "  · y al tocar", "  · y en OTE " + str.tostring(math.min(oteLo, oteHi) * 100, "#") + "-" + str.tostring(math.max(oteLo, oteHi) * 100, "#") + "%", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "a favor del VWAP", "en banda " + str.tostring(vwapSigma, "#.#") + "σ", "en kill zone", "sobre liquidez D/W", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
 
     if full
         table.cell(ev, 0, 0, "Operación simulada", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
@@ -2137,15 +2285,15 @@ f_evalTable() =>
         table.cell(ev, 8, 0, "Esp.",   text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 9, 0, "IC 95%", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         f_evRow(ev, 1, "TODOS", evN, evHeld, evHeld2, evRSum, evTimeout, evCSum, evMkt, evXSum, evR2Sum, evN, true)
-        for k = 0 to 27
+        for k = 0 to 31
             f_evRow(ev, k + 2, bNames.get(k), bN.get(k), b1.get(k), b2.get(k), bS.get(k), bT.get(k), bC.get(k), bM.get(k), bX.get(k), bR2.get(k), evN, false)
-        table.cell(ev, 0, 30, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
+        table.cell(ev, 0, 34, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 8
-            table.cell(ev, c, 30, "", text_size = size.tiny)
-        table.cell(ev, 9, 30, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(ev, 0, 31, "VERDE = el IC excluye el cero · AMARILLO = la muestra no decide · M/R = R media de las salidas a mercado (reloj o invalidación, nunca stop) · 28 cortes: exígelo en las dos MITADES y en los dos activos", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+            table.cell(ev, c, 34, "", text_size = size.tiny)
+        table.cell(ev, 9, 34, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 0, 35, "VERDE = el IC excluye el cero · AMARILLO = la muestra no decide · M/R = R media de las salidas a mercado (reloj o invalidación, nunca stop) · 32 cortes: exígelo en las dos MITADES y en los dos activos", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 9
-            table.cell(ev, c, 31, "", text_size = size.tiny)
+            table.cell(ev, c, 35, "", text_size = size.tiny)
     else
         table.cell(ev, 0, 0, "Verificación", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
         table.cell(ev, 1, 0, "N",       text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
@@ -2153,8 +2301,8 @@ f_evalTable() =>
         table.cell(ev, 3, 0, "Esp.",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 4, 0, "IC 95%",  text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         f_evMini(ev, 1, "TODOS",      evN,        evHeld2,    evCSum,     evMkt,      evXSum,     evR2Sum,     true)
-        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(26), b2.get(26), bC.get(26), bM.get(26), bX.get(26), bR2.get(26), false)
-        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(27), b2.get(27), bC.get(27), bM.get(27), bX.get(27), bR2.get(27), false)
+        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(30), b2.get(30), bC.get(30), bM.get(30), bX.get(30), bR2.get(30), false)
+        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(31), b2.get(31), bC.get(31), bM.get(31), bX.get(31), bR2.get(31), false)
         table.cell(ev, 0, 4, "verde solo si el IC excluye el cero · las mitades deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 4
             table.cell(ev, c, 4, "", text_size = size.tiny)
