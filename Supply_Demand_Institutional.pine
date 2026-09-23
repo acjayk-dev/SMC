@@ -1,8 +1,23 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v5.6
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v5.7
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v5.7 — ORIGEN DEL MOVIMIENTO O PAUSA DENTRO DE ÉL: EL MOTOR NO SABÍA CUÁL DIBUJABA
+//   El barrido del impulso se detiene en la primera vela pequeña u opuesta. Si un desplazamiento de seis
+//   velas trae una pausa en medio, esa pausa pasa a ser "la base" y el bloque se dibuja AHÍ — no en el
+//   origen del movimiento. Las dos cosas son niveles legítimos en SMC (la pausa es un bloque intermedio
+//   o de mitigación), pero Seiden solo querría el origen, y el indicador producía los dos sin etiquetar
+//   cuál era cuál.
+//   Ahora mira las velas justo ANTES de la base con el MISMO criterio que define el impulso —cuerpo real
+//   y mismo color—: si hay `originBars` consecutivas, el movimiento ya venía en marcha y esto es una
+//   pausa. Los bloques de origen se etiquetan ORG en la caja y tienen su corte en la tabla.
+//   `ztype` NO cubría esto, aunque lo pareciera: mide el recorrido NETO de un tramo fijo de cinco velas
+//   con umbral de 0.5×ATR, que es otra pregunta — una consolidación honesta de varias velas tras un
+//   rally y una pausa de una sola vela dentro de un impulso ininterrumpido le salen iguales.
+//   NO FILTRA. Se miden los dos y que los datos digan si el origen vale más; si lo dice, entonces se
+//   filtra. Con esto la tabla llega a 28 cortes: lee el pie antes de creerte ninguno.
 //
 // v5.6 — LA BASE TENÍA QUE DEMOSTRAR QUE ERA UNA BASE, Y NO SE LE EXIGÍA
 //   La geometría del bloque era fiel a Seiden —proximal en el cuerpo, distal en la mecha, el precio
@@ -576,7 +591,7 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v5.6", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v5.7", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -604,6 +619,7 @@ type Zone
     int    legN                 // velas reales del impulso
     bool   momOut               // el impulso contiene una vela Elephant o Shaved
     bool   baseTight            // base de compresión; false = vela opuesta grande (Order Block)
+    bool   isOrigin             // [v5.7] la base originó el movimiento · false = pausa dentro de él
     float  pd                   // posición del bloque en el rango del marco de curva (0 bajo · 1 alto)
     int    tfIdx                // [v3.3] marco que lo generó (0·1·2), para desglosar las estadísticas
     int    bar0                 // [v4.6] vela del GRÁFICO en la que se registró: la edad se cuenta en
@@ -673,6 +689,7 @@ momBodyAtr     = input.float(1.5, "Momentum: cuerpo de vela institucional (×ATR
 swingLen       = input.int(5, "Estructura: velas a cada lado del pivote", minval=2, maxval=20, group=gZn)
 sweepMode      = input.string("Pivote (estructura)", "Liquidez: cómo se mide el barrido", options=["Pivote (estructura)", "Extremo previo (legado)"], group=gZn, tooltip="Pivote: la base tiene que perforar el último PIVOTE confirmado, que es donde se acumulan los stops. Extremo previo: cualquier mínimo/máximo de las N velas anteriores, incluidos los de mitad de un impulso, donde no hay stops que barrer.")
 sweepLookback  = input.int(10, "Liquidez: ventana (velas)", minval=2, maxval=50, group=gZn, tooltip="Modo legado: velas previas revisadas. Modo pivote: el pivote no puede ser más antiguo que el doble de este valor.")
+originBars     = input.int(2, "Origen: velas de impulso previas que lo descartan", minval=1, maxval=5, group=gZn, tooltip="[v5.7] El barrido del impulso se detiene en la primera vela pequeña u opuesta, así que si un desplazamiento de seis velas trae una pausa en medio, esa pausa pasa a ser 'la base' y el bloque se dibuja ahí — no en el origen del movimiento.\n\nLas dos cosas son niveles legítimos en SMC (la pausa es un bloque intermedio o de mitigación), pero Seiden solo querría el ORIGEN, y hasta v5.6 el indicador no distinguía cuál era cuál.\n\nAhora mira las velas justo ANTES de la base con el mismo criterio que define el impulso —cuerpo real y mismo color—. Si hay N consecutivas, el movimiento ya estaba en marcha y esto es una pausa, no un origen. Los bloques de origen se etiquetan ORG y tienen su corte en la tabla.\n\nNO filtra: se miden los dos y que los datos digan si el origen vale más. `ztype` no cubría esto — mide el recorrido NETO de un tramo fijo de velas, que es otra pregunta.")
 legInBars      = input.int(5, "Tramo de llegada a la base (velas)", minval=2, maxval=20, group=gZn, tooltip="Velas anteriores a la base con las que se clasifica el bloque: llegó cayendo (DBR, reversión) o subiendo (RBR, continuación).")
 minBarsBetween = input.int(3, "Velas mínimas entre bloques del mismo tipo", minval=1, maxval=50, group=gZn)
 baseVolMax     = input.float(1.0, "Base: volumen relativo para contarla tranquila", minval=0.2, maxval=3.0, step=0.1, group=gZn, tooltip="[v5.6] La premisa de Seiden es que la base es donde una orden institucional quedó SIN EJECUTAR, y la huella de eso es actividad BAJA en la base seguida de alta en la salida. Hasta v5.5 el indicador medía el volumen del IMPULSO (rvol) y daba por supuesta la primera mitad: nunca preguntaba si la base había estado tranquila.\n\nUna base con volumen ALTO dice lo contrario — la orden se absorbió ahí y al volver el precio no queda nada que la defienda. Son dos sucesos opuestos y contaban igual.\n\n1.0 = volumen de la base igual a la media de 20. NO filtra ni puntúa: entra como corte 'base tranquila' en la tabla de verificación, que es donde se decide si algo aporta. Si separa de verdad, entonces dale peso.")
@@ -887,6 +904,7 @@ f_detect() =>
     int   evLegN  = 0
     bool  evMom   = false
     bool  evTight = true
+    bool  evOrig  = true   // [v5.7] la base es el ORIGEN del movimiento, no una pausa dentro de él
 
     if not na(a) and a > 0
         // ── ¿Hay impulso? Las primeras `legBars` velas cerradas, mismo color y cuerpo real ──────
@@ -1041,6 +1059,20 @@ f_detect() =>
                             for k = bFar + 2 to bFar + sweepLookback
                                 prior := isDem ? math.min(prior, low[k]) : math.max(prior, high[k])
                             sweep := isDem ? swpLo < prior : swpHi > prior
+                        // [v5.7] ¿ORIGEN O PAUSA? Las velas justo ANTES de la base, con el mismo criterio
+                        // que define el impulso: cuerpo real y mismo color. Si hay `originBars`
+                        // consecutivas, el movimiento ya venía en marcha y esta base es una pausa dentro
+                        // de él, no su origen. Es una pregunta distinta de la que responde `ztype`, que
+                        // mide el recorrido NETO de un tramo fijo de velas.
+                        int contN = 0
+                        for k = bFar + 1 to bFar + originBars
+                            bool cBig  = math.abs(close[k] - open[k]) >= a * legBodyAtr
+                            bool cSame = isDem ? close[k] > open[k] : close[k] < open[k]
+                            if cBig and cSame
+                                contN += 1
+                            else
+                                break
+                        bool isOrig = contN < originBars
                         // Tipo por el tramo de llegada a la base: reversión o continuación
                         float legIn = close[bFar + 1] - open[bFar + legInBars]
                         int   zt    = legIn <= -a * 0.5 ? (isDem ? 1 : -1) : legIn >= a * 0.5 ? (isDem ? -1 : 1) : 0
@@ -1064,6 +1096,7 @@ f_detect() =>
                         // ¿La base es compresión o la última vela OPUESTA grande? La segunda es un Order
                         // Block válido, pero no prueba que el precio apenas se parara ahí.
                         evTight := math.abs(close[bNear] - open[bNear]) <= a * baseBodyAtr and (high[bNear] - low[bNear]) <= a * baseRngAtr
+                        evOrig  := isOrig
                         if isDem
                             lastDemBar := bar_index
                         else
@@ -1095,11 +1128,11 @@ f_detect() =>
         swLo    := pl
         swLoBar := bar_index - swingLen
         swLoBrk := na
-    [evNew, evDem, evTop, evBot, evT0, evDisp, evRatio, evRvol, evBvol, evFvg, evBos, evType, evSweep, evBaseN, evLegN, evMom, evTight]
+    [evNew, evDem, evTop, evBot, evT0, evDisp, evRatio, evRvol, evBvol, evFvg, evBos, evType, evSweep, evBaseN, evLegN, evMom, evTight, evOrig]
 
-[e1n, e1d, e1t, e1b, e1t0, e1ds, e1r, e1v, e1bv, e1f, e1bo, e1y, e1s, e1bn, e1ln, e1m, e1tg] = request.security(syminfo.tickerid, tf1, f_detect(), lookahead = barmerge.lookahead_on)
-[e2n, e2d, e2t, e2b, e2t0, e2ds, e2r, e2v, e2bv, e2f, e2bo, e2y, e2s, e2bn, e2ln, e2m, e2tg] = request.security(syminfo.tickerid, tf2, f_detect(), lookahead = barmerge.lookahead_on)
-[e3n, e3d, e3t, e3b, e3t0, e3ds, e3r, e3v, e3bv, e3f, e3bo, e3y, e3s, e3bn, e3ln, e3m, e3tg] = request.security(syminfo.tickerid, tf3, f_detect(), lookahead = barmerge.lookahead_on)
+[e1n, e1d, e1t, e1b, e1t0, e1ds, e1r, e1v, e1bv, e1f, e1bo, e1y, e1s, e1bn, e1ln, e1m, e1tg, e1og] = request.security(syminfo.tickerid, tf1, f_detect(), lookahead = barmerge.lookahead_on)
+[e2n, e2d, e2t, e2b, e2t0, e2ds, e2r, e2v, e2bv, e2f, e2bo, e2y, e2s, e2bn, e2ln, e2m, e2tg, e2og] = request.security(syminfo.tickerid, tf2, f_detect(), lookahead = barmerge.lookahead_on)
+[e3n, e3d, e3t, e3b, e3t0, e3ds, e3r, e3v, e3bv, e3f, e3bo, e3y, e3s, e3bn, e3ln, e3m, e3tg, e3og] = request.security(syminfo.tickerid, tf3, f_detect(), lookahead = barmerge.lookahead_on)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ RANGO OPERATIVO (premium / discount) · velas cerradas del marco superior
@@ -1334,7 +1367,7 @@ f_grade(float s) =>
     s >= gradeAp ? "A+" : s >= gradeA ? "A" : "B"
 
 f_tags(Zone z) =>
-    (z.fvg ? " FVG" : "") + (z.choch ? " CHoCH" : z.bos ? " BOS" : "") + (z.sweep ? " LIQ" : "") + (z.momOut ? " MOM" : "") + (not z.baseTight ? " OB" : "") + (z.isBreaker ? " BRK" : "")
+    (z.fvg ? " FVG" : "") + (z.choch ? " CHoCH" : z.bos ? " BOS" : "") + (z.sweep ? " LIQ" : "") + (z.momOut ? " MOM" : "") + (not z.baseTight ? " OB" : "") + (z.isOrigin ? " ORG" : "") + (z.isBreaker ? " BRK" : "")
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ ALTA DE BLOQUES
@@ -1343,7 +1376,7 @@ f_tags(Zone z) =>
 // guid en una `var` propia de cada llamada. Devuelve el resultado para el embudo del panel:
 //   0 sin evento · 1 rechazado por huella · 2 descartado por duplicado · 3 registrado
 
-f_addZone(bool use, bool ev, bool isDem, float top, float bot, int t0, float disp, float ratio, float rvol, float bvol, bool fvg, int bosKind, int zt, bool sweep, int baseN, int legN, bool momOut, bool tight, int tfIdx, string tfStr) =>
+f_addZone(bool use, bool ev, bool isDem, float top, float bot, int t0, float disp, float ratio, float rvol, float bvol, bool fvg, int bosKind, int zt, bool sweep, int baseN, int legN, bool momOut, bool tight, bool orig, int tfIdx, string tfStr) =>
     var int lastGuid = na
     int res = 0
     // [v4.8] `bosKind` llega codificado desde f_detect: 0 sin rotura · 1 continuación · 2 CHoCH.
@@ -1359,7 +1392,7 @@ f_addZone(bool use, bool ev, bool isDem, float top, float bot, int t0, float dis
             bool fpOK = footprint == "Ninguna" ? true : footprint == "FVG o BOS" ? (fvg or bos) : (fvg and bos)
             res := 1
             if fpOK
-                Zone z = Zone.new(top = top, bot = bot, isDem = isDem, t0 = t0, guid = guid, tfSec = f_tfSec(tfStr), tfLbl = f_tfLabel(tfStr), disp = disp, ratio = ratio, rvol = rvol, bvol = bvol, fvg = fvg, bos = bos, choch = choch, ztype = zt, sweep = sweep, baseN = baseN, legN = legN, momOut = momOut, baseTight = tight, pd = f_pdPos((top + bot) / 2), tfIdx = tfIdx, bar0 = bar_index)
+                Zone z = Zone.new(top = top, bot = bot, isDem = isDem, t0 = t0, guid = guid, tfSec = f_tfSec(tfStr), tfLbl = f_tfLabel(tfStr), disp = disp, ratio = ratio, rvol = rvol, bvol = bvol, fvg = fvg, bos = bos, choch = choch, ztype = zt, sweep = sweep, baseN = baseN, legN = legN, momOut = momOut, baseTight = tight, isOrigin = orig, pd = f_pdPos((top + bot) / 2), tfIdx = tfIdx, bar0 = bar_index)
                 // Si nace con el precio dentro no cuenta como toque: tiene que salir y volver.
                 z.wasInside := high >= bot and low <= top
                 // El bloque todavía no está en el array, así que su confluencia se calcula aquí; los demás
@@ -1415,9 +1448,9 @@ if barstate.isconfirmed and zones.size() > 0
         if old.evalOn and not old.resolved
             zUnres += 1
 
-int r1 = f_addZone(tf1Use, e1n, e1d, e1t, e1b, e1t0, e1ds, e1r, e1v, e1bv, e1f, e1bo, e1y, e1s, e1bn, e1ln, e1m, e1tg, 0, tf1)
-int r2 = f_addZone(tf2Use, e2n, e2d, e2t, e2b, e2t0, e2ds, e2r, e2v, e2bv, e2f, e2bo, e2y, e2s, e2bn, e2ln, e2m, e2tg, 1, tf2)
-int r3 = f_addZone(tf3Use, e3n, e3d, e3t, e3b, e3t0, e3ds, e3r, e3v, e3bv, e3f, e3bo, e3y, e3s, e3bn, e3ln, e3m, e3tg, 2, tf3)
+int r1 = f_addZone(tf1Use, e1n, e1d, e1t, e1b, e1t0, e1ds, e1r, e1v, e1bv, e1f, e1bo, e1y, e1s, e1bn, e1ln, e1m, e1tg, e1og, 0, tf1)
+int r2 = f_addZone(tf2Use, e2n, e2d, e2t, e2b, e2t0, e2ds, e2r, e2v, e2bv, e2f, e2bo, e2y, e2s, e2bn, e2ln, e2m, e2tg, e2og, 1, tf2)
+int r3 = f_addZone(tf3Use, e3n, e3d, e3t, e3b, e3t0, e3ds, e3r, e3v, e3bv, e3f, e3bo, e3y, e3s, e3bn, e3ln, e3m, e3tg, e3og, 2, tf3)
 
 // Embudo de formación: dónde se pierden los candidatos.
 var int fnDet = 0   // eventos de bloque detectados por los marcos
@@ -1467,18 +1500,18 @@ var float evXSum    = 0.0 // suma de SUS resultados reales en R (puede ser negat
 // [v3.9] Tres cortes nuevos de CONTEXTO —sesión, sesgo del marco superior y descuento/premium— porque
 // son las variables que quedaron fuera en v3.0 y nunca se volvieron a medir. No tocan el score: entran
 // aquí, que es donde se decide con datos si aportan algo.
-var array<int>   bN = array.new<int>(27, 0)    // operaciones del corte
-var array<int>   b1 = array.new<int>(27, 0)    // ... que llegaron al objetivo
-var array<int>   b2 = array.new<int>(27, 0)    // ... que llegaron al doble
-var array<float> bS = array.new<float>(27, 0.0) // suma de MFE
-var array<int>   bT = array.new<int>(27, 0)    // [v3.4] ... cerradas por ventana agotada
-var array<float> bC = array.new<float>(27, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
-var array<int>   bM = array.new<int>(27, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
-var array<float> bX = array.new<float>(27, 0.0) // [v4.6] suma de SUS resultados reales en R
+var array<int>   bN = array.new<int>(28, 0)    // operaciones del corte
+var array<int>   b1 = array.new<int>(28, 0)    // ... que llegaron al objetivo
+var array<int>   b2 = array.new<int>(28, 0)    // ... que llegaron al doble
+var array<float> bS = array.new<float>(28, 0.0) // suma de MFE
+var array<int>   bT = array.new<int>(28, 0)    // [v3.4] ... cerradas por ventana agotada
+var array<float> bC = array.new<float>(28, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
+var array<int>   bM = array.new<int>(28, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
+var array<float> bX = array.new<float>(28, 0.0) // [v4.6] suma de SUS resultados reales en R
 // [v5.3] Suma de CUADRADOS del resultado neto en R de cada operación. Es lo único que faltaba para poder
 // calcular la varianza del corte y, con ella, el error típico de la esperanza: sin eso la tabla enseñaba
 // un punto sin margen y no había forma de distinguir una ventaja real de la suerte de una muestra corta.
-var array<float> bR2 = array.new<float>(27, 0.0)
+var array<float> bR2 = array.new<float>(28, 0.0)
 var float        evR2Sum = 0.0
 var float        evCSum = 0.0
 
@@ -1697,10 +1730,10 @@ if barstate.isconfirmed and zones.size() > 0
                     evXSum += xr
                 bool early = z.evalBar < splitBar
                 bool pdFav = na(z.pd) ? false : (z.isDem ? z.pd <= 0.5 : z.pd >= 0.5)
-                for k = 0 to 26
+                for k = 0 to 27
                     // [v4.8] CHoCH en k==5. [v5.6] "base tranquila" en k==9. [v5.0] "al tocar" en k==14.
                     // [v5.1] OTE en k==15. [v4.9] Institucionales en k==18..21.
-                    bool has = k == 0 ? z.scoreAt >= gradeAp : k == 1 ? (z.scoreAt >= gradeA and z.scoreAt < gradeAp) : k == 2 ? z.scoreAt < gradeA : k == 3 ? z.fvg : k == 4 ? z.bos : k == 5 ? z.choch : k == 6 ? z.sweep : k == 7 ? z.htfAt : k == 8 ? (z.baseTight and z.baseN <= 1) : k == 9 ? (not na(z.bvol) and z.bvol <= baseVolMax) : k == 10 ? z.momOut : k == 11 ? z.rthAt : k == 12 ? z.biasAt == 1 : k == 13 ? pdFav : k == 14 ? z.pdAtFav : k == 15 ? z.oteAt : k == 16 ? z.rrAt : k == 17 ? z.softAt : k == 18 ? z.vwapAt : k == 19 ? z.sigmaAt : k == 20 ? z.kzAt : k == 21 ? z.liqAt : k == 22 ? z.tfIdx == 0 : k == 23 ? z.tfIdx == 1 : k == 24 ? z.tfIdx == 2 : k == 25 ? early : not early
+                    bool has = k == 0 ? z.scoreAt >= gradeAp : k == 1 ? (z.scoreAt >= gradeA and z.scoreAt < gradeAp) : k == 2 ? z.scoreAt < gradeA : k == 3 ? z.fvg : k == 4 ? z.bos : k == 5 ? z.choch : k == 6 ? z.sweep : k == 7 ? z.htfAt : k == 8 ? (z.baseTight and z.baseN <= 1) : k == 9 ? (not na(z.bvol) and z.bvol <= baseVolMax) : k == 10 ? z.isOrigin : k == 11 ? z.momOut : k == 12 ? z.rthAt : k == 13 ? z.biasAt == 1 : k == 14 ? pdFav : k == 15 ? z.pdAtFav : k == 16 ? z.oteAt : k == 17 ? z.rrAt : k == 18 ? z.softAt : k == 19 ? z.vwapAt : k == 20 ? z.sigmaAt : k == 21 ? z.kzAt : k == 22 ? z.liqAt : k == 23 ? z.tfIdx == 0 : k == 24 ? z.tfIdx == 1 : k == 25 ? z.tfIdx == 2 : k == 26 ? early : not early
                     if has
                         bN.set(k, bN.get(k) + 1)
                         bS.set(k, bS.get(k) + m)
@@ -1723,7 +1756,7 @@ if barstate.isconfirmed and zones.size() > 0
                 brkSeq += 1
                 // [v3.9] Faltaba tfIdx: los breakers nacían con marco `na` y se caían de los tres cortes
                 // por marco de la tabla — se medían en el total pero en ninguna de sus filas.
-                Zone b = Zone.new(top = z.top, bot = z.bot, isDem = not z.isDem, t0 = time, guid = -brkSeq, tfSec = z.tfSec, tfLbl = z.tfLbl, disp = math.abs(close - open) / math.max(atrC, syminfo.mintick), ratio = legRatioMin, rvol = na, bvol = na, fvg = false, bos = true, choch = true, ztype = 1, sweep = false, baseN = 1, legN = 1, momOut = false, baseTight = true, pd = f_pdPos((z.top + z.bot) / 2), tfIdx = z.tfIdx, bar0 = bar_index)
+                Zone b = Zone.new(top = z.top, bot = z.bot, isDem = not z.isDem, t0 = time, guid = -brkSeq, tfSec = z.tfSec, tfLbl = z.tfLbl, disp = math.abs(close - open) / math.max(atrC, syminfo.mintick), ratio = legRatioMin, rvol = na, bvol = na, fvg = false, bos = true, choch = true, ztype = 1, sweep = false, baseN = 1, legN = 1, momOut = false, baseTight = true, isOrigin = false, pd = f_pdPos((z.top + z.bot) / 2), tfIdx = z.tfIdx, bar0 = bar_index)
                 b.isBreaker := true
                 b.wasInside := true
                 newBrk.push(b)
@@ -1967,7 +2000,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v5.6", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v5.7", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
@@ -2089,8 +2122,8 @@ f_evalTable() =>
     bool   full = evalMode == "Completo"
     string sT1  = str.tostring(reactTarget, "#.#") + "R"
     string sT2  = str.tostring(reactTarget * 2, "#.#") + "R"
-    var table ev = table.new(position.bottom_right, 10, 31, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "  · de ellos CHoCH", "con LIQ", "con MTF", "base 1 vela", "base tranquila ≤" + str.tostring(baseVolMax, "#.#") + "x", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento (al nacer)", "  · y al tocar", "  · y en OTE " + str.tostring(math.min(oteLo, oteHi) * 100, "#") + "-" + str.tostring(math.max(oteLo, oteHi) * 100, "#") + "%", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "a favor del VWAP", "en banda " + str.tostring(vwapSigma, "#.#") + "σ", "en kill zone", "sobre liquidez D/W", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
+    var table ev = table.new(position.bottom_right, 10, 32, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
+    array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "  · de ellos CHoCH", "con LIQ", "con MTF", "base 1 vela", "base tranquila ≤" + str.tostring(baseVolMax, "#.#") + "x", "origen del movimiento", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento (al nacer)", "  · y al tocar", "  · y en OTE " + str.tostring(math.min(oteLo, oteHi) * 100, "#") + "-" + str.tostring(math.max(oteLo, oteHi) * 100, "#") + "%", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "a favor del VWAP", "en banda " + str.tostring(vwapSigma, "#.#") + "σ", "en kill zone", "sobre liquidez D/W", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
 
     if full
         table.cell(ev, 0, 0, "Operación simulada", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
@@ -2104,15 +2137,15 @@ f_evalTable() =>
         table.cell(ev, 8, 0, "Esp.",   text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 9, 0, "IC 95%", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         f_evRow(ev, 1, "TODOS", evN, evHeld, evHeld2, evRSum, evTimeout, evCSum, evMkt, evXSum, evR2Sum, evN, true)
-        for k = 0 to 26
+        for k = 0 to 27
             f_evRow(ev, k + 2, bNames.get(k), bN.get(k), b1.get(k), b2.get(k), bS.get(k), bT.get(k), bC.get(k), bM.get(k), bX.get(k), bR2.get(k), evN, false)
-        table.cell(ev, 0, 29, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
+        table.cell(ev, 0, 30, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 8
-            table.cell(ev, c, 29, "", text_size = size.tiny)
-        table.cell(ev, 9, 29, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(ev, 0, 30, "VERDE = el IC excluye el cero · AMARILLO = la muestra no decide · M/R = R media de las salidas a mercado (reloj o invalidación, nunca stop) · 27 cortes: exígelo en las dos MITADES y en los dos activos", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
-        for c = 1 to 9
             table.cell(ev, c, 30, "", text_size = size.tiny)
+        table.cell(ev, 9, 30, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 0, 31, "VERDE = el IC excluye el cero · AMARILLO = la muestra no decide · M/R = R media de las salidas a mercado (reloj o invalidación, nunca stop) · 28 cortes: exígelo en las dos MITADES y en los dos activos", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+        for c = 1 to 9
+            table.cell(ev, c, 31, "", text_size = size.tiny)
     else
         table.cell(ev, 0, 0, "Verificación", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
         table.cell(ev, 1, 0, "N",       text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
@@ -2120,8 +2153,8 @@ f_evalTable() =>
         table.cell(ev, 3, 0, "Esp.",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 4, 0, "IC 95%",  text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         f_evMini(ev, 1, "TODOS",      evN,        evHeld2,    evCSum,     evMkt,      evXSum,     evR2Sum,     true)
-        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(25), b2.get(25), bC.get(25), bM.get(25), bX.get(25), bR2.get(25), false)
-        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(26), b2.get(26), bC.get(26), bM.get(26), bX.get(26), bR2.get(26), false)
+        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(26), b2.get(26), bC.get(26), bM.get(26), bX.get(26), bR2.get(26), false)
+        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(27), b2.get(27), bC.get(27), bM.get(27), bX.get(27), bR2.get(27), false)
         table.cell(ev, 0, 4, "verde solo si el IC excluye el cero · las mitades deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 4
             table.cell(ev, c, 4, "", text_size = size.tiny)
