@@ -1,8 +1,26 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v6.5
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v6.6
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v6.6 — TRES HIPÓTESIS DE FORMACIÓN, FIJADAS ANTES DE MIRAR EL RESULTADO
+//   La verificación en vivo (v6.5, MNQ y MES en 5m) dio −0.27R y −0.40R para todos los bloques, y
+//   ninguno de los 32 cortes se repitió en los dos activos. En vez de mover pesos del score a ojo, se
+//   añaden TRES hipótesis concretas, pocas a propósito para no fabricar ganadores por azar:
+//   · ENTRADA EN EL 50% (mean threshold de ICT). La misma operación con la orden límite en el punto
+//     medio del bloque y el mismo stop. Es otra operación, no un corte: tiene su propia fila con sus
+//     dos mitades. Si el precio no llega al 50% no hay operación.
+//   · R ≥ N TICKS (12 por defecto). En MES, sin costes la esperanza pasaba de −0.40 a −0.04: los
+//     bloques estrechos pierden ~0.36R por operación en comisión y deslizamiento. Este corte mide solo
+//     los anchos.
+//   · BASE 1 VELA + LLEGADA SUAVE + DESCUENTO/PREMIUM AL TOCAR, los tres a la vez. Eran los atributos
+//     menos malos por separado; el corte pregunta si juntos separan.
+//   La cuarta propuesta —"tiempo en la base corto"— NO se añade: ya existe. Es "base 1 vela", porque el
+//   tiempo en la zona de Seiden se mide en velas de la base.
+//   Criterio de aceptación, escrito ANTES de ver datos: una hipótesis cuenta solo si su IC excluye el
+//   cero por arriba o, como mínimo, si sale positiva en las DOS mitades y en los DOS activos. Nada de
+//   esto toca el score ni el dibujo.
 //
 // v6.5 — EL STOP CUESTA 1R, NO "T"
 //   La esperanza apuntaba un stop como −T, donde T es "Reacción que cuenta como 'aguantó'". Pero el
@@ -669,7 +687,7 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v6.5", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v6.6", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -733,6 +751,15 @@ type Zone
     bool   liqAt       = false  // el bloque se construyó sobre liquidez del día o la semana previos
     bool   pdAtFav     = false  // [v5.0] el PROXIMAL estaba en descuento/premium favorable AL TOCAR
     bool   oteAt       = false  // [v5.1] el proximal caía dentro de la franja OTE 62-79% al tocar
+    // [v6.6] La MISMA operación, pero con la orden límite en el 50% del bloque (mean threshold de ICT).
+    // Mismo stop, así que la R es más pequeña. Se arma en el mismo toque que la operación principal.
+    bool   mtArm       = false  // armada: esperando que el precio llegue al 50%
+    bool   mtFill      = false  // la orden se llenó
+    bool   mtDone      = false  // cerrada, o cancelada sin llenarse
+    int    mtStart     = na     // vela del toque que la armó
+    int    mtBar       = na     // vela del llenado
+    float  mtRisk      = na     // distancia 50% → stop
+    float  mtMfe       = 0.0    // recorrido máximo a favor, en SU R
 
 // [v6.0] FVG como OBJETO con ciclo de vida propio, no como un booleano del bloque. Hace falta para el
 // INVERSION FVG: un hueco que el precio atraviesa POR CIERRE no muere — cambia de polaridad y pasa a
@@ -873,6 +900,7 @@ reactWindow = input.int(20, "Ventana para reaccionar (velas DEL BLOQUE · 0 = si
 costTicks   = input.float(3.0, "Coste por operación ida y vuelta (ticks)", minval=0.0, step=0.5, group=gEv, tooltip="[v3.7] Comisión + deslizamiento, en ticks. Se descuenta de la columna Esp., que pasa a ser NETA. Importa muchísimo cuando la R es pequeña: un bloque de MES en 15m arriesga 2-3 puntos, así que 3 ticks son el 6-10% de la R en cada operación; en MNQ, con R de 20 puntos, apenas el 1%. Dos activos con la misma esperanza bruta pueden acabar en lados opuestos del cero.")
 oneAtATime  = input.bool(false, "Una operación a la vez", group=gEv, tooltip="[v3.5] Si hay 8 bloques vivos y el precio los cruza todos en el mismo movimiento, ganan o pierden JUNTOS: la muestra parece grande pero son el mismo suceso contado ocho veces, y eso hace que un puñado de sesiones decida el signo del resultado. Activado, solo se evalúa un bloque cada vez — como operarías de verdad. La muestra baja mucho, pero cada operación cuenta una decisión independiente. Si la ventaja desaparece al activarlo, nunca existió. [v4.6] El hueco se congela al empezar la vela: como mucho una apertura por vela, y quien cierra lo libera para la SIGUIENTE. Antes lo liberaba en la misma vela y entraba quien estuviera más adelante en el array, así que la muestra la elegía el orden de creación de los bloques.")
 showEval    = input.bool(true, "Tabla de verificación", group=gEv)
+cutMinTicks = input.int(12, "Corte 'R ≥ N ticks': mínimo", minval=1, maxval=400, group=gEv, tooltip="[v6.6] Mide solo los bloques cuya R —borde cercano → stop— tiene al menos estos ticks. En MES en 5m los bloques estrechos pierden ~0.36R por operación solo en costes: este corte dice si los anchos se comportan distinto. Es un CORTE: no filtra nada del dibujo ni del score.")
 evalMode    = input.string("Resumen", "Detalle de la tabla", options=["Resumen", "Completo"], group=gEv, tooltip="[v3.9] Resumen: el veredicto y las dos mitades, cuatro filas. Es lo único que necesitas mirar habitualmente — el resto es investigación y ocupaba media pantalla. Completo: los diecisiete cortes con todas las columnas.")
 evalMinN    = input.int(20, "Muestra mínima para dar color", minval=5, maxval=200, group=gEv, tooltip="Por debajo de este número de bloques resueltos la fila se muestra en gris.\n\n[v5.3] Ya NO es el criterio principal: el color lo decide ahora el INTERVALO DE CONFIANZA. Verde solo si el IC al 95% excluye el cero, amarillo si la muestra no permite decidir. Con σ≈1.3R por operación, un IC de ±0.20R exige n≈170 y uno de ±0.10R exige n≈650: con 20 operaciones el margen es de ±0.57R, así que una fila que marque +0.30 es indistinguible del azar. Esto es un suelo, no un aval.")
 
@@ -1694,18 +1722,28 @@ var float evXSum    = 0.0 // suma de SUS resultados reales en R (puede ser negat
 // [v3.9] Tres cortes nuevos de CONTEXTO —sesión, sesgo del marco superior y descuento/premium— porque
 // son las variables que quedaron fuera en v3.0 y nunca se volvieron a medir. No tocan el score: entran
 // aquí, que es donde se decide con datos si aportan algo.
-var array<int>   bN = array.new<int>(32, 0)    // operaciones del corte
-var array<int>   b1 = array.new<int>(32, 0)    // ... que llegaron al objetivo
-var array<int>   b2 = array.new<int>(32, 0)    // ... que llegaron al doble
-var array<float> bS = array.new<float>(32, 0.0) // suma de MFE
-var array<int>   bT = array.new<int>(32, 0)    // [v3.4] ... cerradas por ventana agotada
-var array<float> bC = array.new<float>(32, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
-var array<int>   bM = array.new<int>(32, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
-var array<float> bX = array.new<float>(32, 0.0) // [v4.6] suma de SUS resultados reales en R
+var array<int>   bN = array.new<int>(34, 0)    // operaciones del corte
+var array<int>   b1 = array.new<int>(34, 0)    // ... que llegaron al objetivo
+var array<int>   b2 = array.new<int>(34, 0)    // ... que llegaron al doble
+var array<float> bS = array.new<float>(34, 0.0) // suma de MFE
+var array<int>   bT = array.new<int>(34, 0)    // [v3.4] ... cerradas por ventana agotada
+var array<float> bC = array.new<float>(34, 0.0) // [v3.7] suma del coste en R (depende del tamaño de cada R)
+var array<int>   bM = array.new<int>(34, 0)     // [v4.6] ... liquidadas a mercado sin llegar al objetivo doble
+var array<float> bX = array.new<float>(34, 0.0) // [v4.6] suma de SUS resultados reales en R
 // [v5.3] Suma de CUADRADOS del resultado neto en R de cada operación. Es lo único que faltaba para poder
 // calcular la varianza del corte y, con ella, el error típico de la esperanza: sin eso la tabla enseñaba
 // un punto sin margen y no había forma de distinguir una ventaja real de la suerte de una muestra corta.
-var array<float> bR2 = array.new<float>(32, 0.0)
+var array<float> bR2 = array.new<float>(34, 0.0)
+// [v6.6] Operación con entrada en el 50% del bloque: 0 todas · 1 1ª mitad · 2 2ª mitad.
+var array<int>   mN  = array.new<int>(3, 0)
+var array<int>   m1  = array.new<int>(3, 0)
+var array<int>   m2  = array.new<int>(3, 0)
+var array<float> mS  = array.new<float>(3, 0.0)
+var array<int>   mT  = array.new<int>(3, 0)
+var array<float> mC  = array.new<float>(3, 0.0)
+var array<int>   mM  = array.new<int>(3, 0)
+var array<float> mX  = array.new<float>(3, 0.0)
+var array<float> mR2 = array.new<float>(3, 0.0)
 var float        evR2Sum = 0.0
 var float        evCSum = 0.0
 
@@ -1827,10 +1865,56 @@ if barstate.isconfirmed and zones.size() > 0
                     // [v5.1] OTE: no basta con estar en la mitad buena del rango —eso es media escala—,
                     // sino en la franja estrecha del retroceso donde ICT sitúa la entrada óptima.
                     z.oteAt    := f_inOte(prox0, z.isDem)
+                    z.mtArm    := true
+                    z.mtStart  := bar_index
 
             // Mitigación: hasta dónde ha penetrado el precio, medido con la mecha.
             if inside
                 z.deepest := math.max(z.deepest, z.isDem ? (z.top - low) / h : (high - z.bot) / h)
+
+            // [v6.6] OPERACIÓN EN EL 50% (mean threshold). Orden límite en el punto medio del bloque, con
+            // el MISMO stop que la principal: la R es más pequeña y el objetivo, en SU R, más cercano. Si
+            // el precio no llega al 50% antes de que el bloque se rompa o se agote la ventana, NO hay
+            // operación: no cuenta ni como ganada ni como perdida. Mismas reglas pesimistas: stop primero
+            // y por mecha, y la vela del llenado no suma recorrido a favor.
+            if z.mtArm and not z.mtDone
+                float mid  = (z.top + z.bot) / 2
+                int   mWin = reactWindow * f_blkBars(z)
+                if not z.mtFill
+                    if z.isDem ? low <= mid : high >= mid
+                        z.mtFill := true
+                        z.mtBar  := bar_index
+                        z.mtRisk := math.max(z.isDem ? mid - z.stopPx : z.stopPx - mid, syminfo.mintick)
+                    else if brk or (reactWindow > 0 and bar_index - z.mtStart >= mWin)
+                        z.mtDone := true
+                if z.mtFill and not z.mtDone
+                    bool mSh  = z.isDem ? low <= z.stopPx : high >= z.stopPx
+                    if not mSh and bar_index > z.mtBar
+                        z.mtMfe := math.max(z.mtMfe, (z.isDem ? high - mid : mid - low) / z.mtRisk)
+                    bool mOut = reactWindow > 0 and bar_index - z.mtBar >= mWin
+                    if mSh or brk or mOut
+                        z.mtDone := true
+                        float mx   = mSh ? -1.0 : (z.isDem ? close - mid : mid - close) / z.mtRisk
+                        float mt2  = reactTarget * 2
+                        float mcr  = costTicks * syminfo.mintick / z.mtRisk
+                        bool  mMkt = z.mtMfe < mt2 and mx > -1.0
+                        float mNet = (z.mtMfe >= mt2 ? mt2 : mMkt ? mx : -1.0) - mcr
+                        int   mh   = z.mtStart < splitBar ? 1 : 2
+                        for i = 0 to 2
+                            if i == 0 or i == mh
+                                mN.set(i, mN.get(i) + 1)
+                                mS.set(i, mS.get(i) + z.mtMfe)
+                                mC.set(i, mC.get(i) + mcr)
+                                mR2.set(i, mR2.get(i) + mNet * mNet)
+                                if z.mtMfe >= reactTarget
+                                    m1.set(i, m1.get(i) + 1)
+                                if z.mtMfe >= mt2
+                                    m2.set(i, m2.get(i) + 1)
+                                if mOut and not mSh and not brk
+                                    mT.set(i, mT.get(i) + 1)
+                                if mMkt
+                                    mM.set(i, mM.get(i) + 1)
+                                    mX.set(i, mX.get(i) + mx)
 
             // Muerte del bloque (usa la invalidación que hayas elegido: es otra pregunta distinta).
             bool resolvedNow = false
@@ -1924,11 +2008,12 @@ if barstate.isconfirmed and zones.size() > 0
                     evXSum += xr
                 bool early = z.evalBar < splitBar
                 bool pdFav = na(z.pd) ? false : (z.isDem ? z.pd <= 0.5 : z.pd >= 0.5)
-                for k = 0 to 31
+                for k = 0 to 33
+                    // [v6.6] "R ≥ N ticks" en k==30 y la combinación base 1v + suave + descuento en k==31.
                     // [v4.8] CHoCH en k==5. [v5.6] "base tranquila" en k==9. [v5.0] "al tocar" en k==14.
                     // [v5.1] OTE en k==15. [v4.9] Institucionales en k==18..21.
                     // [v6.0] DISP en k==6, LIQ pasa a "sweep > 0" en k==7 y POOL entra en k==8.
-                    bool has = k == 0 ? z.scoreAt >= gradeAp : k == 1 ? (z.scoreAt >= gradeA and z.scoreAt < gradeAp) : k == 2 ? z.scoreAt < gradeA : k == 3 ? z.fvg : k == 4 ? z.bos : k == 5 ? z.choch : k == 6 ? z.hasDisp : k == 7 ? z.sweep > 0 : k == 8 ? z.sweep == 2 : k == 9 ? z.htfAt : k == 10 ? (z.baseTight and z.baseN <= 1) : k == 11 ? (not na(z.bvol) and z.bvol <= baseVolMax) : k == 12 ? z.isOrigin : k == 13 ? z.kind == 2 : k == 14 ? z.kind == 3 : k == 15 ? z.momOut : k == 16 ? z.rthAt : k == 17 ? z.biasAt == 1 : k == 18 ? pdFav : k == 19 ? z.pdAtFav : k == 20 ? z.oteAt : k == 21 ? z.rrAt : k == 22 ? z.softAt : k == 23 ? z.vwapAt : k == 24 ? z.sigmaAt : k == 25 ? z.kzAt : k == 26 ? z.liqAt : k == 27 ? z.tfIdx == 0 : k == 28 ? z.tfIdx == 1 : k == 29 ? z.tfIdx == 2 : k == 30 ? early : not early
+                    bool has = k == 0 ? z.scoreAt >= gradeAp : k == 1 ? (z.scoreAt >= gradeA and z.scoreAt < gradeAp) : k == 2 ? z.scoreAt < gradeA : k == 3 ? z.fvg : k == 4 ? z.bos : k == 5 ? z.choch : k == 6 ? z.hasDisp : k == 7 ? z.sweep > 0 : k == 8 ? z.sweep == 2 : k == 9 ? z.htfAt : k == 10 ? (z.baseTight and z.baseN <= 1) : k == 11 ? (not na(z.bvol) and z.bvol <= baseVolMax) : k == 12 ? z.isOrigin : k == 13 ? z.kind == 2 : k == 14 ? z.kind == 3 : k == 15 ? z.momOut : k == 16 ? z.rthAt : k == 17 ? z.biasAt == 1 : k == 18 ? pdFav : k == 19 ? z.pdAtFav : k == 20 ? z.oteAt : k == 21 ? z.rrAt : k == 22 ? z.softAt : k == 23 ? z.vwapAt : k == 24 ? z.sigmaAt : k == 25 ? z.kzAt : k == 26 ? z.liqAt : k == 27 ? z.tfIdx == 0 : k == 28 ? z.tfIdx == 1 : k == 29 ? z.tfIdx == 2 : k == 30 ? z.riskPts / syminfo.mintick >= cutMinTicks : k == 31 ? (z.baseTight and z.baseN <= 1 and z.softAt and z.pdAtFav) : k == 32 ? early : not early
                     if has
                         bN.set(k, bN.get(k) + 1)
                         bS.set(k, bS.get(k) + m)
@@ -2220,7 +2305,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v6.5", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v6.6", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
@@ -2350,8 +2435,8 @@ f_evalTable() =>
     bool   full = evalMode == "Completo"
     string sT1  = str.tostring(reactTarget, "#.#") + "R"
     string sT2  = str.tostring(reactTarget * 2, "#.#") + "R"
-    var table ev = table.new(position.bottom_right, 10, 36, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "  · de ellos CHoCH", "con DISPLACEMENT", "con LIQ", "  · de ellos POOL", "con MTF", "base 1 vela", "base tranquila ≤" + str.tostring(baseVolMax, "#.#") + "x", "origen del movimiento", "Mitigation Block", "Rejection Block", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento (al nacer)", "  · y al tocar", "  · y en OTE " + str.tostring(math.min(oteLo, oteHi) * 100, "#") + "-" + str.tostring(math.max(oteLo, oteHi) * 100, "#") + "%", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "a favor del VWAP", "en banda " + str.tostring(vwapSigma, "#.#") + "σ", "en kill zone", "sobre liquidez D/W", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
+    var table ev = table.new(position.bottom_right, 10, 41, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
+    array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "  · de ellos CHoCH", "con DISPLACEMENT", "con LIQ", "  · de ellos POOL", "con MTF", "base 1 vela", "base tranquila ≤" + str.tostring(baseVolMax, "#.#") + "x", "origen del movimiento", "Mitigation Block", "Rejection Block", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento (al nacer)", "  · y al tocar", "  · y en OTE " + str.tostring(math.min(oteLo, oteHi) * 100, "#") + "-" + str.tostring(math.max(oteLo, oteHi) * 100, "#") + "%", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "a favor del VWAP", "en banda " + str.tostring(vwapSigma, "#.#") + "σ", "en kill zone", "sobre liquidez D/W", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "R ≥ " + str.tostring(cutMinTicks) + " ticks", "base 1v + suave + descuento", "▸ 1ª MITAD", "▸ 2ª MITAD")
 
     if full
         table.cell(ev, 0, 0, "Operación simulada", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
@@ -2365,15 +2450,20 @@ f_evalTable() =>
         table.cell(ev, 8, 0, "Esp.",   text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 9, 0, "IC 95%", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         f_evRow(ev, 1, "TODOS", evN, evHeld, evHeld2, evRSum, evTimeout, evCSum, evMkt, evXSum, evR2Sum, evN, true)
-        for k = 0 to 31
+        for k = 0 to 33
             f_evRow(ev, k + 2, bNames.get(k), bN.get(k), b1.get(k), b2.get(k), bS.get(k), bT.get(k), bC.get(k), bM.get(k), bX.get(k), bR2.get(k), evN, false)
-        table.cell(ev, 0, 34, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
+        // [v6.6] La operación en el 50%, con sus dos mitades. Frec. = de cada 100 operaciones principales,
+        // cuántas llegaron a llenar la orden del 50%.
+        f_evRow(ev, 36, "ENTRADA EN EL 50%", mN.get(0), m1.get(0), m2.get(0), mS.get(0), mT.get(0), mC.get(0), mM.get(0), mX.get(0), mR2.get(0), evN, false)
+        f_evRow(ev, 37, "  · 1ª mitad", mN.get(1), m1.get(1), m2.get(1), mS.get(1), mT.get(1), mC.get(1), mM.get(1), mX.get(1), mR2.get(1), evN, false)
+        f_evRow(ev, 38, "  · 2ª mitad", mN.get(2), m1.get(2), m2.get(2), mS.get(2), mT.get(2), mC.get(2), mM.get(2), mX.get(2), mR2.get(2), evN, false)
+        table.cell(ev, 0, 39, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 8
-            table.cell(ev, c, 34, "", text_size = size.tiny)
-        table.cell(ev, 9, 34, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(ev, 0, 35, "VERDE = el IC excluye el cero · AMARILLO = la muestra no decide · M/R = R media de las salidas a mercado (reloj o invalidación, nunca stop) · 32 cortes: exígelo en las dos MITADES y en los dos activos", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+            table.cell(ev, c, 39, "", text_size = size.tiny)
+        table.cell(ev, 9, 39, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 0, 40, "VERDE = el IC excluye el cero · AMARILLO = la muestra no decide · M/R = R media de las salidas a mercado (reloj o invalidación, nunca stop) · 34 cortes: exígelo en las dos MITADES y en los dos activos · ENTRADA EN EL 50%: mismo stop, R menor; Frec. = % de operaciones que llenaron el 50%", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 9
-            table.cell(ev, c, 35, "", text_size = size.tiny)
+            table.cell(ev, c, 40, "", text_size = size.tiny)
     else
         table.cell(ev, 0, 0, "Verificación", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
         table.cell(ev, 1, 0, "N",       text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
@@ -2381,11 +2471,12 @@ f_evalTable() =>
         table.cell(ev, 3, 0, "Esp.",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 4, 0, "IC 95%",  text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         f_evMini(ev, 1, "TODOS",      evN,        evHeld2,    evCSum,     evMkt,      evXSum,     evR2Sum,     true)
-        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(30), b2.get(30), bC.get(30), bM.get(30), bX.get(30), bR2.get(30), false)
-        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(31), b2.get(31), bC.get(31), bM.get(31), bX.get(31), bR2.get(31), false)
-        table.cell(ev, 0, 4, "verde solo si el IC excluye el cero · las mitades deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+        f_evMini(ev, 2, "▸ 1ª mitad", bN.get(32), b2.get(32), bC.get(32), bM.get(32), bX.get(32), bR2.get(32), false)
+        f_evMini(ev, 3, "▸ 2ª mitad", bN.get(33), b2.get(33), bC.get(33), bM.get(33), bX.get(33), bR2.get(33), false)
+        f_evMini(ev, 4, "ENTRADA EN EL 50%", mN.get(0), m2.get(0), mC.get(0), mM.get(0), mX.get(0), mR2.get(0), false)
+        table.cell(ev, 0, 5, "verde solo si el IC excluye el cero · las mitades deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 4
-            table.cell(ev, c, 4, "", text_size = size.tiny)
+            table.cell(ev, c, 5, "", text_size = size.tiny)
 
 if showEval and barstate.islast
     f_evalTable()
