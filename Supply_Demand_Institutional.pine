@@ -1,8 +1,24 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v5.4
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v5.5
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v5.5 — EL TOPE DE MEMORIA SE COMÍA LAS EVALUACIONES DE MARCO SUPERIOR
+//   `maxZonesMem` estaba en 60, y la limpieza descarta el bloque más antiguo. Pero la ventana de
+//   evaluación se cuenta en velas DEL MARCO DEL BLOQUE desde v3.4: en un gráfico de 1 minuto son 20
+//   velas para un bloque de 1m, 300 para uno de 15m y 1200 —veinte horas— para uno de 1H. Si en ese
+//   tramo nacían más de 60 bloques, el de marco superior se descartaba a medio medir y se iba al
+//   contador "sin resolver".
+//   El sesgo iba en la peor dirección posible: cuanto MÁS ALTO el marco, más probable que su evaluación
+//   se truncara — y son justo las filas "Marco 15m" y "Marco 1H" las que el motor lleva señalando desde
+//   v3.3 como el corte potencialmente decisivo. Ahora 150.
+//   COSTE, porque no es gratis: la pasada de confluencia MTF es O(n²) por vela cerrada. Con 60 son unas
+//   3.600 iteraciones; con 150, unas 22.500. Si TradingView se queja del tiempo de ejecución, baja el
+//   número o desactiva un marco.
+//   Y MIRA "sin resolver" EN EL PIE DE LA TABLA antes de leer las filas por marco. Si sigue alto con
+//   150, el problema no es la memoria: nacen demasiados bloques, y lo que hay que endurecer es la
+//   detección.
 //
 // v5.4 — LA CUARTA VÍA: EL CÓDIGO DOCUMENTABA TRES DESENLACES Y TENÍA CUATRO
 //   Cuando el bloque se invalidaba, la rama de la ROTURA cerraba la operación abierta sin mirar el stop:
@@ -533,7 +549,7 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v5.4", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v5.5", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -634,7 +650,7 @@ dedupOn        = input.bool(true, "Deduplicar bloques solapados del mismo marco"
 dedupPct       = input.int(50, "Solape que cuenta como duplicado (%)", minval=10, maxval=100, group=gZn)
 useBreaker     = input.bool(false, "Breaker: el bloque roto se da la vuelta", group=gZn, tooltip="SMC: si una demanda se rompe CON DESPLAZAMIENTO, donde la demanda falló toma el control la oferta — el mismo rango queda como bloque contrario. Nace sin toques y exige que el precio se aleje y vuelva. Desactivado por defecto: compáralo en la tabla de verificación antes de fiarte.")
 breakerDispAtr = input.float(0.8, "Breaker: cuerpo mínimo de la vela que rompe (×ATR)", minval=0.2, step=0.1, group=gZn, tooltip="Sin desplazamiento la rotura es deriva, no un cambio de control: ese bloque no se da la vuelta, simplemente muere.")
-maxZonesMem    = input.int(60, "Bloques en memoria", minval=20, maxval=150, group=gZn)
+maxZonesMem    = input.int(150, "Bloques en memoria", minval=20, maxval=150, group=gZn, tooltip="[v5.5] Subido de 60 a 150. Con 60, un bloque de marco superior no llegaba a resolver su evaluación: en un gráfico de 1m, su ventana son 300 velas (bloque de 15m) o 1200 (bloque de 1H), y si en ese tramo nacían más de 60 bloques el más antiguo se descartaba a medio medir. El sesgo iba en la peor dirección posible —cuanto más alto el marco, más probable que su fila se truncara— y afectaba justo a los cortes 'Marco 15m' y 'Marco 1H'.\n\nVIGILA 'sin resolver' EN EL PIE DE LA TABLA: es el contador de evaluaciones que murieron sin cerrarse. Si sigue alto con 150, el problema no es la memoria sino que nacen demasiados bloques — endurece la detección en vez de subir esto.\n\nCOSTE: la pasada de confluencia MTF es O(n²) por vela cerrada. Con 60 son ~3.600 iteraciones; con 150, ~22.500. Si TradingView se queja del tiempo de ejecución, baja este número o desactiva marcos.")
 
 footprint  = input.string("FVG o BOS", "Huella institucional exigida", options=["Ninguna", "FVG o BOS", "FVG y BOS"], group=gQl, tooltip="Sin huella el bloque ni siquiera se registra: un impulso que no dejó desequilibrio ni rompió estructura rara vez tiene órdenes institucionales detrás.")
 gradeAp    = input.int(62, "Grado A+ a partir de", minval=40, maxval=100, inline="gr", group=gQl, tooltip="[v4.2] Estaban fijos en 80/70. Al endurecer FVG y momentum en v3.9 la mayoría de bloques perdió ~16 puntos y dejaron de existir los A+: una escala en la que nadie llega arriba no clasifica nada. Ajústalos a tu distribución — mira la columna Frec. de los tres grados en la tabla y muévelos hasta que repartan.")
@@ -1904,7 +1920,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v5.4", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v5.5", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
