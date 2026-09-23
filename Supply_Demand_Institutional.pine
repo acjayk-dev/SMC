@@ -1,8 +1,24 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v6.1
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v6.2
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v6.2 — DOS VERSIONES CORRECTAS QUE SE ANULABAN ENTRE SÍ, Y EL FVG QUE NUNCA SE LLENABA
+//   · v5.6 CONTRA v6.0. En v5.6 limité el rango de la base (≤ 1.2×ATR) para que un martillo no inflara
+//     la caja clásica. En v6.0 añadí el rejection block, que se define precisamente por una MECHA LARGA.
+//     El filtro de v5.6 actuaba primero, así que el rechazo de libro —martillo alcista con mecha larga
+//     en una demanda— se descartaba antes de que v6.0 pudiera leerlo. Solo sobrevivía si la vela era del
+//     color opuesto, criterio que no tiene nada que ver con un rechazo. Ahora una mecha dominante en la
+//     dirección del rechazo también abre base; esa base no se extiende (para que el rango ancho nunca
+//     termine en la geometría clásica, que es lo que v5.6 protegía), y su proporción se mide contra la
+//     MECHA —el nivel— y no contra el rango entero, que la habría matado en el filtro siguiente.
+//   · FVG RELLENADO. El hueco solo conocía dos estados: abierto o invertido. En ICT, un hueco que la
+//     MECHA atraviesa entero sin que el cierre lo cruce queda EQUILIBRADO — ya no es un desequilibrio
+//     abierto. Seguía pintándose como abierto hasta que lo expulsaba el tope de memoria. Ahora sale.
+//   · Y dos menores: el distal del rejection block incluye la mecha de la primera vela del impulso, como
+//     la geometría clásica (si esa vela bajó más, el stop tiene que quedar más allá); y un pool de
+//     liquidez ya no se empareja con un pivote que un cierre había consumido — ahí no quedan stops.
 //
 // v6.1 — EL GRÁFICO ENSEÑABA TODO MENOS LOS BLOQUES
 //   Primera carga real en MNQ 1m y el resultado fue una mancha morada: veinte FVG extendiéndose a la
@@ -639,7 +655,7 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v6.1", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v6.2", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1007,8 +1023,9 @@ f_detect() =>
             // baseMaxBack=4 el bucle moría en la vela 6, así que un impulso de siete velas no encontraba
             // base y el bloque se perdía entero. Se toma el MAYOR de los dos límites para no estrechar
             // nunca la ventana de quien ya tenía baseMaxBack alto.
-            int bNear   = -1
-            int scanMax = math.max(legBars + baseMaxBack, legMaxBars)
+            int  bNear    = -1
+            bool bRejOnly = false   // [v6.2] la base entró SOLO por ser vela de rechazo
+            int  scanMax  = math.max(legBars + baseMaxBack, legMaxBars)
             for k = legBars + 1 to scanMax
                 bool opp = isDem ? close[k] < open[k] : close[k] > open[k]
                 // [v5.6] La compresión exige cuerpo pequeño Y RANGO ESTRECHO. Hasta v5.5 solo se miraba
@@ -1016,8 +1033,17 @@ f_detect() =>
                 // y eso es lo contrario de una base. La rama `opp` (Order Block: la última vela OPUESTA
                 // antes del impulso) NO lleva el límite de rango: ahí una vela grande es lo esperado.
                 bool tight = math.abs(close[k] - open[k]) <= a * baseBodyAtr and (high[k] - low[k]) <= a * baseRngAtr
-                if tight or opp
-                    bNear := k
+                // [v6.2] VELA DE RECHAZO. El límite de rango de v5.6 descartaba el martillo de libro —mecha
+                // larga, luego rango > 1.2×ATR por definición— ANTES de que v6.0 pudiera leerlo como
+                // rejection block. Solo sobrevivía si era del color opuesto (rama `opp`), que es un criterio
+                // irrelevante para un rechazo. Los dos cambios eran correctos por separado y juntos se
+                // anulaban. Ahora una mecha dominante en la dirección del rechazo también abre base.
+                float kW   = isDem ? math.min(open[k], close[k]) - low[k] : high[k] - math.max(open[k], close[k])
+                float kR   = high[k] - low[k]
+                bool  rejC = rejOn and kR > 0 and kW >= kR * rejWickPct / 100.0 and kW >= a * rejMinAtr
+                if tight or opp or rejC
+                    bNear    := k
+                    bRejOnly := rejC and not tight and not opp
                     break
 
             if bNear > 1
@@ -1043,7 +1069,10 @@ f_detect() =>
                 if net >= a * legNetAtr and sepOK
                     // ── Extensión de la base: velas pequeñas contiguas hacia atrás ──────────────
                     int bFar = bNear
-                    if baseMaxCandles > 1
+                    // [v6.2] Si la base entró SOLO por ser vela de rechazo, no se extiende: extenderla podría
+                    // diluir la mecha por debajo del umbral y acabar dibujando un rango ancho con la
+                    // geometría CLÁSICA, que es exactamente lo que el límite de rango de v5.6 impide.
+                    if baseMaxCandles > 1 and not bRejOnly
                         for k = bNear + 1 to bNear + baseMaxCandles - 1
                             // [v5.6] La extensión es compresión pura, así que aquí el límite de rango se
                             // aplica siempre: no hay rama de Order Block que respetar.
@@ -1077,8 +1106,11 @@ f_detect() =>
                     float rejW  = isDem ? (oLo - wLo) : (wHi - oHi)
                     float bRng  = wHi - wLo
                     bool  isRej = rejOn and bRng > 0 and rejW >= bRng * rejWickPct / 100.0 and rejW >= a * rejMinAtr
-                    float top = isRej ? (isDem ? oLo : wHi) : (isDem ? oHi : math.max(wHi, high[bNear - 1]))
-                    float bot = isRej ? (isDem ? wLo : oHi) : (isDem ? math.min(wLo, low[bNear - 1]) : oLo)
+                    // [v6.2] El distal incluye también la mecha de la PRIMERA VELA DEL IMPULSO, igual que la
+                    // geometría clásica: si esa vela bajó más que la base, el stop tiene que quedar más allá
+                    // de ese mínimo ya impreso, no por encima de él.
+                    float top = isRej ? (isDem ? oLo : math.max(wHi, high[bNear - 1])) : (isDem ? oHi : math.max(wHi, high[bNear - 1]))
+                    float bot = isRej ? (isDem ? math.min(wLo, low[bNear - 1]) : oHi) : (isDem ? math.min(wLo, low[bNear - 1]) : oLo)
                     if not isRej and top - bot < a * 0.05
                         top := isDem ? wHi : top
                         bot := isDem ? bot : wLo
@@ -1089,7 +1121,10 @@ f_detect() =>
                     // Medía la fuerza de la salida contra un tramo que no es consolidación, el filtro
                     // quedó mucho más duro de lo previsto y empezó a matar bloques válidos. Seiden compara
                     // el recorrido con lo que el precio tardó en irse: eso es la base.
-                    float ratio = net / math.max(wHi - wLo, a * 0.1)
+                    // [v6.2] Para un rejection block el nivel ES la mecha, así que la proporción se mide contra
+                    // ella — mismo principio de v4.3: contra lo que construyó el nivel. Contra el rango entero,
+                    // un martillo de 2×ATR aceptado como base habría muerto aquí y el arreglo sería cosmético.
+                    float ratio = net / math.max(isRej ? rejW : wHi - wLo, a * 0.1)
                     // Recorte conservando el borde proximal
                     if top - bot > a * maxZoneAtr
                         if isDem
@@ -1231,12 +1266,12 @@ f_detect() =>
             structFlip := bar_index - 1
             structDir  := -1
     if not na(ph)
-        swHi2   := swHi
+        swHi2   := na(swHiBrk) ? swHi : na   // [v6.2] si un cierre ya se lo llevó, no queda liquidez con que emparejar
         swHi    := ph
         swHiBar := bar_index - swingLen
         swHiBrk := na
     if not na(pl)
-        swLo2   := swLo
+        swLo2   := na(swLoBrk) ? swLo : na
         swLo    := pl
         swLoBar := bar_index - swingLen
         swLoBrk := na
@@ -1376,10 +1411,18 @@ if barstate.isconfirmed and fvgOn and not na(atrC) and atrC > 0
         fvgs.push(Fvg.new(top = low[3], bot = high[1], isBull = false, t0 = time[3], bar0 = bar_index))
     // INVERSIÓN: un CIERRE al otro lado no mata el hueco, le da la vuelta. Por cierre y no por mecha,
     // igual que el resto del archivo: una mecha que atraviesa y vuelve no ha invertido nada.
+    // [v6.2] RELLENADO. Si la MECHA alcanza el borde lejano pero el cierre no lo cruza, el hueco queda
+    // EQUILIBRADO: en ICT ya no es un desequilibrio abierto. Hasta v6.1 seguía pintándose como abierto
+    // hasta que lo echaba el tope de memoria. Ahora sale del almacén — y así la memoria la ocupan huecos
+    // vivos. Recorrido hacia atrás porque se borra mientras se recorre.
     if fvgs.size() > 0
-        for f in fvgs
-            if not f.inverted and (f.isBull ? close < f.bot : close > f.top)
-                f.inverted := true
+        for i = fvgs.size() - 1 to 0
+            Fvg f = fvgs.get(i)
+            if not f.inverted
+                if (f.isBull ? close < f.bot : close > f.top)
+                    f.inverted := true
+                else if (f.isBull ? low <= f.bot : high >= f.top)
+                    fvgs.remove(i)
     while fvgs.size() > fvgMaxN
         fvgs.shift()
 
@@ -2163,7 +2206,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v6.1", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v6.2", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
