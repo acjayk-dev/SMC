@@ -1,8 +1,27 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v6.0
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v6.1
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v6.1 — EL GRÁFICO ENSEÑABA TODO MENOS LOS BLOQUES
+//   Primera carga real en MNQ 1m y el resultado fue una mancha morada: veinte FVG extendiéndose a la
+//   derecha, el VWAP con sus bandas, PDH/PDL/PWH/PWL, el rango con su equilibrio, las franjas OTE y las
+//   velas pintadas una a una por el módulo de Velez. SIETE CAPAS DE CONTEXTO ENCENDIDAS POR DEFECTO, y
+//   debajo de todas ellas —a transparencia 72— el producto: los bloques de oferta y demanda.
+//   Fui añadiendo capas versión a versión y cada una entró activada. Ninguna es un error por sí sola;
+//   juntas y por defecto, entierran lo único que el indicador existe para enseñar.
+//   · TODA la capa de contexto pasa a estar APAGADA. Se sigue MIDIENDO igual con el dibujo apagado —los
+//     cortes de la tabla no dependen de si se pinta—, así que no se pierde nada. Enciéndelas de una en
+//     una cuando quieras mirar algo concreto.
+//   · El módulo Price Action arranca DESACTIVADO en vez de pintando todas las velas.
+//   · Las cajas bajan a transparencia 50: a 72 ya eran tenues incluso sin nada encima.
+//   · UMBRAL DE DIBUJO 38 -> 30. En v6.0 el barrido pasó de valer 5 puntos a 2.5 cuando es un pivote
+//     suelto, y encima se volvió más exigente (pide que el cierre vuelva): eso resta hasta 5 puntos a
+//     casi todos los bloques y el umbral se quedó descolgado. Es literalmente el error que el autor
+//     documenta en v4.4 — endurecer un atributo y olvidar el umbral que colgaba de él.
+//   · EMBUDO DE FORMACIÓN ENCENDIDO mientras calibras: si no ves bloques, esas cuatro filas dicen si
+//     mueren en la detección, en el filtro de huella, en el deduplicado o en el umbral de dibujo.
 //
 // v6.0 — LAS CINCO FORMACIONES DEL NÚCLEO ICT QUE FALTABAN
 //   Auditado el catálogo doctrinal completo contra el código, faltaban cinco formaciones de peso. No
@@ -620,7 +639,7 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v6.0", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v6.1", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -760,12 +779,12 @@ curveTf  = input.timeframe("240", "Rango operativo: marco", group=gPd, tooltip="
 curveLen = input.int(50, "Rango operativo: velas (solo modo legado)", minval=10, maxval=300, group=gPd)
 pdMode     = input.string("Rango entre swings (ICT)", "Rango operativo: cómo se define", options=["Rango entre swings (ICT)", "Ventana móvil (legado)"], group=gPd, tooltip="[v5.0] VENTANA MÓVIL era lo que había hasta v4.9: el máximo y el mínimo de las últimas N velas del marco de curva. No es un dealing range, y falla por dos sitios a la vez — se desliza cada vela aunque no haya pasado nada estructural, así que el 'descuento' de un bloque cambia solo con que el tiempo avance; y arrastra extremos de hace N velas que pueden no tener ya ninguna relación con lo que se está negociando.\n\nRANGO ENTRE SWINGS es la definición de ICT: el rango va del último pivote BAJO confirmado al último pivote ALTO confirmado, y el equilibrio es su 50%. Solo se mueve cuando confirma un pivote nuevo o cuando el precio se sale del rango — en cuyo caso el rango se estira hasta donde llegó, porque ese extremo ya no es el techo de nada.\n\nOJO: esto CAMBIA EL SCORE (el componente Curva/PD, 5 puntos). Las muestras de la tabla anteriores a v5.0 no son comparables. El modo legado se conserva para que puedas medir uno contra otro.")
 rangeSwing = input.int(10, "Rango entre swings: velas del pivote", minval=2, maxval=50, group=gPd, tooltip="Velas a cada lado exigidas para confirmar los pivotes que anclan el rango. Más alto = rango más estable y más lento en reanclarse.")
-showEq     = input.bool(true, "Dibujar el rango operativo y su equilibrio", group=gPd)
+showEq     = input.bool(false, "Dibujar el rango operativo y su equilibrio", group=gPd, tooltip="[v6.1] Apagado por defecto. Los bloques son el producto; todo lo demás es contexto y tapa. Enciende de uno en uno lo que quieras ver.")
 oteOn      = input.bool(true, "Medir OTE (Optimal Trade Entry)", group=gPd, tooltip="[v5.2] REQUIERE el modo de rango \"Rango entre swings (ICT)\": sobre la ventana móvil legada los porcentajes se referirían a un rango que se desliza solo, y el OTE no significaría nada. En modo legado el corte queda vacío y las franjas no se dibujan; el panel lo avisa.\n\n[v5.1] ICT: dentro del retroceso de un impulso, la zona óptima de entrada está entre el 62% y el 79% de retroceso. No es el descuento genérico —eso es media escala— sino una franja estrecha del 17% del rango.\n\nSe apoya en el DEALING RANGE de v5.0: sin un rango bien definido, el OTE no significa nada, y por eso no se pudo implementar antes.\n\nEn posición dentro del rango: la franja de COMPRA cae entre el 21% y el 38% (retroceder un 79% desde el máximo deja el precio al 21% del rango), y la de VENTA entre el 62% y el 79%. Son simétricas.")
 oteLo      = input.float(0.62, "OTE: retroceso mínimo", minval=0.3, maxval=0.95, step=0.01, inline="ot", group=gPd)
 oteHi      = input.float(0.79, "máximo", minval=0.3, maxval=0.99, step=0.01, inline="ot", group=gPd)
 oteDir     = input.bool(true, "OTE: exigir que el impulso vaya a favor", group=gPd, tooltip="[v5.1] El OTE es el retroceso DE UN IMPULSO, así que estrictamente solo aplica si el último tramo del rango va en la dirección del trade: compras en el retroceso de un impulso alcista, vendes en el de uno bajista. Se determina por cuál de los dos extremos del rango es más reciente.\n\nActivado es la doctrina y reduce bastante la muestra. Desactivado mide solo la franja de precio, ignorando de dónde venía el movimiento. Compara las dos en la tabla: es exactamente el tipo de pregunta que esta herramienta existe para responder.")
-showOte    = input.bool(true, "Dibujar las franjas OTE", group=gPd)
+showOte    = input.bool(false, "Dibujar las franjas OTE", group=gPd)
 oteBuyCol  = input.color(#26A69A, "OTE compra", inline="oc", group=gPd)
 oteSellCol = input.color(#EF5350, "OTE venta", inline="oc", group=gPd)
 eqCol      = input.color(#7E57C2, "Color del rango / equilibrio", group=gPd)
@@ -789,7 +808,7 @@ arrBars  = input.int(5, "Llegada: velas del tramo de aproximación", minval=2, m
 // donde se decide con datos si algo separa. Si alguno separa de verdad —en las DOS mitades y en los dos
 // activos— entonces y solo entonces se le da peso.
 vwapOn    = input.bool(true, "Medir VWAP de sesión", group=gIn, tooltip="[v4.9] El precio medio ponderado por volumen desde la apertura de la sesión es LA referencia de ejecución institucional: las mesas se miden contra él. Comprar una demanda por debajo del VWAP es comprar por debajo del precio medio al que se ha negociado hoy. Requiere que el símbolo tenga volumen (MNQ/MES lo tienen).")
-vwapShow  = input.bool(true, "Dibujar VWAP y bandas", group=gIn)
+vwapShow  = input.bool(false, "Dibujar VWAP y bandas", group=gIn)
 vwapSigma = input.float(2.0, "Bandas: desviaciones típicas", minval=0.5, maxval=4.0, step=0.5, group=gIn, tooltip="El corte 'en banda σ' se marca cuando el toque alcanza la banda de ESTE ancho. Con 2.0 mide el extremo estadístico de la sesión, donde se espera reversión a la media.")
 vwapCol   = input.color(#FF6D00, "VWAP", inline="vw", group=gIn)
 vwapBCol  = input.color(#5C6BC0, "bandas", inline="vw", group=gIn)
@@ -805,13 +824,13 @@ kz4On = input.bool(false, "Tarde",         inline="k4", group=gIn)
 kz4   = input.session("1330-1600", "", inline="k4", group=gIn)
 
 fvgOn    = input.bool(true, "FVG con ciclo de vida e inversión", group=gIn, tooltip="[v6.0] INVERSION FVG (ICT). Hasta v5.7 el FVG era un BOOLEANO del bloque: se preguntaba si el impulso había dejado un hueco y ahí moría la historia. Pero un FVG que el precio atraviesa POR CIERRE no desaparece — CAMBIA DE POLARIDAD: un hueco alcista atravesado pasa a actuar como resistencia. Esa transición no se puede expresar sin un almacén con estado.\n\nAhora los FVG son objetos con ciclo propio: nacen, y un cierre al otro lado los invierte. Se dibujan en dos colores según su estado.\n\nLIMITACIÓN CONOCIDA: se detectan solo en el marco DEL GRÁFICO, no en los tres marcos del motor de bloques. Es una decisión de contención, no un descuido.")
-fvgShow  = input.bool(true, "Dibujar los FVG", group=gIn)
+fvgShow  = input.bool(false, "Dibujar los FVG", group=gIn, tooltip="[v6.1] Apagado por defecto. Con veinte huecos en memoria extendiéndose todos a la derecha, el gráfico se vuelve una mancha morada y los bloques desaparecen debajo. Se siguen MIDIENDO con él apagado.")
 fvgMinIn = input.float(0.25, "FVG: hueco mínimo (×ATR)", minval=0.05, step=0.05, group=gIn)
-fvgMaxN  = input.int(20, "FVG en memoria", minval=5, maxval=40, group=gIn)
+fvgMaxN  = input.int(10, "FVG en memoria", minval=5, maxval=40, group=gIn)
 fvgCol   = input.color(#42A5F5, "abierto", inline="fv", group=gIn)
 fvgInvCol= input.color(#AB47BC, "invertido", inline="fv", group=gIn)
 liqOn    = input.bool(true, "Medir liquidez del día y la semana previos", group=gIn, tooltip="[v4.9] PDH/PDL y PWH/PWL: máximo y mínimo del día y de la semana anteriores. Son los niveles donde se acumulan stops de forma más previsible de todo el gráfico. Un bloque construido justo ahí no se formó en cualquier sitio: se formó sobre liquidez preparada. El corte 'sobre liquidez D/W' lo mide.")
-liqShow  = input.bool(true, "Dibujar PDH/PDL y PWH/PWL", group=gIn)
+liqShow  = input.bool(false, "Dibujar PDH/PDL y PWH/PWL", group=gIn)
 liqNear  = input.float(0.5, "Distancia para contar como 'sobre el nivel' (×ATR)", minval=0.1, maxval=3.0, step=0.1, group=gIn)
 liqDCol  = input.color(#BDBDBD, "día", inline="lq", group=gIn)
 liqWCol  = input.color(#FFB300, "semana", inline="lq", group=gIn)
@@ -828,21 +847,21 @@ evalMode    = input.string("Resumen", "Detalle de la tabla", options=["Resumen",
 evalMinN    = input.int(20, "Muestra mínima para dar color", minval=5, maxval=200, group=gEv, tooltip="Por debajo de este número de bloques resueltos la fila se muestra en gris.\n\n[v5.3] Ya NO es el criterio principal: el color lo decide ahora el INTERVALO DE CONFIANZA. Verde solo si el IC al 95% excluye el cero, amarillo si la muestra no permite decidir. Con σ≈1.3R por operación, un IC de ±0.20R exige n≈170 y uno de ±0.10R exige n≈650: con 20 operaciones el margen es de ±0.57R, así que una fila que marque +0.30 es indistinguible del azar. Esto es un suelo, no un aval.")
 
 showZones    = input.bool(true, "Dibujar bloques", group=gVs)
-showMinScore = input.int(38, "Score mínimo para dibujar", minval=0, maxval=100, group=gVs)
+showMinScore = input.int(30, "Score mínimo para dibujar", minval=0, maxval=100, group=gVs, tooltip="[v6.1] Bajado de 38 a 30. En v6.0 el barrido pasó de valer 5 puntos a valer 2.5 cuando es un pivote suelto, y además se volvió más exigente (pide que el cierre vuelva). Eso resta hasta 5 puntos a casi todos los bloques, y el umbral se quedó descolgado — el mismo error que el autor documenta en v4.4.\n\nMira 'mejor NN' en el panel: es el score del mejor bloque VIVO. Si ese número está por debajo de este umbral, no se dibuja nada. Ajusta hasta que repartan.")
 maxRender    = input.int(16, "Máximo de bloques dibujados", minval=4, maxval=40, group=gVs)
-zoneOpac     = input.int(72, "Transparencia de las cajas (0 sólido · 95 casi invisible)", minval=0, maxval=95, group=gVs, tooltip="[v4.3] Punto de partida. Los bloques de grado A+ se pintan 8 puntos más sólidos y los B, 8 más tenues. Si no ves las cajas, baja este número.")
+zoneOpac     = input.int(50, "Transparencia de las cajas (0 sólido · 95 casi invisible)", minval=0, maxval=95, group=gVs, tooltip="[v6.1] Bajado de 72 a 50. A 72 las cajas ya eran tenues, y con las capas de contexto encendidas encima desaparecían del todo. Los bloques de grado A+ se pintan 8 puntos más sólidos y los B, 8 más tenues.")
 showFresh    = input.bool(false, "Solo bloques sin tocar", group=gVs)
 extendBars   = input.int(15, "Extensión a la derecha (velas)", minval=0, maxval=100, group=gVs)
 colDem       = input.color(#089981, "Demanda", inline="c", group=gVs)
 colSup       = input.color(#F23645, "Oferta", inline="c", group=gVs)
 showDash     = input.bool(true, "Panel", group=gVs)
-showFunnel   = input.bool(false, "Panel: añadir embudo de formación", group=gVs, tooltip="[v3.8] Detectados · sin huella · duplicados · registrados. Sirve para depurar por qué no aparecen bloques, no para operar, así que por defecto no ocupa sitio en el panel.")
+showFunnel   = input.bool(true, "Panel: añadir embudo de formación", group=gVs, tooltip="[v6.1] ENCENDIDO por defecto mientras calibras. Detectados · sin huella · duplicados · registrados: si no ves bloques, estas cuatro filas dicen exactamente dónde mueren. 'Detectados 0' = no pasan los filtros de formación (②). 'Sin huella' alto = súbelo o relájalo en ③. 'Registrados' alto pero nada en pantalla = es el umbral de dibujo o la transparencia, no la detección.\n\nCuando veas bloques con normalidad, apágalo y recupera cuatro filas del panel.")
 
 // ── ⑦ PRICE ACTION · OLIVER VELEZ ─────────────────────────────────────────────────────────────
 // [v4.0] Módulo PURAMENTE VISUAL y aislado. Calcula sus propios patrones, solo llama a barcolor() y lee
 // los bloques en modo consulta. No entra en la detección, ni en el score, ni en la evaluación: el motor
 // de verificación sigue midiendo exactamente lo mismo que antes, con o sin esto activado.
-paMode   = input.string("Todas las velas", "Pintar velas", options=["Desactivado", "Todas las velas", "Solo dentro de bloques"], group=gPa, tooltip="[v4.0] Solo dentro de bloques: las velas alcistas se pintan únicamente si están dentro de una DEMANDA viva, y las bajistas dentro de una OFERTA. Es la lectura de Velez —la vela de giro vale donde hay un nivel detrás— pero es solo un filtro de PINTADO: los bloques no se enteran de que existen estos patrones.")
+paMode   = input.string("Desactivado", "Pintar velas", options=["Desactivado", "Todas las velas", "Solo dentro de bloques"], group=gPa, tooltip="[v4.0] Solo dentro de bloques: las velas alcistas se pintan únicamente si están dentro de una DEMANDA viva, y las bajistas dentro de una OFERTA. Es la lectura de Velez —la vela de giro vale donde hay un nivel detrás— pero es solo un filtro de PINTADO: los bloques no se enteran de que existen estos patrones.")
 paTagOn  = input.bool(false, "Etiquetar el patrón sobre la vela", group=gPa)
 paOpac   = input.int(0, "Transparencia del pintado", minval=0, maxval=90, group=gPa)
 
@@ -2144,7 +2163,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v6.0", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v6.1", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
