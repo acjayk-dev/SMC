@@ -1,8 +1,30 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v5.3
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v5.4
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v5.4 — LA CUARTA VÍA: EL CÓDIGO DOCUMENTABA TRES DESENLACES Y TENÍA CUATRO
+//   Cuando el bloque se invalidaba, la rama de la ROTURA cerraba la operación abierta sin mirar el stop:
+//   `exitR` se quedaba en na, `toMkt` salía falso y la operación se apuntaba como −1R ENTERA aunque el
+//   stop no se hubiera tocado. Es el mismo defecto que v4.6 corrigió para los cierres por reloj, entrando
+//   otra vez por una puerta que nadie había mirado.
+//   · EN MODO CIERRE el sesgo es pequeño pero sistemático: una vela que cierra justo bajo el distal sin
+//     que la mecha alcance el colchón se apuntaba −1.00R cuando lo real era −0.93R.
+//   · EN MODO MECHA era demoledor. La rotura se evalúa como `low < distal` y el stop como
+//     `low ≤ distal − colchón`, así que LA ROTURA SIEMPRE LLEGA PRIMERO: la maquinaria de stop, ventana
+//     y salida a mercado —v3.2 a v4.6, cuatro versiones de trabajo— era código muerto, y cada pérdida se
+//     apuntaba al máximo. Una mecha que perfora el distal y cierra dentro del bloque se anotaba −1.00R
+//     cuando lo real eran −0.45R: medio R de exceso en una sola operación.
+//   AHORA la rotura comprueba el stop por mecha y, si no saltó, liquida a mercado con el resultado real,
+//   que por construcción es mejor que −1R: si la mecha no llegó al stop, el cierre tampoco. El bloque
+//   muere igual — es la operación la que deja de mentir.
+//   Y `toMkt` deja de decidirse por `byTime`: una salida es a mercado cuando NO fue un stop, venga del
+//   reloj o de la invalidación. `byTime` sigue significando solo "se agotó el reloj" y sigue alimentando
+//   la columna T/o, que no cambia. La antigua T/R pasa a llamarse M/R porque ya no son solo las del reloj.
+//
+//   ESTO MUEVE LA ESPERANZA HACIA ARRIBA en todas las filas, y mucho si operabas en modo Mecha. La cifra
+//   nueva es la honesta; la vieja estaba sesgada a la baja por construcción.
 //
 // v5.3 — LA TABLA ENSEÑABA UN PUNTO SIN MARGEN DE ERROR
 //   Quince versiones midiendo, y la columna que lo decide todo —la esperanza— se mostraba como una cifra
@@ -511,7 +533,7 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v5.3", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v5.4", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -682,7 +704,7 @@ arrMax   = input.float(2.0, "Llegada: recorrido máximo para contarla suave (×A
 reactUnit   = input.string("R del bloque", "Unidad de la reacción", options=["R del bloque", "ATR"], group=gEv, tooltip="[v3.1] R DEL BLOQUE: la reacción se mide en múltiplos de la distancia proximal→distal (más el colchón), que es exactamente lo que arriesgas operando ese bloque. ATR: distancia absoluta, igual para todos los bloques. [v4.6] La unidad que elijas FIJA TAMBIÉN EL STOP. Hasta v4.5, con ATR el objetivo se medía en ATR pero el stop seguía en el distal: dos distancias distintas, y la carrera dejaba de ser simétrica. Ahora objetivo y stop están siempre a la misma distancia, así que el ~50% de referencia vale en los dos modos y cualquier cifra por encima significa algo.")
 reactTarget = input.float(1.0, "Reacción que cuenta como 'aguantó'", minval=0.2, step=0.1, group=gEv)
 evalBufAtr  = input.float(0.10, "Stop de la prueba: colchón más allá del distal (×ATR)", minval=0.0, step=0.05, group=gEv, tooltip="[v3.2] La prueba usa un stop REAL, por mecha y con colchón, igual que lo usarías operando — no la invalidación por cierre del bloque, que es otra pregunta. La R se mide proximal→stop, así que el objetivo y el stop están a la misma distancia: una carrera limpia. [v4.6] Solo aplica con unidad R DEL BLOQUE: con unidad ATR el stop lo fija el propio ATR del marco del bloque y este colchón no interviene.")
-reactWindow = input.int(20, "Ventana para reaccionar (velas DEL BLOQUE · 0 = sin límite)", minval=0, maxval=500, group=gEv, tooltip="[v3.4] Se cuenta en velas del MARCO DEL BLOQUE, no del gráfico: 20 aquí son 20 minutos para un bloque de 1m y 5 horas para uno de 15m. Vigila la columna T/o: si es alta, esa fila mide el reloj. [v4.6] Agotarse la ventana ya NO cuesta 1R automática: la operación se liquida a mercado con su resultado real y la columna T/R dice cuánto se sacó de esas. Una T/o alta sigue siendo un aviso, pero ya no hunde la esperanza por construcción.")
+reactWindow = input.int(20, "Ventana para reaccionar (velas DEL BLOQUE · 0 = sin límite)", minval=0, maxval=500, group=gEv, tooltip="[v3.4] Se cuenta en velas del MARCO DEL BLOQUE, no del gráfico: 20 aquí son 20 minutos para un bloque de 1m y 5 horas para uno de 15m. Vigila la columna T/o: si es alta, esa fila mide el reloj. [v4.6] Agotarse la ventana ya NO cuesta 1R automática: la operación se liquida a mercado con su resultado real y la columna M/R dice cuánto se sacó de esas. Una T/o alta sigue siendo un aviso, pero ya no hunde la esperanza por construcción.")
 costTicks   = input.float(3.0, "Coste por operación ida y vuelta (ticks)", minval=0.0, step=0.5, group=gEv, tooltip="[v3.7] Comisión + deslizamiento, en ticks. Se descuenta de la columna Esp., que pasa a ser NETA. Importa muchísimo cuando la R es pequeña: un bloque de MES en 15m arriesga 2-3 puntos, así que 3 ticks son el 6-10% de la R en cada operación; en MNQ, con R de 20 puntos, apenas el 1%. Dos activos con la misma esperanza bruta pueden acabar en lados opuestos del cero.")
 oneAtATime  = input.bool(false, "Una operación a la vez", group=gEv, tooltip="[v3.5] Si hay 8 bloques vivos y el precio los cruza todos en el mismo movimiento, ganan o pierden JUNTOS: la muestra parece grande pero son el mismo suceso contado ocho veces, y eso hace que un puñado de sesiones decida el signo del resultado. Activado, solo se evalúa un bloque cada vez — como operarías de verdad. La muestra baja mucho, pero cada operación cuenta una decisión independiente. Si la ventaja desaparece al activarlo, nunca existió. [v4.6] El hueco se congela al empezar la vela: como mucho una apertura por vela, y quien cierra lo libera para la SIGUIENTE. Antes lo liberaba en la misma vela y entraba quien estuviera más adelante en el array, así que la muestra la elegía el orden de creación de los bloques.")
 showEval    = input.bool(true, "Tabla de verificación", group=gEv)
@@ -1372,7 +1394,7 @@ var float evRSum    = 0.0 // suma de recorridos máximos a favor
 // [v4.6] Las cerradas por ventana SIN haber alcanzado el objetivo doble no son una pérdida de 1R: se sale
 // a mercado y te llevas lo que haya. Se cuentan aparte y con su resultado real para que la esperanza deje
 // de castigarlas como si hubieran saltado el stop.
-var int   evMkt     = 0   // ... liquidadas a mercado al agotarse la ventana, sin llegar al objetivo doble
+var int   evMkt     = 0   // ... liquidadas A MERCADO sin llegar al objetivo doble: reloj o invalidación
 var float evXSum    = 0.0 // suma de SUS resultados reales en R (puede ser negativa)
 // [v3.3] Doce cortes de los mismos datos. Los tres últimos son EL CORTE CLAVE: si los bloques de 1m son
 // ruido pero los de 15m o 1H tienen ventaja, el problema no es el motor sino el marco en el que se aplica.
@@ -1530,6 +1552,20 @@ if barstate.isconfirmed and zones.size() > 0
                 if z.evalOn and not z.resolved
                     z.resolved  := true
                     resolvedNow := true
+                    // [v5.4] LA CUARTA VÍA. Hasta v5.3 esta rama cerraba la operación SIN mirar el stop:
+                    // `exitR` se quedaba en na y se apuntaba −1R entera aunque el stop no se hubiera
+                    // tocado — el mismo defecto que v4.6 corrigió para los cierres por reloj, reaparecido
+                    // por otra puerta. Y en modo MECHA era demoledor: la rotura (low < distal) SIEMPRE
+                    // precede al stop (low ≤ distal − colchón), así que la maquinaria de stop, ventana y
+                    // salida a mercado —v3.2 a v4.6— no llegaba a ejecutarse nunca y toda pérdida se
+                    // apuntaba al máximo.
+                    // Ahora: stop primero y por mecha; si no saltó, se liquida a mercado con su resultado
+                    // real, que por construcción es mejor que −1R (si la mecha no alcanzó el stop, el
+                    // cierre tampoco). El bloque muere igual: es la operación la que deja de mentir.
+                    float bPx = z.isDem ? z.top : z.bot
+                    float bRk = math.max(z.riskPts, syminfo.mintick)
+                    bool  bSh = z.isDem ? low <= z.stopPx : high >= z.stopPx
+                    z.exitR   := bSh ? -1.0 : (z.isDem ? close - bPx : bPx - close) / bRk
 
             // [v3.3] LA OPERACIÓN COMPLETA. Hasta v3.2 la prueba se cerraba al tocar 1R, así que no podía
             // ver el recorrido posterior: respondía "¿aguantó?" pero no "¿hay ventaja?". Dos sistemas con
@@ -1576,8 +1612,12 @@ if barstate.isconfirmed and zones.size() > 0
                 // habría cerrado AHÍ aunque luego saltara el stop o expirara el reloj: cuenta como ganada.
                 // Si no lo alcanzó y la ventana se agotó, se liquida a mercado con su resultado real. Solo
                 // el resto —stop tocado sin haber pasado por el objetivo— pierde la R entera.
-                bool  toMkt = byTime and m < t2
-                float xr    = toMkt and not na(z.exitR) ? z.exitR : 0.0
+                // [v5.4] Una salida es "a mercado" cuando NO fue un stop, venga del reloj o de la
+                // invalidación del bloque. Antes lo decidía `byTime`, que dejaba fuera las roturas y las
+                // mandaba a la rama de −1R. `byTime` sigue significando solo "se agotó el reloj": es otra
+                // pregunta, alimenta la columna T/o y no cambia.
+                bool  toMkt = m < t2 and not na(z.exitR) and z.exitR > -1.0
+                float xr    = toMkt ? z.exitR : 0.0
                 // [v5.3] Resultado NETO en R de esta operación concreta, con la regla de los tres
                 // desenlaces y descontado su coste. Sumado da exactamente la misma esperanza que la
                 // fórmula reconstruida de v4.6; elevado al cuadrado da la varianza, que es lo que faltaba.
@@ -1864,7 +1904,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v5.3", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v5.4", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
@@ -1946,8 +1986,9 @@ f_evRow(table t, int r, string k, int n, int n1, int n2, float sm, int nt, float
     float esp  = n <= 0 ? na : (n2 * (reactTarget * 2) + sx - (n - n2 - nm) * reactTarget - sc) / n
     float freq = total > 0 ? n / float(total) * 100.0 : na
     float pto  = n > 0 ? nt / float(n) * 100.0 : na
-    // Lo que de verdad se sacó de las cerradas por reloj. Si es muy negativo, esa fila no está midiendo
-    // niveles que aguanten: está midiendo precio que se queda muerto dentro del bloque.
+    // [v5.4] Lo que de verdad se sacó de las salidas A MERCADO — reloj agotado o bloque invalidado, todo
+    // lo que no fue un stop. Si es muy negativo, esa fila no está midiendo niveles que aguanten: está
+    // midiendo precio que se queda muerto dentro del bloque.
     float pxr  = nm > 0 ? sx / nm : na
     float ci   = f_ci95(n, esp, sq)
     color c    = n < evalMinN ? color.gray : color.white
@@ -1996,7 +2037,7 @@ f_evalTable() =>
         table.cell(ev, 4, 0, "≥" + sT2, text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 5, 0, "MFE",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 6, 0, "T/o",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(ev, 7, 0, "T/R",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 7, 0, "M/R",    text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 8, 0, "Esp.",   text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         table.cell(ev, 9, 0, "IC 95%", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
         f_evRow(ev, 1, "TODOS", evN, evHeld, evHeld2, evRSum, evTimeout, evCSum, evMkt, evXSum, evR2Sum, evN, true)
@@ -2006,7 +2047,7 @@ f_evalTable() =>
         for c = 1 to 8
             table.cell(ev, c, 28, "", text_size = size.tiny)
         table.cell(ev, 9, 28, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(ev, 0, 29, "VERDE = el IC excluye el cero (ventaja distinguible del azar) · AMARILLO = la muestra no decide · 26 cortes: exige que coincida en las dos MITADES y en los dos activos", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+        table.cell(ev, 0, 29, "VERDE = el IC excluye el cero · AMARILLO = la muestra no decide · M/R = R media de las salidas a mercado (reloj o invalidación, nunca stop) · 26 cortes: exígelo en las dos MITADES y en los dos activos", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 9
             table.cell(ev, c, 29, "", text_size = size.tiny)
     else
