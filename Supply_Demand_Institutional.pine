@@ -957,7 +957,11 @@ f_detect() =>
     int   evBos   = 0
     int   evType  = 0
     int   evSweep = 0    // [v6.0] 0 sin barrido · 1 pivote suelto · 2 POOL de liquidez (extremos iguales)
-    bool  evDisp  = false // [v6.0] displacement ICT: energía + FVG + rotura de estructura, las tres
+    // [v6.0] OJO con el nombre: `evDisp` (float, arriba) es el DESPLAZAMIENTO EN ATR — otra cosa. En la
+    // primera versión de v6.0 llamé a este booleano `evDisp` también, y la tupla salió con veinte
+    // elementos de los que dos eran la misma variable. Mi comprobación de aridad cuadraba el NÚMERO, no
+    // la IDENTIDAD, así que no podía verlo: lo cazó el compilador de TradingView.
+    bool  evHasD  = false // displacement ICT: energía + FVG + rotura de estructura, las tres
     int   evKind  = 0     // [v6.0] 0 compresión · 1 Order Block · 2 Mitigation · 3 Rejection · 4 Breaker
     int   evBaseN = 0
     int   evLegN  = 0
@@ -1170,7 +1174,7 @@ f_detect() =>
                         evType  := zt
                         evSweep := sweep
                         // [v6.0] DISPLACEMENT (ICT): energía + FVG + rotura de estructura. Las TRES.
-                        evDisp  := net >= a * dispMinAtr and fvg and bos
+                        evHasD  := net >= a * dispMinAtr and fvg and bos
                         evBaseN := bFar - bNear + 1
                         evLegN  := legN
                         evMom   := momOut
@@ -1217,7 +1221,7 @@ f_detect() =>
         swLo    := pl
         swLoBar := bar_index - swingLen
         swLoBrk := na
-    [evNew, evDem, evTop, evBot, evT0, evDisp, evRatio, evRvol, evBvol, evFvg, evBos, evType, evSweep, evBaseN, evLegN, evMom, evTight, evOrig, evDisp, evKind]
+    [evNew, evDem, evTop, evBot, evT0, evDisp, evRatio, evRvol, evBvol, evFvg, evBos, evType, evSweep, evBaseN, evLegN, evMom, evTight, evOrig, evHasD, evKind]
 
 [e1n, e1d, e1t, e1b, e1t0, e1ds, e1r, e1v, e1bv, e1f, e1bo, e1y, e1s, e1bn, e1ln, e1m, e1tg, e1og, e1dp, e1kd] = request.security(syminfo.tickerid, tf1, f_detect(), lookahead = barmerge.lookahead_on)
 [e2n, e2d, e2t, e2b, e2t0, e2ds, e2r, e2v, e2bv, e2f, e2bo, e2y, e2s, e2bn, e2ln, e2m, e2tg, e2og, e2dp, e2kd] = request.security(syminfo.tickerid, tf2, f_detect(), lookahead = barmerge.lookahead_on)
