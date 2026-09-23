@@ -1,30 +1,22 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v6.3
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v6.4
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
 //
-// v6.3 — EL MODELO AMD (POWER OF 3): ACUMULACIÓN → MANIPULACIÓN → IFVG → DISTRIBUCIÓN
-//   Las cuatro piezas existían sueltas y ninguna sabía de las otras. El barrido medía liquidez contra
-//   pivotes, nunca contra un rango de acumulación. El IFVG (v6.0) se invertía y se pintaba, pero no
-//   confirmaba nada. Y la expansión (displacement, BOS) no tenía objetivo. AMD no es ninguna de esas
-//   piezas: es su ORDEN. Ahora hay una máquina de estados que lo exige, un ciclo por día.
-//   · A — ACUMULACIÓN. Máximo y mínimo de una ventana horaria (por defecto Asia, 20:00-00:00 NY). Solo
-//     cuenta si es estrecha: un rango de más de 0.5× el ATR DIARIO no es acumulación, es tendencia.
-//   · M — MANIPULACIÓN. La mecha que perfora un extremo del rango dentro de la ventana de Londres-NY
-//     (02:00-11:00). Barrer el mínimo arma un LARGO, barrer el máximo un CORTO. El extremo se sigue
-//     mientras el barrido avanza. Si se aleja más de 0.3× ATR diario ya no es una trampa: es la
-//     expansión de verdad, y el ciclo se descarta.
-//   · IFVG — CONFIRMACIÓN. Un FVG CONTRARIO al giro, nacido después de cerrar la acumulación, que un
-//     cierre invierte dentro de las N velas siguientes al extremo de la manipulación. Es el único punto
-//     del modelo en el que el precio demuestra que el barrido fue trampa. Sin IFVG no hay setup.
-//   · D — DISTRIBUCIÓN. Objetivo en el extremo OPUESTO del rango; stop más allá del extremo de la
-//     manipulación. Entrada en el retesteo del IFVG (lo que enseña ICT) o al cierre que confirma.
-//   Como todo desde v3.0: NO TOCA EL SCORE DE LOS BLOQUES. Se mide como setup propio en la tabla de
-//   verificación —N, objetivo, esperanza neta e IC 95%, con las dos mitades— y se dibuja A/M/IFVG/D.
-//   LIMITACIONES CONOCIDAS: necesita velas en la ventana de acumulación (futuros, forex, cripto; una
-//   acción sin premarket no forma rango). El IFVG sale del motor de FVG del GRÁFICO, así que su tamaño
-//   mínimo y su memoria son los de ⑧. Y solo funciona en intradía hasta 1H.
+// v6.5 — EL STOP CUESTA 1R, NO "T"
+//   La esperanza apuntaba un stop como −T, donde T es "Reacción que cuenta como 'aguantó'". Pero el
+//   stop está SIEMPRE a 1R —riskPts es la distancia proximal→stop en los dos modos de unidad—, así que
+//   con T = 1 coincidía por casualidad y con cualquier otro valor mentía: T = 0.5 (objetivo en 1R)
+//   apuntaba cada stop como −0.5R y la fila salía inflada. Ahora el stop es −1R siempre, en la
+//   operación y en las dos fórmulas de la tabla. Con el valor por defecto no cambia ningún número.
+//
+// v6.4 — FUERA EL MODELO AMD (v6.3)
+//   El módulo AMD (acumulación → manipulación → IFVG → distribución) se retira entero. Medido con su
+//   propia fila en la tabla de verificación, en 5m y con las reglas pesimistas de los bloques, salió
+//   negativo en los DOS activos: MNQ −0.43R ±0.78 (12 ciclos) y MES −0.73R ±0.55 (11 ciclos, ninguno
+//   llegó a 2R; el intervalo ya excluía el cero). Es exactamente el caso para el que existe la tabla.
+//   El archivo vuelve byte a byte a la lógica de v6.2: mismos bloques, mismo motor FVG, misma tabla.
 //
 // v6.2 — DOS VERSIONES CORRECTAS QUE SE ANULABAN ENTRE SÍ, Y EL FVG QUE NUNCA SE LLENABA
 //   · v5.6 CONTRA v6.0. En v5.6 limité el rango de la base (≤ 1.2×ATR) para que un martillo no inflara
@@ -677,7 +669,7 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v6.3", shorttitle="S&D Blocks", overlay=true,
+indicator("Supply & Demand Blocks Institutional v6.5", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -752,39 +744,6 @@ type Fvg
     int   t0
     int   bar0
     bool  inverted = false
-    int   invBar   = na     // [v6.3] vela en la que se invirtió: el AMD necesita el SUCESO, no el estado
-
-// [v6.3] UN CICLO AMD. Un solo objeto con todo su estado y sus dibujos, porque las funciones de Pine no
-// pueden reasignar variables globales pero sí los campos de un objeto: así la resolución de la operación
-// se escribe una vez y no copiada en cada salida.
-//   st: -9 sin ciclo · 0 A formándose · 1 A cerrada, esperando M · 2 M en curso, esperando IFVG
-//        3 IFVG confirmado, esperando entrada · 4 en operación (D en curso)
-//        5 objetivo · 6 stop · 7 cerrado a mercado al acabar la ventana · 8 sin entrada · -1 descartado
-type Amd
-    int    st     = -9
-    int    dir    = 0       // 1 largo (barrió el MÍNIMO) · -1 corto (barrió el MÁXIMO)
-    float  hi     = na      // rango de acumulación
-    float  lo     = na
-    int    t0     = na      // hora de la primera vela de la acumulación
-    int    t1     = na      // hora de la primera vela FUERA de ella: los IFVG válidos nacen después
-    float  ext    = na      // extremo de la manipulación
-    int    extBar = na      // ... y la vela en que se marcó: la ventana del IFVG se cuenta desde aquí
-    int    cfBar  = na      // vela de la confirmación: la entrada por retesteo empieza en la siguiente
-    float  ent    = na
-    float  stp    = na
-    float  tgt    = na
-    float  risk   = na
-    int    entBar = na
-    float  mfe    = 0.0     // recorrido máximo a favor en R, como en los bloques
-    float  res    = na      // resultado NETO en R al cerrar
-    string why    = ""      // por qué se descartó o no hubo entrada — el panel lo dice
-    box    bxA    = na
-    box    bxF    = na
-    line   lnH    = na
-    line   lnL    = na
-    line   lnS    = na
-    label  lbM    = na
-    label  lbD    = na
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ INPUTS
@@ -798,7 +757,6 @@ gEv = "⑤ Verificación"
 gVs = "⑥ Visual"
 gPa = "⑦ Price Action · Oliver Velez"
 gIn = "⑧ Contexto institucional"
-gAm = "⑨ Modelo AMD · Power of 3"
 
 tf1On = input.bool(true,  "Marco 1", inline="t1", group=gTf)
 tf1   = input.timeframe("", " ", inline="t1", group=gTf, tooltip="Vacío = marco del gráfico. Cada marco ejecuta la detección completa en su propio contexto. Marcos menores que el gráfico o repetidos se ignoran.")
@@ -981,23 +939,6 @@ exhOn    = input.bool(true,  "Agotamiento 3-5-8", inline="p8", group=gPa, toolti
 exhA     = input.int(5,      "aviso",     inline="p8", group=gPa, minval=3, maxval=12)
 exhB     = input.int(8,      "extremo",   inline="p8", group=gPa, minval=4, maxval=20)
 exhCol   = input.color(#FFEA00, "", inline="p8", group=gPa)
-
-// ── ⑨ MODELO AMD · POWER OF 3 ─────────────────────────────────────────────────────────────────
-// [v6.3] Acumulación → Manipulación → IFVG → Distribución, en ese orden y solo en ese orden. Como todo
-// lo añadido desde v3.0, no toca el score de los bloques: se mide como setup propio en la tabla.
-amdOn      = input.bool(true, "Activar el modelo AMD", group=gAm, tooltip="[v6.3] ICT POWER OF 3. Un ciclo por día:\n\nA · ACUMULACIÓN: máximo y mínimo de la ventana de acumulación.\nM · MANIPULACIÓN: una mecha perfora un extremo del rango (barrer el mínimo arma un largo; el máximo, un corto).\nIFVG · CONFIRMACIÓN: un cierre invierte un FVG contrario al giro. Es la prueba de que el barrido fue trampa.\nD · DISTRIBUCIÓN: objetivo en el extremo OPUESTO del rango, stop más allá del extremo de la manipulación.\n\nSolo intradía hasta 1H. Horas en Nueva York. Necesita velas en la ventana de acumulación: futuros, forex o cripto.")
-amdShow    = input.bool(true, "Dibujar A · M · IFVG · D", group=gAm)
-amdAccSess = input.session("2000-0000", "A · ventana de acumulación (hora NY)", group=gAm, tooltip="[v6.3] Por defecto el rango asiático de ICT, 20:00-00:00 de Nueva York. El rango se congela en la primera vela fuera de la ventana.")
-amdManSess = input.session("0200-1100", "M + IFVG · ventana de manipulación (hora NY)", group=gAm, tooltip="[v6.3] Donde se busca el barrido y su confirmación: de la apertura de Londres al final de la mañana de NY, que cubre las kill zones de Londres, NY AM y Silver Bullet. Un barrido fuera de esta ventana no cuenta, y si se cierra sin IFVG el ciclo se descarta.")
-amdCycSess = input.session("0200-1600", "D · ventana del ciclo (hora NY)", group=gAm, tooltip="[v6.3] Hasta cuándo puede vivir la operación. Al salir de esta ventana, lo que siga abierto se liquida A MERCADO con el último cierre dentro de ella, y una entrada pendiente se cancela.")
-amdAccMax  = input.float(0.5, "A · rango máximo (× ATR diario · 0 = sin límite)", minval=0.0, step=0.05, group=gAm, tooltip="[v6.3] Una acumulación es un rango ESTRECHO. Si el rango de la ventana supera esto, el mercado no estaba acumulando sino desplazándose, y el ciclo se descarta. El ATR es el diario de 14 días CERRADOS: no depende del marco del gráfico.")
-amdExtMax  = input.float(0.3, "M · extensión máxima más allá del rango (× ATR diario · 0 = sin límite)", minval=0.0, step=0.05, group=gAm, tooltip="[v6.3] La manipulación es una trampa CORTA: toma los stops que hay justo al otro lado del rango y vuelve. Si el precio se aleja más de esto, eso ya no es una trampa, es la expansión de verdad en esa dirección, y el ciclo se descarta.")
-amdConfBars = input.int(30, "IFVG · velas máximas desde el extremo de la manipulación", minval=3, maxval=200, group=gAm, tooltip="[v6.3] Velas del GRÁFICO contadas desde el ÚLTIMO extremo de la manipulación: mientras el precio sigue marcando mínimos nuevos, la manipulación no ha terminado y el reloj vuelve a empezar. En 1m, 30 son media hora.\n\nEl IFVG sale del motor de FVG de ⑧ (tamaño mínimo y memoria incluidos). Si el mercado deja muchos huecos, sube 'FVG en memoria'.")
-amdEntry   = input.string("Retesteo del IFVG", "Entrada", options=["Retesteo del IFVG", "Cierre de confirmación"], group=gAm, tooltip="[v6.3] RETESTEO: orden límite en el borde del IFVG, que es la entrada que enseña ICT. Si el precio llega al objetivo sin volver al IFVG, el ciclo queda 'sin entrada': no cuenta como ganada.\nCIERRE: entra al cierre de la vela que invierte el FVG. Siempre se llena, pero con peor precio.")
-amdMaxDraw = input.int(3, "Ciclos dibujados", minval=1, maxval=10, group=gAm)
-amdAccCol  = input.color(#78909C, "A", inline="am", group=gAm)
-amdManCol  = input.color(#FFA726, "M", inline="am", group=gAm)
-amdStpCol  = input.color(#FF5252, "stop", inline="am", group=gAm)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ UTILIDADES DE MARCO
@@ -1464,9 +1405,7 @@ bool kzIn = timeframe.isintraday and kzOn and ((kz1On and not na(time(timeframe.
 // Liquidez del día y la semana previos. El [1] dentro del contexto superior hace que el valor sea el de
 // la vela D/W ya CERRADA, así que está determinado desde la apertura del día: lookahead_on no adelanta
 // nada. Es el mismo patrón que curveTf y biasTf.
-// [v6.3] El ATR diario de días CERRADOS viaja en la misma tupla: el AMD mide contra él si una
-// acumulación es estrecha y si una manipulación es corta, y así no cuesta un request.security más.
-[pdH, pdL, dAtr] = request.security(syminfo.tickerid, "D", [high[1], low[1], ta.atr(14)[1]], lookahead = barmerge.lookahead_on)
+[pdH, pdL] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
 [pwH, pwL] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1477,11 +1416,7 @@ bool kzIn = timeframe.isintraday and kzOn and ((kz1On and not na(time(timeframe.
 
 var array<Fvg> fvgs = array.new<Fvg>()
 
-// [v6.3] El AMD confirma con IFVG, así que el motor corre si lo pide cualquiera de los dos. Dibujarlo y
-// contarlo en el panel sigue dependiendo solo de ⑧.
-bool amdOK = amdOn and timeframe.isintraday and chartSec <= 3600
-
-if barstate.isconfirmed and (fvgOn or amdOK) and not na(atrC) and atrC > 0
+if barstate.isconfirmed and fvgOn and not na(atrC) and atrC > 0
     float gapUp = low[1] - high[3]
     float gapDn = low[3] - high[1]
     if gapUp > 0 and gapUp >= atrC * fvgMinIn
@@ -1500,7 +1435,6 @@ if barstate.isconfirmed and (fvgOn or amdOK) and not na(atrC) and atrC > 0
             if not f.inverted
                 if (f.isBull ? close < f.bot : close > f.top)
                     f.inverted := true
-                    f.invBar   := bar_index
                 else if (f.isBull ? low <= f.bot : high >= f.top)
                     fvgs.remove(i)
     while fvgs.size() > fvgMaxN
@@ -1976,7 +1910,7 @@ if barstate.isconfirmed and zones.size() > 0
                 // [v5.3] Resultado NETO en R de esta operación concreta, con la regla de los tres
                 // desenlaces y descontado su coste. Sumado da exactamente la misma esperanza que la
                 // fórmula reconstruida de v4.6; elevado al cuadrado da la varianza, que es lo que faltaba.
-                float rNet  = (m >= t2 ? t2 : toMkt ? xr : -t1) - cr
+                float rNet  = (m >= t2 ? t2 : toMkt ? xr : -1.0) - cr
                 evN     += 1
                 evRSum  += m
                 evCSum  += cr
@@ -2029,278 +1963,6 @@ if newBrk.size() > 0
         zones.push(b)
         // [v4.6] El breaker nace después de la pasada de confluencia de esta vela: se la calcula él.
         b.htfConf := f_htfConf(b)
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ██ MODELO AMD · POWER OF 3  [v6.3]  ·  A → M → IFVG → D  (solo vela cerrada)
-// ═══════════════════════════════════════════════════════════════════════════════
-// Un ciclo por día. Cada fase solo puede empezar cuando la anterior ha terminado: esa es TODA la
-// diferencia con tener las cuatro piezas sueltas, que es lo que había hasta v6.2. Todo se decide al
-// cierre de la vela, así que lo dibujado no cambia después. La operación se mide con las reglas
-// pesimistas de los bloques: stop primero y por mecha, y la vela de entrada no cuenta para el objetivo.
-
-// Las tres ventanas se leen en TODAS las velas para que su [1] tenga historia.
-bool amdInA    = not na(time(timeframe.period, amdAccSess, "America/New_York"))
-bool amdInM    = not na(time(timeframe.period, amdManSess, "America/New_York"))
-bool amdInC    = not na(time(timeframe.period, amdCycSess, "America/New_York"))
-bool amdAStart = amdInA and not amdInA[1]
-bool amdAEnd   = not amdInA and amdInA[1]
-bool amdMEnd   = not amdInM and amdInM[1]
-bool amdCEnd   = not amdInC and amdInC[1]
-
-var Amd        amd     = Amd.new()
-var array<Amd> amdHist = array.new<Amd>()
-
-// Estadística del setup con la estructura de la de los bloques: 0 todos · 1 1ª mitad · 2 2ª mitad.
-var array<int>   aN  = array.new<int>(3, 0)      // operaciones cerradas
-var array<int>   aW  = array.new<int>(3, 0)      // ... que llegaron a SU objetivo
-var array<int>   a1  = array.new<int>(3, 0)      // ... con MFE ≥ T
-var array<int>   a2  = array.new<int>(3, 0)      // ... con MFE ≥ 2T
-var array<int>   aM  = array.new<int>(3, 0)      // ... liquidadas a mercado al cerrarse la ventana
-var array<float> aS  = array.new<float>(3, 0.0)  // suma de MFE
-var array<float> aX  = array.new<float>(3, 0.0)  // suma de los resultados a mercado, BRUTOS
-var array<float> aR  = array.new<float>(3, 0.0)  // suma del resultado NETO en R
-var array<float> aR2 = array.new<float>(3, 0.0)  // ... y de su cuadrado, para el IC 95%
-
-// Sucesos de ESTA vela, para las alertas.
-bool amdSweep = false
-bool amdConfL = false
-bool amdConfS = false
-
-f_amdR(float r) =>
-    na(r) ? "—" : (r >= 0 ? "+" : "") + str.tostring(r, "#.##") + "R"
-
-// Lleva hasta `t` todo lo que se extiende a la derecha mientras el ciclo vive, o lo congela ahí al acabar.
-f_amdEdge(Amd c, int t) =>
-    if amdShow
-        if not na(c.lnH)
-            line.set_x2(c.lnH, t)
-        if not na(c.lnL)
-            line.set_x2(c.lnL, t)
-        if not na(c.lnS)
-            line.set_x2(c.lnS, t)
-        if not na(c.bxF)
-            box.set_right(c.bxF, t)
-
-f_amdWipe(Amd c) =>
-    if not na(c.bxA)
-        box.delete(c.bxA)
-    if not na(c.bxF)
-        box.delete(c.bxF)
-    if not na(c.lnH)
-        line.delete(c.lnH)
-    if not na(c.lnL)
-        line.delete(c.lnL)
-    if not na(c.lnS)
-        line.delete(c.lnS)
-    if not na(c.lbM)
-        label.delete(c.lbM)
-    if not na(c.lbD)
-        label.delete(c.lbD)
-
-f_amdTag(Amd c, int t, float px, string txt, color col, bool above) =>
-    if amdShow
-        c.lbD := label.new(t, px, txt, xloc = xloc.bar_time, style = above ? label.style_label_down : label.style_label_up, color = color.new(col, 15), textcolor = color.white, size = size.tiny)
-
-// Fin del ciclo SIN operación: descartado (-1) o sin entrada (8). El motivo va al panel.
-f_amdEnd(Amd c, int st, string why, int t) =>
-    c.st  := st
-    c.why := why
-    f_amdEdge(c, t)
-
-// Cierra la OPERACIÓN. `r` llega BRUTO en R; el coste se descuenta aquí con la R de esta operación,
-// igual que en los bloques, porque los mismos ticks pesan más cuanto más pequeña es la R.
-f_amdClose(Amd c, int st, float r, bool mkt, int t, float px, string txt, color col, bool above) =>
-    float cr  = costTicks * syminfo.mintick / math.max(c.risk, syminfo.mintick)
-    float net = r - cr
-    int   h   = c.entBar < splitBar ? 1 : 2
-    for i = 0 to 2
-        if i == 0 or i == h
-            aN.set(i, aN.get(i) + 1)
-            aS.set(i, aS.get(i) + c.mfe)
-            aR.set(i, aR.get(i) + net)
-            aR2.set(i, aR2.get(i) + net * net)
-            if st == 5
-                aW.set(i, aW.get(i) + 1)
-            if c.mfe >= reactTarget
-                a1.set(i, a1.get(i) + 1)
-            if c.mfe >= reactTarget * 2
-                a2.set(i, a2.get(i) + 1)
-            if mkt
-                aM.set(i, aM.get(i) + 1)
-                aX.set(i, aX.get(i) + r)
-    c.st  := st
-    c.res := net
-    f_amdTag(c, t, px, txt + " " + f_amdR(net), col, above)
-    f_amdEdge(c, t)
-    alert('{"event":"AMD_D","side":"' + (c.dir == 1 ? "LONG" : "SHORT") + '","ticker":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","result":"' + (st == 5 ? "TARGET" : st == 6 ? "STOP" : "CLOSE") + '","r":' + str.tostring(net, "#.##") + '}', alert.freq_once_per_bar_close)
-
-f_amdSweepMsg(Amd c) =>
-    '{"event":"AMD_M","side":"' + (c.dir == 1 ? "LONG" : "SHORT") + '","ticker":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","range_hi":' + str.tostring(c.hi, format.mintick) + ',"range_lo":' + str.tostring(c.lo, format.mintick) + ',"sweep":' + str.tostring(c.ext, format.mintick) + '}'
-
-if amdOK and barstate.isconfirmed
-    // ── 1. FIN DE LA VENTANA DEL CICLO. Lo que siga vivo se cierra con el ÚLTIMO cierre DENTRO de ella
-    //       (close[1]): esta vela ya está fuera. Una acumulación nueva también cierra el ciclo anterior,
-    //       por si alguien configura ventanas solapadas.
-    if (amdCEnd or amdAStart) and amd.st >= 1 and amd.st <= 4
-        if amd.st == 4
-            float rM = (amd.dir == 1 ? close[1] - amd.ent : amd.ent - close[1]) / amd.risk
-            f_amdClose(amd, 7, rM, true, time[1], close[1], "D · cierre", color.gray, amd.dir == 1)
-        else if amd.st == 3
-            f_amdEnd(amd, 8, "la ventana se cerró sin retesteo", time[1])
-        else if amd.st == 2
-            f_amdEnd(amd, -1, "la ventana se cerró sin IFVG", time[1])
-        else
-            f_amdEnd(amd, -1, "la ventana se cerró sin barrido", time[1])
-
-    // ── 2. A · ACUMULACIÓN. Máximo y mínimo de la ventana; se congela en la primera vela fuera.
-    if amdAStart
-        if amd.st != -9
-            amdHist.push(amd)
-            // El ciclo en curso también se dibuja: el histórico guarda uno menos que el máximo.
-            while amdHist.size() >= amdMaxDraw
-                f_amdWipe(amdHist.shift())
-        amd := Amd.new(st = 0, hi = high, lo = low, t0 = time)
-        if amdShow
-            amd.bxA := box.new(time, high, time, low, xloc = xloc.bar_time, bgcolor = color.new(amdAccCol, 85), border_color = color.new(amdAccCol, 40), text = "A", text_color = color.new(amdAccCol, 0), text_size = size.tiny, text_halign = text.align_left, text_valign = text.align_top)
-    else if amd.st == 0 and amdInA
-        amd.hi := math.max(amd.hi, high)
-        amd.lo := math.min(amd.lo, low)
-        if amdShow
-            box.set_top(amd.bxA, amd.hi)
-            box.set_bottom(amd.bxA, amd.lo)
-            box.set_right(amd.bxA, time)
-    else if amd.st == 0 and amdAEnd
-        amd.t1 := time
-        float wA   = amd.hi - amd.lo
-        // Una acumulación es un rango ESTRECHO. Uno ancho es un mercado que se estaba desplazando.
-        bool  wide = amdAccMax > 0 and not na(dAtr) and wA > amdAccMax * dAtr
-        amd.st  := wide ? -1 : 1
-        amd.why := wide ? "A ancha: " + str.tostring(wA / dAtr, "#.##") + "× ATR diario" : ""
-        if amdShow
-            box.set_right(amd.bxA, time)
-            box.set_text(amd.bxA, (wide ? "A ✖ " : "A ") + str.tostring(wA, format.mintick))
-            if not wide
-                amd.lnH := line.new(time, amd.hi, time, amd.hi, xloc = xloc.bar_time, color = color.new(amdAccCol, 30), style = line.style_dotted)
-                amd.lnL := line.new(time, amd.lo, time, amd.lo, xloc = xloc.bar_time, color = color.new(amdAccCol, 30), style = line.style_dotted)
-
-    // ── 3. M · MANIPULACIÓN. Una MECHA más allá de un extremo del rango, dentro de su ventana. Barrer el
-    //       mínimo arma un largo y el máximo un corto. Mientras el barrido avanza, el extremo se mueve y
-    //       el reloj del IFVG vuelve a empezar: la manipulación no ha terminado.
-    if amd.st == 1 and amdInM
-        bool sL = low < amd.lo
-        bool sH = high > amd.hi
-        if sL or sH
-            // Las dos en la misma vela: manda hacia dónde cerró.
-            amd.dir    := sL and sH ? (close >= (amd.hi + amd.lo) / 2 ? 1 : -1) : sL ? 1 : -1
-            amd.ext    := amd.dir == 1 ? low : high
-            amd.extBar := bar_index
-            amd.st     := 2
-            amdSweep   := true
-            if amdShow
-                amd.lbM := label.new(time, amd.ext, "M", xloc = xloc.bar_time, style = amd.dir == 1 ? label.style_label_up : label.style_label_down, color = color.new(amdManCol, 15), textcolor = color.white, size = size.tiny)
-            alert(f_amdSweepMsg(amd), alert.freq_once_per_bar_close)
-    else if amd.st == 1 and amdMEnd
-        f_amdEnd(amd, -1, "sin barrido en la ventana de M", time)
-    else if amd.st == 2 and (amd.dir == 1 ? low < amd.ext : high > amd.ext)
-        amd.ext    := amd.dir == 1 ? low : high
-        amd.extBar := bar_index
-        if amdShow
-            label.set_xy(amd.lbM, time, amd.ext)
-
-    // Una trampa es CORTA. Si el precio se aleja demasiado del rango, es la expansión de verdad.
-    if amd.st == 2
-        float far = amd.dir == 1 ? amd.lo - amd.ext : amd.ext - amd.hi
-        if amdExtMax > 0 and not na(dAtr) and far > amdExtMax * dAtr
-            f_amdEnd(amd, -1, "M excesiva: " + str.tostring(far / dAtr, "#.##") + "× ATR diario, es expansión", time)
-
-    // ── 4. IFVG · CONFIRMACIÓN. Un FVG CONTRARIO al giro (bajista para un largo), nacido después de
-    //       cerrar la acumulación, que el cierre de ESTA vela invierte. Si hay varios, el más cercano al
-    //       precio: su borde es la entrada.
-    if amd.st == 2 and fvgs.size() > 0
-        int   pick = -1
-        float edge = na
-        for i = 0 to fvgs.size() - 1
-            Fvg f = fvgs.get(i)
-            if f.inverted and f.invBar == bar_index and f.isBull == (amd.dir == -1) and f.t0 >= amd.t1
-                float e = amd.dir == 1 ? f.top : f.bot
-                if pick < 0 or (amd.dir == 1 ? e > edge : e < edge)
-                    pick := i
-                    edge := e
-        if pick >= 0
-            Fvg fv = fvgs.get(pick)
-            color cd = amd.dir == 1 ? colDem : colSup
-            amd.cfBar := bar_index
-            // Stop más allá del extremo de la manipulación, con el mismo colchón que la prueba de bloques.
-            amd.stp   := amd.dir == 1 ? amd.ext - atrC * evalBufAtr : amd.ext + atrC * evalBufAtr
-            amd.tgt   := amd.dir == 1 ? amd.hi : amd.lo
-            amd.ent   := amdEntry == "Cierre de confirmación" ? close : edge
-            amd.risk  := math.max(amd.dir == 1 ? amd.ent - amd.stp : amd.stp - amd.ent, syminfo.mintick)
-            amd.st    := 3
-            float rr = (amd.dir == 1 ? amd.tgt - amd.ent : amd.ent - amd.tgt) / amd.risk
-            if amdShow
-                amd.bxF := box.new(fv.t0, fv.top, time, fv.bot, xloc = xloc.bar_time, bgcolor = color.new(cd, 75), border_color = color.new(cd, 30), text = "IFVG " + (amd.dir == 1 ? "▲" : "▼"), text_color = color.new(cd, 0), text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_center)
-                amd.lnS := line.new(time, amd.stp, time, amd.stp, xloc = xloc.bar_time, color = color.new(amdStpCol, 20), style = line.style_dashed)
-                // El extremo opuesto del rango pasa de referencia a OBJETIVO.
-                line lt = amd.dir == 1 ? amd.lnH : amd.lnL
-                if not na(lt)
-                    line.set_color(lt, color.new(cd, 10))
-                    line.set_style(lt, line.style_solid)
-                    line.set_width(lt, 2)
-            if rr <= 0
-                f_amdEnd(amd, 8, "el objetivo ya estaba recorrido al confirmar", time)
-            else
-                if amd.dir == 1
-                    amdConfL := true
-                else
-                    amdConfS := true
-                alert('{"event":"AMD_IFVG","side":"' + (amd.dir == 1 ? "LONG" : "SHORT") + '","ticker":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","entry_mode":"' + (amdEntry == "Cierre de confirmación" ? "CLOSE" : "RETEST") + '","entry":' + str.tostring(amd.ent, format.mintick) + ',"stop":' + str.tostring(amd.stp, format.mintick) + ',"target":' + str.tostring(amd.tgt, format.mintick) + ',"rr":' + str.tostring(rr, "#.##") + '}', alert.freq_once_per_bar_close)
-                if amdEntry == "Cierre de confirmación"
-                    amd.st     := 4
-                    amd.entBar := bar_index
-
-    // Sin confirmar todavía: o barrió también el otro lado —y la manipulación vigente es la nueva—, o se
-    // acabó el tiempo. La vela en que se marcó el extremo no puede además dar la vuelta al lado.
-    if amd.st == 2
-        if amdInM and bar_index > amd.extBar and (amd.dir == 1 ? high > amd.hi : low < amd.lo)
-            amd.dir    := -amd.dir
-            amd.ext    := amd.dir == 1 ? low : high
-            amd.extBar := bar_index
-            amdSweep   := true
-            if amdShow
-                label.set_xy(amd.lbM, time, amd.ext)
-                label.set_style(amd.lbM, amd.dir == 1 ? label.style_label_up : label.style_label_down)
-            alert(f_amdSweepMsg(amd), alert.freq_once_per_bar_close)
-        else if not amdInM
-            f_amdEnd(amd, -1, "se cerró la ventana de M sin IFVG", time)
-        else if bar_index - amd.extBar > amdConfBars
-            f_amdEnd(amd, -1, "sin IFVG en " + str.tostring(amdConfBars) + " velas", time)
-
-    // ── 5. ENTRADA PENDIENTE (retesteo). Orden límite en el borde del IFVG. Si el precio llega al
-    //       objetivo sin volver, no hubo operación: no cuenta como ganada.
-    if amd.st == 3 and bar_index > amd.cfBar
-        if amd.dir == 1 ? low <= amd.ent : high >= amd.ent
-            amd.st     := 4
-            amd.entBar := bar_index
-            // Llena y salta en la misma vela: sin orden intravela, se da por perdida.
-            if amd.dir == 1 ? low <= amd.stp : high >= amd.stp
-                f_amdClose(amd, 6, -1.0, false, time, amd.stp, "✖ stop", amdStpCol, amd.dir == -1)
-        else if amd.dir == 1 ? high >= amd.tgt : low <= amd.tgt
-            f_amdEnd(amd, 8, "llegó al objetivo sin retestear el IFVG", time)
-            f_amdTag(amd, time, amd.tgt, "D sin entrada", color.gray, amd.dir == 1)
-
-    // ── 6. D · DISTRIBUCIÓN. Stop primero y por mecha; luego el objetivo, el extremo opuesto del rango.
-    if amd.st == 4 and bar_index > amd.entBar
-        bool shA = amd.dir == 1 ? low <= amd.stp : high >= amd.stp
-        if not shA
-            amd.mfe := math.max(amd.mfe, (amd.dir == 1 ? high - amd.ent : amd.ent - low) / amd.risk)
-        if shA
-            f_amdClose(amd, 6, -1.0, false, time, amd.stp, "✖ stop", amdStpCol, amd.dir == -1)
-        else if amd.dir == 1 ? high >= amd.tgt : low <= amd.tgt
-            f_amdClose(amd, 5, (amd.dir == 1 ? amd.tgt - amd.ent : amd.ent - amd.tgt) / amd.risk, false, time, amd.tgt, "D ✓", amd.dir == 1 ? colDem : colSup, amd.dir == 1)
-
-    // Mientras el ciclo vive, sus niveles se extienden hasta la vela actual.
-    if amd.st >= 1 and amd.st <= 4
-        f_amdEdge(amd, time)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ DIBUJO (objetos pre-asignados; solo se mueven coordenadas)
@@ -2517,43 +2179,6 @@ f_nearRow(table t, int r, string k, bool found, float px, float sc, float dist, 
         c := dentro ? #FFD700 : cz
     f_row(t, r, k, v, c)
 
-// [v6.3] Estado del ciclo AMD para el panel.
-f_amdTxt() =>
-    string s  = "—"
-    color  c  = color.gray
-    string sd = amd.dir == 1 ? "▲" : "▼"
-    color  cd = amd.dir == 1 ? colDem : colSup
-    string sW = str.tostring(amd.hi - amd.lo, format.mintick)
-    if not amdOK
-        s := "n/d · solo intradía hasta 1H"
-    else if amd.st == -9
-        s := "esperando la primera acumulación"
-    else if amd.st == 0
-        s := "A formándose · " + sW + " pts"
-    else if amd.st == 1
-        s := "A ✓ " + sW + " pts · esperando barrido (M)"
-        c := color.white
-    else if amd.st == 2
-        s := "M " + sd + " barrió el " + (amd.dir == 1 ? "mínimo" : "máximo") + " · esperando IFVG " + str.tostring(bar_index - amd.extBar) + "/" + str.tostring(amdConfBars) + "v"
-        c := amdManCol
-    else if amd.st == 3 or amd.st == 4
-        float rr = (amd.dir == 1 ? amd.tgt - amd.ent : amd.ent - amd.tgt) / amd.risk
-        s := (amd.st == 3 ? "IFVG " + sd + " ✓ · límite " : "D " + sd + " en curso · entrada ") + str.tostring(amd.ent, format.mintick) + " · stop " + str.tostring(amd.stp, format.mintick) + " · obj " + str.tostring(amd.tgt, format.mintick) + " (" + str.tostring(rr, "#.#") + "R)"
-        c := cd
-    else if amd.st == 5
-        s := "D ✓ objetivo " + f_amdR(amd.res)
-        c := cd
-    else if amd.st == 6
-        s := "✖ stop " + f_amdR(amd.res)
-        c := amdStpCol
-    else if amd.st == 7
-        s := "ventana cerrada a mercado " + f_amdR(amd.res)
-    else if amd.st == 8
-        s := "sin entrada · " + amd.why
-    else
-        s := "descartado · " + amd.why
-    [s, c]
-
 f_dash() =>
     // Recuento de bloques vivos. Se hace aquí, no en el bucle de ciclo de vida, porque ese solo corre en
     // vela cerrada y el panel se dibuja también sobre la vela en curso.
@@ -2594,8 +2219,8 @@ f_dash() =>
                         sSc  := sc
                         sHt  := rk
 
-    var table tb = table.new(position.top_right, 2, 11, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v6.3", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
+    table.cell(tb, 0, 0, "S&D BLOCKS v6.5", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
@@ -2631,19 +2256,12 @@ f_dash() =>
                 fvgOpen += 1
     f_row(tb, 5, "Institucional", sVw + "  ·  " + sKz + "  ·  " + sLq + (fvgOn ? "  ·  FVG " + str.tostring(fvgOpen) + "/" + str.tostring(fvgInv) + " inv" : ""), not vwapOK ? color.gray : kzIn ? #00E676 : color.white)
 
-    // [v6.3] El ciclo AMD en una línea: en qué fase está y qué está esperando.
-    int fr = 6
-    if amdOn
-        [sAmd, cAmd] = f_amdTxt()
-        f_row(tb, 6, "AMD", sAmd, cAmd)
-        fr := 7
-
     // [v3.8] El embudo de formación es diagnóstico, no operativa: fuera del panel salvo que lo pidas.
     if showFunnel
-        f_row(tb, fr,     "Detectados", str.tostring(fnDet), color.white)
-        f_row(tb, fr + 1, "Sin huella ✖", str.tostring(fnFp) + " · " + f_pctTxt(fnFp, fnDet), fnDet > 0 and fnFp > fnDet / 2 ? #FFA726 : color.gray)
-        f_row(tb, fr + 2, "Duplicados ✖", str.tostring(fnDup) + " · " + f_pctTxt(fnDup, fnDet), color.gray)
-        f_row(tb, fr + 3, "Registrados", str.tostring(fnReg) + " · " + f_pctTxt(fnReg, fnDet), fnReg > 0 ? #00E676 : #FF5252)
+        f_row(tb, 6, "Detectados", str.tostring(fnDet), color.white)
+        f_row(tb, 7, "Sin huella ✖", str.tostring(fnFp) + " · " + f_pctTxt(fnFp, fnDet), fnDet > 0 and fnFp > fnDet / 2 ? #FFA726 : color.gray)
+        f_row(tb, 8, "Duplicados ✖", str.tostring(fnDup) + " · " + f_pctTxt(fnDup, fnDet), color.gray)
+        f_row(tb, 9, "Registrados", str.tostring(fnReg) + " · " + f_pctTxt(fnReg, fnDet), fnReg > 0 ? #00E676 : #FF5252)
 
 if showDash and barstate.islast
     f_dash()
@@ -2689,7 +2307,7 @@ f_evRow(table t, int r, string k, int n, int n1, int n2, float sm, int nt, float
     float p2   = n > 0 ? n2 / float(n) : na
     // [v3.7] NETA de costes: el coste medio en R de este corte, que no es el mismo para todos porque
     // depende del tamaño de la R de cada operación.
-    float esp  = n <= 0 ? na : (n2 * (reactTarget * 2) + sx - (n - n2 - nm) * reactTarget - sc) / n
+    float esp  = n <= 0 ? na : (n2 * (reactTarget * 2) + sx - (n - n2 - nm) - sc) / n
     float freq = total > 0 ? n / float(total) * 100.0 : na
     float pto  = n > 0 ? nt / float(n) * 100.0 : na
     // [v5.4] Lo que de verdad se sacó de las salidas A MERCADO — reloj agotado o bloque invalidado, todo
@@ -2718,7 +2336,7 @@ f_evRow(table t, int r, string k, int n, int n1, int n2, float sm, int nt, float
 f_evMini(table t, int r, string k, int n, int n2, float sc, int nm, float sx, float sq, bool head) =>
     float p2  = n > 0 ? n2 / float(n) : na
     // [v4.6] Misma fórmula de tres desenlaces que la tabla completa.
-    float esp = n <= 0 ? na : (n2 * (reactTarget * 2) + sx - (n - n2 - nm) * reactTarget - sc) / n
+    float esp = n <= 0 ? na : (n2 * (reactTarget * 2) + sx - (n - n2 - nm) - sc) / n
     float ci  = f_ci95(n, esp, sq)
     color c   = n < evalMinN ? color.gray : color.white
     color ce  = f_espCol(n, esp, ci)
@@ -2728,39 +2346,11 @@ f_evMini(table t, int r, string k, int n, int n2, float sc, int nm, float sx, fl
     table.cell(t, 3, r, na(esp) ? "—" : (esp >= 0 ? "+" : "") + str.tostring(esp, "#.##"), text_color = ce, text_size = size.tiny, text_halign = text.align_right)
     table.cell(t, 4, r, na(ci) ? "—" : "±" + str.tostring(ci, "#.##"), text_color = na(ci) ? color.gray : c, text_size = size.tiny, text_halign = text.align_right)
 
-// [v6.3] Fila del setup AMD. Mismas columnas que un corte con UNA diferencia, que la leyenda dice: su
-// esperanza sale en SU objetivo —el extremo opuesto del rango— y no en el doble del objetivo base,
-// porque ese es el trade que el modelo propone. El % de objetivos alcanzados va junto al nombre.
-f_amdRow(table t, int r, string k, int i, bool full) =>
-    int   n   = aN.get(i)
-    float esp = n > 0 ? aR.get(i) / n : na
-    float ci  = f_ci95(n, esp, aR2.get(i))
-    int   nm  = aM.get(i)
-    float pxr = nm > 0 ? aX.get(i) / nm : na
-    color c   = n < evalMinN ? color.gray : color.white
-    color ce  = f_espCol(n, esp, ci)
-    string nk = k + (n > 0 ? " · obj " + str.tostring(aW.get(i) / float(n) * 100, "#") + "%" : "")
-    table.cell(t, 0, r, nk, text_color = #FFA726, text_size = size.tiny, text_halign = text.align_left)
-    table.cell(t, 1, r, str.tostring(n), text_color = c, text_size = size.tiny, text_halign = text.align_right)
-    if full
-        table.cell(t, 2, r, "—", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(t, 3, r, n > 0 ? str.tostring(a1.get(i) / float(n) * 100, "#") + "%" : "—", text_color = c, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(t, 4, r, n > 0 ? str.tostring(a2.get(i) / float(n) * 100, "#") + "%" : "—", text_color = c, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(t, 5, r, n > 0 ? str.tostring(aS.get(i) / n, "#.##") : "—", text_color = c, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(t, 6, r, n > 0 ? str.tostring(nm / float(n) * 100, "#") + "%" : "—", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(t, 7, r, na(pxr) ? "—" : (pxr >= 0 ? "+" : "") + str.tostring(pxr, "#.##"), text_color = na(pxr) ? color.gray : c, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(t, 8, r, na(esp) ? "—" : (esp >= 0 ? "+" : "") + str.tostring(esp, "#.##"), text_color = ce, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(t, 9, r, na(ci) ? "—" : "±" + str.tostring(ci, "#.##"), text_color = na(ci) ? color.gray : c, text_size = size.tiny, text_halign = text.align_right)
-    else
-        table.cell(t, 2, r, n > 0 ? str.tostring(a2.get(i) / float(n) * 100, "#") + "%" : "—", text_color = c, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(t, 3, r, na(esp) ? "—" : (esp >= 0 ? "+" : "") + str.tostring(esp, "#.##"), text_color = ce, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(t, 4, r, na(ci) ? "—" : "±" + str.tostring(ci, "#.##"), text_color = na(ci) ? color.gray : c, text_size = size.tiny, text_halign = text.align_right)
-
 f_evalTable() =>
     bool   full = evalMode == "Completo"
     string sT1  = str.tostring(reactTarget, "#.#") + "R"
     string sT2  = str.tostring(reactTarget * 2, "#.#") + "R"
-    var table ev = table.new(position.bottom_right, 10, 39, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
+    var table ev = table.new(position.bottom_right, 10, 36, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
     array<string> bNames = array.from("Grado A+", "Grado A", "Grado B", "con FVG", "con BOS", "  · de ellos CHoCH", "con DISPLACEMENT", "con LIQ", "  · de ellos POOL", "con MTF", "base 1 vela", "base tranquila ≤" + str.tostring(baseVolMax, "#.#") + "x", "origen del movimiento", "Mitigation Block", "Rejection Block", "con MOM", "toque en RTH", "a favor del sesgo", "con descuento (al nacer)", "  · y al tocar", "  · y en OTE " + str.tostring(math.min(oteLo, oteHi) * 100, "#") + "-" + str.tostring(math.max(oteLo, oteHi) * 100, "#") + "%", "muro lejos ≥" + str.tostring(rrMin, "#.#") + "R", "llegada suave", "a favor del VWAP", "en banda " + str.tostring(vwapSigma, "#.#") + "σ", "en kill zone", "sobre liquidez D/W", "Marco " + f_tfLabel(tf1), "Marco " + f_tfLabel(tf2), "Marco " + f_tfLabel(tf3), "▸ 1ª MITAD", "▸ 2ª MITAD")
 
     if full
@@ -2777,20 +2367,13 @@ f_evalTable() =>
         f_evRow(ev, 1, "TODOS", evN, evHeld, evHeld2, evRSum, evTimeout, evCSum, evMkt, evXSum, evR2Sum, evN, true)
         for k = 0 to 31
             f_evRow(ev, k + 2, bNames.get(k), bN.get(k), b1.get(k), b2.get(k), bS.get(k), bT.get(k), bC.get(k), bM.get(k), bX.get(k), bR2.get(k), evN, false)
-        // [v6.3] El setup AMD, con sus dos mitades, debajo de los cortes y antes del pie.
-        int rf = 34
-        if amdOK
-            f_amdRow(ev, 34, "AMD · setup propio", 0, true)
-            f_amdRow(ev, 35, "  · 1ª mitad", 1, true)
-            f_amdRow(ev, 36, "  · 2ª mitad", 2, true)
-            rf := 37
-        table.cell(ev, 0, rf, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
+        table.cell(ev, 0, 34, "sin resolver: " + str.tostring(zUnres) + " · mitades en v" + str.tostring(splitBar) + (oneAtATime ? " · UNA OPERACIÓN A LA VEZ" : ""), text_color = oneAtATime ? #FFD700 : color.gray, text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 8
-            table.cell(ev, c, rf, "", text_size = size.tiny)
-        table.cell(ev, 9, rf, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
-        table.cell(ev, 0, rf + 1, "VERDE = el IC excluye el cero · AMARILLO = la muestra no decide · M/R = R media de las salidas a mercado (reloj o invalidación, nunca stop) · 32 cortes: exígelo en las dos MITADES y en los dos activos" + (amdOK ? " · AMD: su Esp. sale en SU objetivo (el extremo opuesto del rango), no en " + sT2 : ""), text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+            table.cell(ev, c, 34, "", text_size = size.tiny)
+        table.cell(ev, 9, 34, "stop " + sT1 + " / " + str.tostring(reactWindow) + "v · " + str.tostring(costTicks, "#.#") + "t", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
+        table.cell(ev, 0, 35, "VERDE = el IC excluye el cero · AMARILLO = la muestra no decide · M/R = R media de las salidas a mercado (reloj o invalidación, nunca stop) · 32 cortes: exígelo en las dos MITADES y en los dos activos", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 9
-            table.cell(ev, c, rf + 1, "", text_size = size.tiny)
+            table.cell(ev, c, 35, "", text_size = size.tiny)
     else
         table.cell(ev, 0, 0, "Verificación", text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_left)
         table.cell(ev, 1, 0, "N",       text_color = #FFD700, bgcolor = #161B22, text_size = size.tiny, text_halign = text.align_right)
@@ -2800,13 +2383,9 @@ f_evalTable() =>
         f_evMini(ev, 1, "TODOS",      evN,        evHeld2,    evCSum,     evMkt,      evXSum,     evR2Sum,     true)
         f_evMini(ev, 2, "▸ 1ª mitad", bN.get(30), b2.get(30), bC.get(30), bM.get(30), bX.get(30), bR2.get(30), false)
         f_evMini(ev, 3, "▸ 2ª mitad", bN.get(31), b2.get(31), bC.get(31), bM.get(31), bX.get(31), bR2.get(31), false)
-        int rs = 4
-        if amdOK
-            f_amdRow(ev, 4, "AMD", 0, false)
-            rs := 5
-        table.cell(ev, 0, rs, "verde solo si el IC excluye el cero · las mitades deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
+        table.cell(ev, 0, 4, "verde solo si el IC excluye el cero · las mitades deben coincidir en signo", text_color = color.new(color.gray, 35), text_size = size.tiny, text_halign = text.align_left)
         for c = 1 to 4
-            table.cell(ev, c, rs, "", text_size = size.tiny)
+            table.cell(ev, c, 4, "", text_size = size.tiny)
 
 if showEval and barstate.islast
     f_evalTable()
@@ -2959,8 +2538,3 @@ alertcondition(touchDemQ, "🟢 DEMANDA tocada",    "{{ticker}} {{interval}} · 
 alertcondition(touchSupQ, "🔴 OFERTA tocada",     "{{ticker}} {{interval}} · El precio entra en una oferta de score suficiente @ {{close}}")
 alertcondition(touched,   "👀 Bloque tocado (cualquiera)", "{{ticker}} {{interval}} · El precio entra en un bloque @ {{close}}")
 alertcondition(brokeAny,  "⚠️ Bloque roto",       "{{ticker}} {{interval}} · Bloque invalidado @ {{close}}")
-// [v6.3] AMD. El JSON (AMD_M, AMD_IFVG con entrada/stop/objetivo, AMD_D con el resultado) sale por
-// "Cualquier llamada a alert()", igual que el de los bloques.
-alertcondition(amdSweep, "🟧 AMD · manipulación",       "{{ticker}} {{interval}} · AMD: el precio barrió un extremo del rango de acumulación @ {{close}}")
-alertcondition(amdConfL, "🟩 AMD · IFVG confirma LARGO", "{{ticker}} {{interval}} · AMD: barrido del mínimo + IFVG alcista. Setup largo @ {{close}}")
-alertcondition(amdConfS, "🟥 AMD · IFVG confirma CORTO", "{{ticker}} {{interval}} · AMD: barrido del máximo + IFVG bajista. Setup corto @ {{close}}")
