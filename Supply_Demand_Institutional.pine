@@ -1,8 +1,21 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v6.6
+// SUPPLY & DEMAND BLOCKS · INSTITUTIONAL v6.7
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
+//
+// v6.7 — TRADING AUTOMÁTICO: EL SCRIPT PASA DE INDICATOR A STRATEGY
+//   Cada bloque nuevo abre una operación A MERCADO: demanda (verde) → compra, oferta (roja) → venta.
+//   Grupo ⑨ en los settings: activar/desactivar, dirección, lote 1-10, stop, take profit y qué hacer
+//   si aparece un bloque contrario con la posición abierta. Por defecto:
+//   · STOP a 2 ticks más allá del distal (bajo la demanda, sobre la oferta).
+//   · TAKE PROFIT a 2R (dos veces la distancia entrada → stop). Alternativa: ticks fijos.
+//   · Solo bloques DIBUJADOS (score ≥ "Score mínimo para dibujar") y una posición a la vez.
+//   La orden sale al cierre de la vela en que se registra el bloque y se llena en la apertura de la
+//   siguiente; stop y objetivo se calculan con ese cierre como entrada de referencia.
+//   Pine no admite alertcondition() en estrategias: las alertas de toque y rotura pasan a alert() y se
+//   activan con "Cualquier llamada a alert()". Cada entrada lleva alert_message JSON para webhook.
+//   Comisión y deslizamiento se configuran en Propiedades: sin ellos el backtest sale optimista.
 //
 // v6.6 — TRES HIPÓTESIS DE FORMACIÓN, FIJADAS ANTES DE MIRAR EL RESULTADO
 //   La verificación en vivo (v6.5, MNQ y MES en 5m) dio −0.27R y −0.40R para todos los bloques, y
@@ -687,8 +700,9 @@
 //   de admitir estructura más ruidosa.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("Supply & Demand Blocks Institutional v6.6", shorttitle="S&D Blocks", overlay=true,
-     max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
+strategy("Supply & Demand Blocks Institutional v6.7", shorttitle="S&D Blocks", overlay=true,
+     max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0, calc_on_every_tick=false)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ TIPO
@@ -891,6 +905,18 @@ liqShow  = input.bool(false, "Dibujar PDH/PDL y PWH/PWL", group=gIn)
 liqNear  = input.float(0.5, "Distancia para contar como 'sobre el nivel' (×ATR)", minval=0.1, maxval=3.0, step=0.1, group=gIn)
 liqDCol  = input.color(#BDBDBD, "día", inline="lq", group=gIn)
 liqWCol  = input.color(#FFB300, "semana", inline="lq", group=gIn)
+
+gTr = "⑨ Trading automático"
+trOn       = input.bool(true, "Activar trading automático", group=gTr, tooltip="[v6.7] Cada bloque nuevo abre una operación A MERCADO: demanda (verde) → compra, oferta (roja) → venta. Apagado, el script solo dibuja y mide.")
+trDir      = input.string("Ambas", "Dirección", options=["Ambas", "Solo compras", "Solo ventas"], group=gTr)
+trQty      = input.int(1, "Tamaño del lote (contratos)", minval=1, maxval=10, group=gTr)
+trDrawn    = input.bool(true, "Solo bloques dibujados (score ≥ umbral de dibujo)", group=gTr, tooltip="Apagado, opera todo bloque registrado aunque no pase el 'Score mínimo para dibujar' de ⑥ Visual.")
+trSlMode   = input.string("Bloque ± ticks", "Stop loss", options=["Bloque ± ticks", "Ticks desde la entrada"], group=gTr, tooltip="BLOQUE ± TICKS: N ticks por debajo del distal de la demanda o por encima del de la oferta. TICKS DESDE LA ENTRADA: distancia fija desde el precio de entrada.")
+trSlTicks  = input.int(2, "Stop loss: ticks", minval=0, maxval=5000, group=gTr)
+trTpMode   = input.string("Ratio R:R", "Take profit", options=["Ratio R:R", "Ticks desde la entrada"], group=gTr, tooltip="RATIO R:R: el objetivo queda a N veces la distancia entrada → stop. TICKS: distancia fija desde la entrada.")
+trTpRR     = input.float(2.0, "Take profit: ratio R:R", minval=0.1, step=0.1, group=gTr)
+trTpTicks  = input.int(40, "Take profit: ticks", minval=1, maxval=20000, group=gTr)
+trOpp      = input.string("Ignorar", "Bloque contrario con posición abierta", options=["Ignorar", "Invertir posición"], group=gTr, tooltip="IGNORAR: mientras haya una posición abierta no se abre otra. INVERTIR: un bloque de color contrario cierra la posición y abre la opuesta.")
 arrMax   = input.float(2.0, "Llegada: recorrido máximo para contarla suave (×ATR)", minval=0.5, step=0.1, group=gPd, tooltip="[v4.1] Recorrido neto del precio en las últimas N velas al tocar el bloque. Por encima de este umbral la llegada es una ofensiva, no un retroceso, y Seiden esperaría que atravesara el nivel.")
 
 reactUnit   = input.string("R del bloque", "Unidad de la reacción", options=["R del bloque", "ATR"], group=gEv, tooltip="[v3.1] R DEL BLOQUE: la reacción se mide en múltiplos de la distancia proximal→distal (más el colchón), que es exactamente lo que arriesgas operando ese bloque. ATR: distancia absoluta, igual para todos los bloques. [v4.6] La unidad que elijas FIJA TAMBIÉN EL STOP. Hasta v4.5, con ATR el objetivo se medía en ATR pero el stop seguía en el distal: dos distancias distintas, y la carrera dejaba de ser simétrica. Ahora objetivo y stop están siempre a la misma distancia, así que el ~50% de referencia vale en los dos modos y cualquier cifra por encima significa algo.")
@@ -1687,6 +1713,30 @@ if barstate.isconfirmed
 
 bool newBlock = r1 == 3 or r2 == 3 or r3 == 3
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ TRADING AUTOMÁTICO  [v6.7]
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// El bloque recién registrado es el último del array: la limpieza corre antes del alta y f_addZone
+// siempre hace push. Si nacen dos en la misma vela se opera el del marco más alto (tf3 > tf2 > tf1).
+if trOn and newBlock and barstate.isconfirmed
+    Zone nz    = zones.last()
+    bool dirOK = nz.isDem ? trDir != "Solo ventas" : trDir != "Solo compras"
+    bool scOK  = not trDrawn or f_score(nz, 0) >= showMinScore
+    bool posOK = strategy.position_size == 0 or (trOpp == "Invertir posición" and (nz.isDem ? strategy.position_size < 0 : strategy.position_size > 0))
+    if dirOK and scOK and posOK
+        float tk    = syminfo.mintick
+        float entry = close
+        float sl    = trSlMode == "Bloque ± ticks" ? (nz.isDem ? nz.bot - trSlTicks * tk : nz.top + trSlTicks * tk) : (nz.isDem ? entry - trSlTicks * tk : entry + trSlTicks * tk)
+        float risk  = nz.isDem ? entry - sl : sl - entry
+        float tpD   = trTpMode == "Ratio R:R" ? risk * trTpRR : trTpTicks * tk
+        float tp    = nz.isDem ? entry + tpD : entry - tpD
+        // Con stop "desde la entrada" y 0 ticks no hay riesgo definido: no se opera.
+        if risk > 0
+            string oid = nz.isDem ? "Buy" : "Sell"
+            string msg = '{"event":"SD_ORDER","side":"' + (nz.isDem ? "buy" : "sell") + '","ticker":"' + syminfo.ticker + '","qty":' + str.tostring(trQty) + ',"sl":' + str.tostring(sl, format.mintick) + ',"tp":' + str.tostring(tp, format.mintick) + ',"tf":"' + nz.tfLbl + '"}'
+            strategy.entry(oid, nz.isDem ? strategy.long : strategy.short, qty = trQty, comment = oid + " " + nz.tfLbl, alert_message = msg)
+            strategy.exit(oid + " X", from_entry = oid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
+
 // [v4.6] CONFLUENCIA MTF: una sola pasada por vela cerrada, DESPUÉS de dar de alta los bloques nuevos y
 // antes del ciclo de vida, que es donde se consume. El valor queda en el propio bloque y todo lo de abajo
 // —score, panel, dibujo, tabla— lee el mismo número. Antes cada consumidor la recalculaba recorriendo el
@@ -2305,7 +2355,7 @@ f_dash() =>
                         sHt  := rk
 
     var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(#0D1117, 5), border_width = 1, border_color = color.new(color.gray, 80))
-    table.cell(tb, 0, 0, "S&D BLOCKS v6.6", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
+    table.cell(tb, 0, 0, "S&D BLOCKS v6.7", text_color = #FFD700, bgcolor = #161B22, text_size = size.small)
     table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = #161B22, text_size = size.small)
 
     // Lo accionable primero: dónde está el siguiente nivel a cada lado.
@@ -2623,9 +2673,16 @@ if paTagOn and not na(paFinal) and barstate.isconfirmed
 // ██ ALERTAS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // Para webhook usa "Cualquier llamada a alert()": entrega el JSON completo del bloque (SD_BLOCK).
+// [v6.7] Una estrategia no admite alertcondition(): los eventos salen por alert() y se eligen aquí.
+// Las órdenes llevan su propio JSON (SD_ORDER) en alert_message: alerta "Ejecuciones de órdenes".
+alTouch = input.bool(true,  "Alerta: bloque de score suficiente tocado", group=gTr)
+alBreak = input.bool(false, "Alerta: bloque roto", group=gTr)
 
-alertcondition(newBlock,  "🧱 Bloque nuevo",      "{{ticker}} {{interval}} · Bloque de oferta/demanda registrado")
-alertcondition(touchDemQ, "🟢 DEMANDA tocada",    "{{ticker}} {{interval}} · El precio entra en una demanda de score suficiente @ {{close}}")
-alertcondition(touchSupQ, "🔴 OFERTA tocada",     "{{ticker}} {{interval}} · El precio entra en una oferta de score suficiente @ {{close}}")
-alertcondition(touched,   "👀 Bloque tocado (cualquiera)", "{{ticker}} {{interval}} · El precio entra en un bloque @ {{close}}")
-alertcondition(brokeAny,  "⚠️ Bloque roto",       "{{ticker}} {{interval}} · Bloque invalidado @ {{close}}")
+if barstate.isconfirmed
+    string pfx = syminfo.ticker + " " + timeframe.period + " · "
+    if alTouch and touchDemQ
+        alert(pfx + "🟢 DEMANDA tocada @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if alTouch and touchSupQ
+        alert(pfx + "🔴 OFERTA tocada @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if alBreak and brokeAny
+        alert(pfx + "⚠️ Bloque roto @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
