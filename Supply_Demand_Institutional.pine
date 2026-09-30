@@ -9,7 +9,7 @@
 //   Grupo ⑨ en los settings: activar/desactivar, dirección, lote 1-10, stop, take profit y qué hacer
 //   si aparece un bloque contrario con la posición abierta. Por defecto:
 //   · STOP a 2 ticks más allá del distal (bajo la demanda, sobre la oferta).
-//   · TAKE PROFIT a 2R (dos veces la distancia entrada → stop). Alternativa: ticks fijos.
+//   · TAKE PROFIT a 3R (tres veces la distancia entrada → stop). Alternativa: ticks fijos.
 //   · Solo bloques DIBUJADOS (score ≥ "Score mínimo para dibujar") y una posición a la vez.
 //   La orden sale al cierre de la vela en que se registra el bloque y se llena en la apertura de la
 //   siguiente; stop y objetivo se calculan con ese cierre como entrada de referencia.
@@ -914,7 +914,7 @@ trDrawn    = input.bool(true, "Solo bloques dibujados (score ≥ umbral de dibuj
 trSlMode   = input.string("Bloque ± ticks", "Stop loss", options=["Bloque ± ticks", "Ticks desde la entrada"], group=gTr, tooltip="BLOQUE ± TICKS: N ticks por debajo del distal de la demanda o por encima del de la oferta. TICKS DESDE LA ENTRADA: distancia fija desde el precio de entrada.")
 trSlTicks  = input.int(2, "Stop loss: ticks", minval=0, maxval=5000, group=gTr)
 trTpMode   = input.string("Ratio R:R", "Take profit", options=["Ratio R:R", "Ticks desde la entrada"], group=gTr, tooltip="RATIO R:R: el objetivo queda a N veces la distancia entrada → stop. TICKS: distancia fija desde la entrada.")
-trTpRR     = input.float(2.0, "Take profit: ratio R:R", minval=0.1, step=0.1, group=gTr)
+trTpRR     = input.float(3.0, "Take profit: ratio R:R", minval=0.1, step=0.1, group=gTr)
 trTpTicks  = input.int(40, "Take profit: ticks", minval=1, maxval=20000, group=gTr)
 trOpp      = input.string("Ignorar", "Bloque contrario con posición abierta", options=["Ignorar", "Invertir posición"], group=gTr, tooltip="IGNORAR: mientras haya una posición abierta no se abre otra. INVERTIR: un bloque de color contrario cierra la posición y abre la opuesta.")
 arrMax   = input.float(2.0, "Llegada: recorrido máximo para contarla suave (×ATR)", minval=0.5, step=0.1, group=gPd, tooltip="[v4.1] Recorrido neto del precio en las últimas N velas al tocar el bloque. Por encima de este umbral la llegada es una ofensiva, no un retroceso, y Seiden esperaría que atravesara el nivel.")
