@@ -13,6 +13,9 @@
 //   · Solo bloques DIBUJADOS (score ≥ "Score mínimo para dibujar") y una posición a la vez.
 //   La orden sale al cierre de la vela en que se registra el bloque y se llena en la apertura de la
 //   siguiente; stop y objetivo se calculan con ese cierre como entrada de referencia.
+//   calc_on_every_tick=true: el dibujo, el panel y la tabla se actualizan en cada tick como en el
+//   indicador (sin ello barstate.islast no llega a la vela en curso). Las órdenes NO cambian: exigen
+//   barstate.isconfirmed, así que en vivo salen al cierre igual que en el backtest.
 //   Pine no admite alertcondition() en estrategias: las alertas de toque y rotura pasan a alert() y se
 //   activan con "Cualquier llamada a alert()". Cada entrada lleva alert_message JSON para webhook.
 //   Comisión y deslizamiento se configuran en Propiedades: sin ellos el backtest sale optimista.
@@ -702,7 +705,7 @@
 
 strategy("Supply & Demand Blocks Institutional v6.7", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500,
-     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0, calc_on_every_tick=false)
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0, calc_on_every_tick=true)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ TIPO
