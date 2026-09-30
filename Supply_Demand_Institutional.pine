@@ -5,19 +5,19 @@
 // Bloques de oferta y demanda + lectura de Price Action · TF operativo 1-15 min · MNQ / MES
 //
 // v6.7 — TRADING AUTOMÁTICO: EL SCRIPT PASA DE INDICATOR A STRATEGY
-//   Cada bloque nuevo abre una operación A MERCADO: demanda (verde) → compra, oferta (roja) → venta.
-//   Grupo ⑨ en los settings: activar/desactivar, dirección, lote 1-10, stop, take profit y qué hacer
-//   si aparece un bloque contrario con la posición abierta. Por defecto:
+//   REGLA ÚNICA: cada bloque que se PINTA abre su operación A MERCADO en el mismo tick en que aparece.
+//   Demanda (verde) → compra, oferta (roja) → venta. Cada operación lleva SU stop y SU objetivo.
+//   Grupo ⑨: activar/desactivar, dirección, lote 1-10, stop y take profit. Por defecto:
 //   · STOP a 2 ticks más allá del distal (bajo la demanda, sobre la oferta).
 //   · TAKE PROFIT a 3R (tres veces la distancia entrada → stop). Alternativa: ticks fijos.
-//   · Solo bloques DIBUJADOS (score ≥ "Score mínimo para dibujar") y una posición a la vez.
-//   La orden sale al cierre de la vela en que se registra el bloque y se llena en la apertura de la
-//   siguiente; stop y objetivo se calculan con ese cierre como entrada de referencia.
-//   calc_on_every_tick=true: el dibujo, el panel y la tabla se actualizan en cada tick como en el
-//   indicador (sin ello barstate.islast no llega a la vela en curso). Las órdenes NO cambian: exigen
-//   barstate.isconfirmed, así que en vivo salen al cierre igual que en el backtest.
-//   Pine no admite alertcondition() en estrategias: las alertas de toque y rotura pasan a alert() y se
-//   activan con "Cualquier llamada a alert()". Cada entrada lleva alert_message JSON para webhook.
+//   Varios bloques del mismo color se acumulan (pyramiding 10, editable en Propiedades). Un bloque de
+//   color contrario invierte la posición: en futuros no se puede estar largo y corto a la vez.
+//   En vivo la orden sale en el tick en que se pinta el bloque; en el backtest, al cierre de esa vela
+//   (se llena en la apertura de la siguiente), porque las velas históricas solo se calculan al cierre.
+//   calc_on_every_tick=true hace que dibujo, panel y tabla se actualicen en cada tick; un `varip` por
+//   marco impide que el mismo bloque dispare una orden en cada tick.
+//   Pine no admite alertcondition() en estrategias: las alertas de toque y rotura pasan a alert().
+//   Cada entrada lleva alert_message JSON (SD_ORDER) para webhook: alerta "Ejecuciones de órdenes".
 //   Comisión y deslizamiento se configuran en Propiedades: sin ellos el backtest sale optimista.
 //
 // v6.6 — TRES HIPÓTESIS DE FORMACIÓN, FIJADAS ANTES DE MIRAR EL RESULTADO
@@ -705,7 +705,7 @@
 
 strategy("Supply & Demand Blocks Institutional v6.7", shorttitle="S&D Blocks", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500,
-     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0, calc_on_every_tick=true)
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=10, calc_on_every_tick=true)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ TIPO
@@ -910,16 +910,14 @@ liqDCol  = input.color(#BDBDBD, "día", inline="lq", group=gIn)
 liqWCol  = input.color(#FFB300, "semana", inline="lq", group=gIn)
 
 gTr = "⑨ Trading automático"
-trOn       = input.bool(true, "Activar trading automático", group=gTr, tooltip="[v6.7] Cada bloque nuevo abre una operación A MERCADO: demanda (verde) → compra, oferta (roja) → venta. Apagado, el script solo dibuja y mide.")
+trOn       = input.bool(true, "Activar trading automático", group=gTr, tooltip="[v6.7] Cada bloque que se PINTA abre su operación A MERCADO en ese mismo momento: demanda (verde) → compra, oferta (roja) → venta, con su stop y su take profit. Apagado, el script solo dibuja y mide.")
 trDir      = input.string("Ambas", "Dirección", options=["Ambas", "Solo compras", "Solo ventas"], group=gTr)
 trQty      = input.int(1, "Tamaño del lote (contratos)", minval=1, maxval=10, group=gTr)
-trDrawn    = input.bool(true, "Solo bloques dibujados (score ≥ umbral de dibujo)", group=gTr, tooltip="Apagado, opera todo bloque registrado aunque no pase el 'Score mínimo para dibujar' de ⑥ Visual.")
 trSlMode   = input.string("Bloque ± ticks", "Stop loss", options=["Bloque ± ticks", "Ticks desde la entrada"], group=gTr, tooltip="BLOQUE ± TICKS: N ticks por debajo del distal de la demanda o por encima del de la oferta. TICKS DESDE LA ENTRADA: distancia fija desde el precio de entrada.")
 trSlTicks  = input.int(2, "Stop loss: ticks", minval=0, maxval=5000, group=gTr)
 trTpMode   = input.string("Ratio R:R", "Take profit", options=["Ratio R:R", "Ticks desde la entrada"], group=gTr, tooltip="RATIO R:R: el objetivo queda a N veces la distancia entrada → stop. TICKS: distancia fija desde la entrada.")
 trTpRR     = input.float(3.0, "Take profit: ratio R:R", minval=0.1, step=0.1, group=gTr)
 trTpTicks  = input.int(40, "Take profit: ticks", minval=1, maxval=20000, group=gTr)
-trOpp      = input.string("Ignorar", "Bloque contrario con posición abierta", options=["Ignorar", "Invertir posición"], group=gTr, tooltip="IGNORAR: mientras haya una posición abierta no se abre otra. INVERTIR: un bloque de color contrario cierra la posición y abre la opuesta.")
 arrMax   = input.float(2.0, "Llegada: recorrido máximo para contarla suave (×ATR)", minval=0.5, step=0.1, group=gPd, tooltip="[v4.1] Recorrido neto del precio en las últimas N velas al tocar el bloque. Por encima de este umbral la llegada es una ofensiva, no un retroceso, y Seiden esperaría que atravesara el nivel.")
 
 reactUnit   = input.string("R del bloque", "Unidad de la reacción", options=["R del bloque", "ATR"], group=gEv, tooltip="[v3.1] R DEL BLOQUE: la reacción se mide en múltiplos de la distancia proximal→distal (más el colchón), que es exactamente lo que arriesgas operando ese bloque. ATR: distancia absoluta, igual para todos los bloques. [v4.6] La unidad que elijas FIJA TAMBIÉN EL STOP. Hasta v4.5, con ATR el objetivo se medía en ATR pero el stop seguía en el distal: dos distancias distintas, y la carrera dejaba de ser simétrica. Ahora objetivo y stop están siempre a la misma distancia, así que el ~50% de referencia vale en los dos modos y cualquier cifra por encima significa algo.")
@@ -1719,34 +1717,40 @@ bool newBlock = r1 == 3 or r2 == 3 or r3 == 3
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ TRADING AUTOMÁTICO  [v6.7]
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// El bloque recién registrado es el último del array: la limpieza corre antes del alta y f_addZone
-// siempre hace push. Si nacen dos en la misma vela se opera el del marco más alto (tf3 > tf2 > tf1).
-if trOn and newBlock and barstate.isconfirmed
-    Zone nz    = zones.last()
-    bool dirOK = nz.isDem ? trDir != "Solo ventas" : trDir != "Solo compras"
-    bool scOK  = not trDrawn or f_score(nz, 0) >= showMinScore
-    bool posOK = strategy.position_size == 0 or (trOpp == "Invertir posición" and (nz.isDem ? strategy.position_size < 0 : strategy.position_size > 0))
-    if dirOK and scOK and posOK
-        float tk    = syminfo.mintick
-        float entry = close
-        float sl    = trSlMode == "Bloque ± ticks" ? (nz.isDem ? nz.bot - trSlTicks * tk : nz.top + trSlTicks * tk) : (nz.isDem ? entry - trSlTicks * tk : entry + trSlTicks * tk)
-        float risk  = nz.isDem ? entry - sl : sl - entry
-        float tpD   = trTpMode == "Ratio R:R" ? risk * trTpRR : trTpTicks * tk
-        float tp    = nz.isDem ? entry + tpD : entry - tpD
-        // Con stop "desde la entrada" y 0 ticks no hay riesgo definido: no se opera.
-        if risk > 0
-            string oid = nz.isDem ? "Buy" : "Sell"
-            string msg = '{"event":"SD_ORDER","side":"' + (nz.isDem ? "buy" : "sell") + '","ticker":"' + syminfo.ticker + '","qty":' + str.tostring(trQty) + ',"sl":' + str.tostring(sl, format.mintick) + ',"tp":' + str.tostring(tp, format.mintick) + ',"tf":"' + nz.tfLbl + '"}'
-            strategy.entry(oid, nz.isDem ? strategy.long : strategy.short, qty = trQty, comment = oid + " " + nz.tfLbl, alert_message = msg)
-            strategy.exit(oid + " X", from_entry = oid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
-
-// [v4.6] CONFLUENCIA MTF: una sola pasada por vela cerrada, DESPUÉS de dar de alta los bloques nuevos y
-// antes del ciclo de vida, que es donde se consume. El valor queda en el propio bloque y todo lo de abajo
-// —score, panel, dibujo, tabla— lee el mismo número. Antes cada consumidor la recalculaba recorriendo el
-// array entero desde dentro de otro recorrido del array, y el panel lo hacía además en la vela en curso.
-if barstate.isconfirmed and zones.size() > 0
-    for z in zones
-        z.htfConf := f_htfConf(z)
+// Los bloques registrados en esta vela son los últimos del array: la limpieza corre antes del alta y
+// f_addZone siempre hace push. Se opera cada uno que se pinte (score ≥ umbral de dibujo).
+// `varip` sobrevive al rollback intravela: sin él, el mismo bloque mandaría una orden en cada tick.
+varip int trG0 = na
+varip int trG1 = na
+varip int trG2 = na
+varip int trN  = 0
+int nNew = (r1 == 3 ? 1 : 0) + (r2 == 3 ? 1 : 0) + (r3 == 3 ? 1 : 0)
+if trOn and nNew > 0
+    for j = 1 to nNew
+        Zone nz    = zones.get(zones.size() - j)
+        int  lastG = nz.tfIdx == 0 ? trG0 : nz.tfIdx == 1 ? trG1 : trG2
+        if na(lastG) or nz.guid != lastG
+            if nz.tfIdx == 0
+                trG0 := nz.guid
+            else if nz.tfIdx == 1
+                trG1 := nz.guid
+            else
+                trG2 := nz.guid
+            bool dirOK = nz.isDem ? trDir != "Solo ventas" : trDir != "Solo compras"
+            if dirOK and f_score(nz, 0) >= showMinScore
+                float tk    = syminfo.mintick
+                float entry = close
+                float sl    = trSlMode == "Bloque ± ticks" ? (nz.isDem ? nz.bot - trSlTicks * tk : nz.top + trSlTicks * tk) : (nz.isDem ? entry - trSlTicks * tk : entry + trSlTicks * tk)
+                float risk  = nz.isDem ? entry - sl : sl - entry
+                float tpD   = trTpMode == "Ratio R:R" ? risk * trTpRR : trTpTicks * tk
+                float tp    = nz.isDem ? entry + tpD : entry - tpD
+                // Sin riesgo definido (precio ya al otro lado del stop, o stop de 0 ticks) no hay operación.
+                if risk > 0
+                    trN += 1
+                    string oid = (nz.isDem ? "Buy #" : "Sell #") + str.tostring(trN)
+                    string msg = '{"event":"SD_ORDER","side":"' + (nz.isDem ? "buy" : "sell") + '","ticker":"' + syminfo.ticker + '","qty":' + str.tostring(trQty) + ',"sl":' + str.tostring(sl, format.mintick) + ',"tp":' + str.tostring(tp, format.mintick) + ',"tf":"' + nz.tfLbl + '"}'
+                    strategy.entry(oid, nz.isDem ? strategy.long : strategy.short, qty = trQty, comment = oid + " " + nz.tfLbl, alert_message = msg)
+                    strategy.exit(oid + " X", from_entry = oid, stop = sl, limit = tp, comment_loss = "SL " + oid, comment_profit = "TP " + oid)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ CICLO DE VIDA Y VERIFICACIÓN (solo vela cerrada)
