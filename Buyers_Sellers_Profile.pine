@@ -146,24 +146,14 @@ profile(int newest,int oldest,int rows)=>
                 buy.set(j,buy.get(j)+av*bf)
     [bot,step,tot,buy]
 
-pivot_features(bool supp,float avgVol)=>
-    float vb=nz(avgVol[swingLen],volume[swingLen])
+// vb and absSc come pre-offset from the global scope: this function runs conditionally,
+// so history references on its parameters would step per call instead of per bar.
+pivot_features(bool supp,float vb,float absSc)=>
     float vr=vb>0?nz(volume[swingLen],0.0)/vb:1.0
     float vSc=clip((vr-0.8)/(PIV_VOL_X-0.8))
     float pr=math.max(high[swingLen]-low[swingLen],syminfo.mintick)
     float wick=supp?math.min(open[swingLen],close[swingLen])-low[swingLen]:high[swingLen]-math.max(open[swingLen],close[swingLen])
     float wSc=clip((wick/pr)/0.50)
-    float absSc=0.0
-    for n=0 to ABS_RAD*2
-        int o=swingLen-ABS_RAD+n
-        float cr=math.max(high[o]-low[o],syminfo.mintick)
-        float v=math.max(nz(volume[o],0.0),0.0)
-        float base=nz(avgVol[o],v)
-        float vRat=base>0?v/base:1.0
-        float bRat=math.abs(close[o]-open[o])/cr
-        float small=clip((ABS_BODY_MAX-bRat)/ABS_BODY_MAX)
-        float av=clip((vRat-1.0)/(ABS_VOL_X-1.0))
-        absSc:=math.max(absSc,math.sqrt(small*av))
     [vSc,wSc,absSc]
 
 profile_node(float raw,bool supp,float atrP,float bot,float step,array<float> tot,array<float> buy)=>
@@ -279,15 +269,14 @@ score_tip(Lvl lv)=>"Raw pivot: "+str.tostring(lv.raw,format.mintick)+"\nProfile 
  +"\nProfile evidence: "+str.tostring(lv.evid*100.0,"#")+"%\nNode strength vs POC: "+str.tostring(lv.nStr*100.0,"#")
  +"%\nFinal level: "+str.tostring(lv.p,format.mintick)
 
-pivot_eval(array<Lvl> a,float raw,bool supp,float avgVol,float atr)=>
+pivot_eval(array<Lvl> a,float raw,bool supp,float vb,float atrP,float absSc)=>
     int avail=bar_index-swingLen+1
     int bars=math.max(1,math.min(profLb,avail))
     int newest=swingLen
     int oldest=swingLen+bars-1
     [bot,step,tot,buy]=profile(newest,oldest,profRows)
-    float atrP=math.max(nz(atr[swingLen],syminfo.mintick),syminfo.mintick)
     [node,evid,nStr,pk,dir]=profile_node(raw,supp,atrP,bot,step,tot,buy)
-    [vSc,wSc,aSc]=pivot_features(supp,avgVol)
+    [vSc,wSc,aSc]=pivot_features(supp,vb,absSc)
     bool ok=nStr>=nodeMin and evid>=evidMin
     float pull=ok?pullMax*clip(evid/0.65):0.0
     float p=raw+(node-raw)*pull
@@ -388,6 +377,16 @@ atr=ta.atr(14)
 ph=ta.pivothigh(high,swingLen,swingLen)
 pl=ta.pivotlow(low,swingLen,swingLen)
 ready=bar_index>VOL_LEN+swingLen*2+5
+
+// Pivot-bar values computed every bar so their history is bar-based
+atrPiv=math.max(nz(atr[swingLen],syminfo.mintick),syminfo.mintick)
+vbPiv=nz(avgVol[swingLen],volume[swingLen])
+absV=math.max(nz(volume,0.0),0.0)
+absBase=nz(avgVol,absV)
+absVRat=absBase>0?absV/absBase:1.0
+absBRat=math.abs(close-open)/math.max(high-low,syminfo.mintick)
+absBar=math.sqrt(clip((ABS_BODY_MAX-absBRat)/ABS_BODY_MAX)*clip((absVRat-1.0)/(ABS_VOL_X-1.0)))
+absPiv=nz(ta.highest(absBar,ABS_RAD*2+1)[swingLen-ABS_RAD],0.0)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Objects & State {
@@ -404,11 +403,11 @@ bool newSup=false
 bool newRes=false
 
 if ready and not na(pl)
-    [stored,sc,p,node,evid,nStr,pk,dir]=pivot_eval(lvls,pl,true,avgVol,atr)
+    [stored,sc,p,node,evid,nStr,pk,dir]=pivot_eval(lvls,pl,true,vbPiv,atrPiv,absPiv)
     newSup:=stored
 
 if ready and not na(ph)
-    [stored,sc,p,node,evid,nStr,pk,dir]=pivot_eval(lvls,ph,false,avgVol,atr)
+    [stored,sc,p,node,evid,nStr,pk,dir]=pivot_eval(lvls,ph,false,vbPiv,atrPiv,absPiv)
     newRes:=stored
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
