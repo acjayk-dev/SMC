@@ -22,12 +22,13 @@
 //     · Banda σ: el OB alcanza la banda 1σ contraria (extremo de la sesión, reversión a la media).
 //   ④ LIQUIDEZ. Máximos/mínimos iguales (EQH/EQL) y barridos de swing con mecha que cierran dentro.
 //   ⑤ FVG. Huecos de tres velas, vivos hasta que el precio los rellena.
-//   ⑥ TRADING. Cada OB pintado abre su operación con su stop y su objetivo: a mercado al formarse o con
-//     orden límite en el proximal (retest). Por defecto stop a 2 ticks más allá del OB y objetivo 3R.
+//   ⑥ TRADING. Cada OB pintado abre su operación con su stop y su objetivo: por defecto con orden límite
+//     en el proximal (retest), o a mercado al formarse. Stop a 2 ticks más allá del OB y objetivo 3R.
 //   ⑦ PRICE ACTION · VELEZ. Sin cambios; "Solo dentro de OB" lee ahora los order blocks.
 //
-//   SIN REPINTADO: todo se calcula en vela cerrada. Las órdenes salen al cierre de la vela que confirma
-//   el OB (process_orders_on_close) y en el backtest se llenan a ese mismo cierre.
+//   SIN REPINTADO: todo se calcula en vela cerrada. La orden límite del retest se coloca al cierre de la
+//   vela que confirma el OB y se llena cuando el precio vuelve al proximal (máx. N velas de espera). En
+//   modo mercado se llena al cierre de esa misma vela (process_orders_on_close).
 //   Comisión y deslizamiento se configuran en Propiedades: sin ellos el backtest sale optimista.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -102,7 +103,7 @@ fvgMax     = input.int(10, "FVG vivos", minval=1, maxval=50, group=gFv)
 fvgCol     = input.color(#42A5F5, "Color", group=gFv)
 
 trOn       = input.bool(true, "Activar trading automático", group=gTr, tooltip="Cada OB pintado abre su operación con su stop y su take profit. Apagado, solo dibuja.")
-trEntry    = input.string("Al formarse (mercado)", "Entrada", options=["Al formarse (mercado)", "Retest del OB (límite)"], group=gTr, tooltip="AL FORMARSE: orden a mercado al cierre de la vela que rompe la estructura y crea el OB. RETEST: orden límite en el proximal del OB, que espera a que el precio vuelva (entrada SMC clásica).")
+trEntry    = input.string("Retest del OB (límite)", "Entrada", options=["Al formarse (mercado)", "Retest del OB (límite)"], group=gTr, tooltip="AL FORMARSE: orden a mercado al cierre de la vela que rompe la estructura y crea el OB. RETEST: orden límite en el proximal del OB, que espera a que el precio vuelva (entrada SMC clásica).")
 trExpire   = input.int(100, "Retest: velas máximas de espera", minval=1, maxval=2000, group=gTr)
 trDir      = input.string("Ambas", "Dirección", options=["Ambas", "Solo compras", "Solo ventas"], group=gTr)
 trQty      = input.int(1, "Tamaño del lote (contratos)", minval=1, maxval=10, group=gTr)
