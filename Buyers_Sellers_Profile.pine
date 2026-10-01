@@ -43,6 +43,7 @@ var string tt34="Bull/Bear 180 (Velez): a wide bar in one direction followed by 
 var string tt35="GBI/RBI (Velez): Green Bar Ignored is red-green-red at resistance; Red Bar Ignored is green-red-green at support. The middle bar fails to retrace half of the control bar body and the signal bar closes beyond its extreme."
 var string tt36="Elephant Bar (Velez): body at least EB Body of the range and range at least EB Size times the 20-bar average range."
 var string tt37="Bottoming/Topping Tail: the rejection wick is at least Tail of the range and the close is in the opposite half of the bar."
+var string tt39="Paint price-action candles by pattern. All Patterns: every confirmed pattern candle (respecting the pattern toggles). Signals Only: just the candles that triggered a long/short signal at a level. Off: native candle colors."
 var string tt38="Stop goes beyond the touched level and the touch extreme by this ATR buffer. Target is entry plus R:R times the risk."
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
@@ -90,6 +91,12 @@ slAtr=input.float(0.25,"SL ATR",minval=0.0,maxval=2.0,step=0.05,group=gPA,inline
 rr=input.float(2.0,"R:R",minval=0.5,maxval=10.0,step=0.5,group=gPA,inline="a6",tooltip=tt38)
 cooldown=input.int(3,"Cooldown Bars",minval=0,maxval=50,group=gPA,inline="a7")
 maxSig=input.int(40,"Max Signals",minval=5,maxval=80,group=gPA,inline="a7")
+barMode=input.string("All Patterns","Candle Color",options=["Off","Signals Only","All Patterns"],group=gPA,inline="a8",tooltip=tt39)
+c180=input.color(color.rgb(255,214,0),"180",group=gPA,inline="a9")
+cIgn=input.color(color.rgb(0,184,255),"RBI/GBI",group=gPA,inline="a9")
+cEb=input.color(color.rgb(186,104,255),"EB",group=gPA,inline="a9")
+cEng=input.color(color.rgb(255,128,0),"ENG",group=gPA,inline="a9")
+cTail=input.color(color.rgb(255,82,180),"Tail",group=gPA,inline="a9")
 supCol=input.color(color.rgb(31,199,116),"Support",group=gSTY,inline="c1")
 resCol=input.color(color.rgb(239,75,75),"Resistance",group=gSTY,inline="c1",tooltip=tt17+"\n\n"+tt18)
 coreCol=input.color(color.rgb(255,205,64),"Pivot Core",group=gSTY,inline="c2")
@@ -548,6 +555,12 @@ if longSig
 if shortSig
     draw_signal(false,bearName,lvls.get(resId))
     lastShort:=bar_index
+
+// Candle coloring: one color per pattern; the candle body already shows direction
+pat_col(string n)=>n=="180"?c180:n=="RBI" or n=="GBI"?cIgn:n=="EB"?cEb:n=="ENG"?cEng:n=="TAIL"?cTail:color(na)
+string patName=bullName!="" and (bearName=="" or isBullC)?bullName:bearName
+string paintName=longSig?bullName:shortSig?bearName:barMode=="All Patterns"?patName:""
+barcolor(barMode!="Off" and barstate.isconfirmed and paintName!=""?pat_col(paintName):na,title="Price Action Candles")
 
 plot(showMA?sma20:na,"20 SMA",color=color.new(coreCol,10),linewidth=1)
 plot(showMA?sma200:na,"200 SMA",color=color.new(rawCol,10),linewidth=2)
