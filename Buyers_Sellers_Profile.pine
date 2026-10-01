@@ -34,6 +34,8 @@ var string tt25="Show the layered profile-confirmed pivot marker at the final re
 var string tt26="Show the faint raw pivot marker and dotted vertical guide connecting it to the final profile-guided level."
 var string tt27="Show the final 0-100 level score inside the historical profile-confirmed pivot marker."
 var string tt28="Show the current endpoint dot and one-number score label at the right edge of each active level."
+var string tt29="Score added to an active level each time a new same-side pivot lands within the merge distance without beating its score. Retests reinforce the level instead of being discarded. 0 disables."
+var string tt30="Remove active levels older than this many bars since their pivot. 0 keeps levels until they break or are trimmed."
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Groups {
@@ -59,6 +61,8 @@ scoreMin=input.float(30.0,"Min Score",minval=0,maxval=100,step=1,group=gENG,inli
 maxLvl=input.int(20,"Max Levels",minval=2,maxval=40,group=gENG,inline="e4")
 mergeAtr=input.float(0.16,"Merge ATR",minval=0.0,maxval=1.0,step=0.02,group=gENG,inline="e4")
 breakAtr=input.float(0.10,"Break ATR",minval=0.0,maxval=0.5,step=0.01,group=gENG,inline="e4",tooltip=tt14+"\n\n"+tt15+"\n\n"+tt16)
+retestBonus=input.float(5.0,"Retest Bonus",minval=0.0,maxval=20.0,step=0.5,group=gENG,inline="e5")
+maxAge=input.int(0,"Max Age",minval=0,maxval=5000,group=gENG,inline="e5",tooltip=tt29+"\n\n"+tt30)
 supCol=input.color(color.rgb(31,199,116),"Support",group=gSTY,inline="c1")
 resCol=input.color(color.rgb(239,75,75),"Resistance",group=gSTY,inline="c1",tooltip=tt17+"\n\n"+tt18)
 coreCol=input.color(color.rgb(255,205,64),"Pivot Core",group=gSTY,inline="c2")
@@ -91,6 +95,8 @@ type Lvl
     float nStr
     bool supp
     int born
+    int bornIdx
+    int touches
     line ln
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
@@ -203,12 +209,13 @@ nearby(array<Lvl> a,float p,bool supp,float tol)=>
 make_line(int born,float p,bool supp,float sc)=>line.new(born,p,time,p,xloc=xloc.bar_time,extend=extend.none,
  color=color.new(lvl_col(supp),lalpha(sc)),width=lwidth(sc),style=lstyle(lvlStyle))
 
-store_lvl(array<Lvl> a,float p,float raw,float node,float evid,float nStr,bool supp,float sc,int born,float atrP)=>
+store_lvl(array<Lvl> a,float p,float raw,float node,float evid,float nStr,bool supp,float sc,int born,int bornIdx,float atrP)=>
     bool changed=false
     float tol=math.max(atrP*mergeAtr,syminfo.mintick)
     int id=nearby(a,p,supp,tol)
     if id>=0
         Lvl lv=a.get(id)
+        lv.touches:=lv.touches+1
         if sc>lv.sc
             lv.p:=p
             lv.sc:=sc
@@ -217,14 +224,16 @@ store_lvl(array<Lvl> a,float p,float raw,float node,float evid,float nStr,bool s
             lv.evid:=evid
             lv.nStr:=nStr
             lv.born:=born
+            lv.bornIdx:=bornIdx
             line.set_xy1(lv.ln,born,p)
             line.set_xy2(lv.ln,time,p)
-            line.set_color(lv.ln,color.new(lvl_col(supp),lalpha(sc)))
-            line.set_width(lv.ln,lwidth(sc))
-            a.set(id,lv)
             changed:=true
+        else
+            lv.sc:=math.min(100.0,lv.sc+retestBonus)
+        line.set_color(lv.ln,color.new(lvl_col(supp),lalpha(lv.sc)))
+        line.set_width(lv.ln,lwidth(lv.sc))
     else
-        a.push(Lvl.new(p,sc,raw,node,evid,nStr,supp,born,make_line(born,p,supp,sc)))
+        a.push(Lvl.new(p,sc,raw,node,evid,nStr,supp,born,bornIdx,1,make_line(born,p,supp,sc)))
         changed:=true
     changed
 
@@ -255,21 +264,24 @@ update_lvls(array<Lvl> a)=>
             line.set_style(lv.ln,lstyle(lvlStyle))
     0
 
+// 1=support, -1=resistance, 2=both sides inside the row
 level_row(array<Lvl> a,float lo,float hi)=>
-    int side=0
+    bool hasS=false
+    bool hasR=false
     if a.size()>0
         for i=0 to a.size()-1
             Lvl lv=a.get(i)
             if lv.p>=lo and lv.p<=hi
-                side:=lv.supp?1:-1
-                break
-    side
+                hasS:=hasS or lv.supp
+                hasR:=hasR or not lv.supp
+    hasS and hasR?2:hasS?1:hasR?-1:0
 
 score_tip(Lvl lv)=>"Raw pivot: "+str.tostring(lv.raw,format.mintick)+"\nProfile node: "+str.tostring(lv.node,format.mintick)
  +"\nProfile evidence: "+str.tostring(lv.evid*100.0,"#")+"%\nNode strength vs POC: "+str.tostring(lv.nStr*100.0,"#")
  +"%\nFinal level: "+str.tostring(lv.p,format.mintick)
+ +"\nPivot touches: "+str.tostring(lv.touches)
 
-pivot_eval(array<Lvl> a,float raw,bool supp,float vb,float atrP,float absSc)=>
+pivot_eval(array<Lvl> a,float raw,bool supp,float vb,float atrP,float absSc,float atr)=>
     int avail=bar_index-swingLen+1
     int bars=math.max(1,math.min(profLb,avail))
     int newest=swingLen
@@ -281,8 +293,10 @@ pivot_eval(array<Lvl> a,float raw,bool supp,float vb,float atrP,float absSc)=>
     float pull=ok?pullMax*clip(evid/0.65):0.0
     float p=raw+(node-raw)*pull
     float sc=100.0*(0.50*evid+0.20*aSc+0.15*vSc+0.15*wSc)
-    bool stored=ok and sc>=scoreMin?store_lvl(a,p,raw,node,evid,nStr,supp,sc,time[swingLen],atrP):false
-    [stored,sc,p,node,evid,nStr,pk,dir]
+    // Reject candidates the current close already invalidates (would break on the bar they are born)
+    float buf=math.max(nz(atr,0.0)*breakAtr,0.0)
+    bool valid=supp?close>=p-buf:close<=p+buf
+    ok and valid and sc>=scoreMin?store_lvl(a,p,raw,node,evid,nStr,supp,sc,time[swingLen],bar_index-swingLen,atrP):false
 
 manage_breaks(array<Lvl> a,float atr)=>
     bool sBreak=false
@@ -292,9 +306,11 @@ manage_breaks(array<Lvl> a,float atr)=>
             Lvl lv=a.get(i)
             float buf=math.max(nz(atr,0.0)*breakAtr,0.0)
             bool broken=barstate.isconfirmed and (lv.supp?close<lv.p-buf:close>lv.p+buf)
+            bool expired=maxAge>0 and bar_index-lv.bornIdx>maxAge
             if broken
                 sBreak:=sBreak or lv.supp
                 rBreak:=rBreak or not lv.supp
+            if broken or expired
                 remove_lvl(a,i)
     [sBreak,rBreak]
 
@@ -360,7 +376,7 @@ draw_profile(array<Lvl> a,array<box> bx,array<line> ln,array<label> lb)=>
                 if showLvlRows
                     int side=level_row(a,y0,y1)
                     if side!=0
-                        color c=side>0?supCol:resCol
+                        color c=side==2?coreCol:side>0?supCol:resCol
                         bx.push(box.new(left=x,top=y1,right=x+tw,bottom=y0,xloc=xloc.bar_index,border_color=c,border_width=2,
                          bgcolor=color.new(coreCol,93)))
         if showPoc
@@ -402,13 +418,12 @@ var array<line> tLn=array.new_line()
 bool newSup=false
 bool newRes=false
 
-if ready and not na(pl)
-    [stored,sc,p,node,evid,nStr,pk,dir]=pivot_eval(lvls,pl,true,vbPiv,atrPiv,absPiv)
-    newSup:=stored
+// Evaluate on confirmed bars only so realtime pivots cannot flicker in and out intrabar
+if ready and barstate.isconfirmed and not na(pl)
+    newSup:=pivot_eval(lvls,pl,true,vbPiv,atrPiv,absPiv,atr)
 
-if ready and not na(ph)
-    [stored,sc,p,node,evid,nStr,pk,dir]=pivot_eval(lvls,ph,false,vbPiv,atrPiv,absPiv)
-    newRes:=stored
+if ready and barstate.isconfirmed and not na(ph)
+    newRes:=pivot_eval(lvls,ph,false,vbPiv,atrPiv,absPiv,atr)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Level Lifecycle {
