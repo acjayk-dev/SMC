@@ -2,7 +2,7 @@
 // This work is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
 // https://creativecommons.org/licenses/by-nc-sa/4.0/
 // © Zeiierman {
-indicator("Buyers & Sellers Profile + Dynamic S/R (Zeiierman)",overlay=true,max_lines_count=250,max_labels_count=500,max_boxes_count=300,max_bars_back=5000)
+indicator("Buyers & Sellers Profile + Dynamic S/R (Zeiierman)",overlay=true,max_lines_count=400,max_labels_count=500,max_boxes_count=300,max_bars_back=5000)
 //}
 
 // ~~ Tooltips {
@@ -36,12 +36,21 @@ var string tt27="Show the final 0-100 level score inside the historical profile-
 var string tt28="Show the current endpoint dot and one-number score label at the right edge of each active level."
 var string tt29="Score added to an active level each time a new same-side pivot lands within the merge distance without beating its score. Retests reinforce the level instead of being discarded. 0 disables."
 var string tt30="Remove active levels older than this many bars since their pivot. 0 keeps levels until they break or are trimmed."
+var string tt31="Price-action confirmation signals. A long fires when a bullish confirmation candle closes back above an active support that price touched in the last 3 bars (short mirrors at resistance). Only levels with at least this score qualify. Evaluated on confirmed bars only."
+var string tt32="ATR distance above a support (below a resistance) that still counts as touching the level."
+var string tt33="Oliver Velez moving-average filter. 20/200 Trend: longs only when the 20 SMA is above the 200 SMA (shorts the opposite). Price vs 20 SMA: longs only when the signal bar closes above the 20 SMA. None: no filter."
+var string tt34="Bull/Bear 180 (Velez): a wide bar in one direction followed by a wide bar that fully reverses its body and closes in the outer 25% of its range."
+var string tt35="GBI/RBI (Velez): Green Bar Ignored is red-green-red at resistance; Red Bar Ignored is green-red-green at support. The middle bar fails to retrace half of the control bar body and the signal bar closes beyond its extreme."
+var string tt36="Elephant Bar (Velez): body at least EB Body of the range and range at least EB Size times the 20-bar average range."
+var string tt37="Bottoming/Topping Tail: the rejection wick is at least Tail of the range and the close is in the opposite half of the bar."
+var string tt38="Stop goes beyond the touched level and the touch extreme by this ATR buffer. Target is entry plus R:R times the risk."
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Groups {
 gPROF="Large Rolling Profile"
 gENG="Profile-Guided Pivot Engine"
 gSTY="Visual Style"
+gPA="Price Action Confirmation (Velez)"
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Inputs {
@@ -63,6 +72,24 @@ mergeAtr=input.float(0.16,"Merge ATR",minval=0.0,maxval=1.0,step=0.02,group=gENG
 breakAtr=input.float(0.10,"Break ATR",minval=0.0,maxval=0.5,step=0.01,group=gENG,inline="e4",tooltip=tt14+"\n\n"+tt15+"\n\n"+tt16)
 retestBonus=input.float(5.0,"Retest Bonus",minval=0.0,maxval=20.0,step=0.5,group=gENG,inline="e5")
 maxAge=input.int(0,"Max Age",minval=0,maxval=5000,group=gENG,inline="e5",tooltip=tt29+"\n\n"+tt30)
+showPA=input.bool(true,"Show Signals",group=gPA,inline="a1")
+paMinSc=input.float(45.0,"Min Level Score",minval=0,maxval=100,step=1,group=gPA,inline="a1",tooltip=tt31)
+zoneAtr=input.float(0.25,"Touch Zone ATR",minval=0.0,maxval=1.5,step=0.05,group=gPA,inline="a2",tooltip=tt32)
+maFilter=input.string("None","MA Filter",options=["None","20/200 Trend","Price vs 20 SMA"],group=gPA,inline="a3")
+showMA=input.bool(false,"Show 20/200 SMA",group=gPA,inline="a3",tooltip=tt33)
+use180=input.bool(true,"180",group=gPA,inline="a4")
+useGbi=input.bool(true,"GBI/RBI",group=gPA,inline="a4")
+useEb=input.bool(true,"Elephant Bar",group=gPA,inline="a4")
+useEng=input.bool(true,"Engulfing",group=gPA,inline="a4")
+useTail=input.bool(true,"Tail",group=gPA,inline="a4",tooltip=tt34+"\n\n"+tt35)
+ebMult=input.float(1.3,"EB Size",minval=1.0,maxval=3.0,step=0.1,group=gPA,inline="a5")
+ebBody=input.float(0.70,"EB Body",minval=0.5,maxval=0.95,step=0.05,group=gPA,inline="a5")
+tailMin=input.float(0.50,"Tail",minval=0.3,maxval=0.8,step=0.05,group=gPA,inline="a5",tooltip=tt36+"\n\n"+tt37)
+showSLTP=input.bool(true,"SL/TP",group=gPA,inline="a6")
+slAtr=input.float(0.25,"SL ATR",minval=0.0,maxval=2.0,step=0.05,group=gPA,inline="a6")
+rr=input.float(2.0,"R:R",minval=0.5,maxval=10.0,step=0.5,group=gPA,inline="a6",tooltip=tt38)
+cooldown=input.int(3,"Cooldown Bars",minval=0,maxval=50,group=gPA,inline="a7")
+maxSig=input.int(40,"Max Signals",minval=5,maxval=80,group=gPA,inline="a7")
 supCol=input.color(color.rgb(31,199,116),"Support",group=gSTY,inline="c1")
 resCol=input.color(color.rgb(239,75,75),"Resistance",group=gSTY,inline="c1",tooltip=tt17+"\n\n"+tt18)
 coreCol=input.color(color.rgb(255,205,64),"Pivot Core",group=gSTY,inline="c2")
@@ -264,6 +291,20 @@ update_lvls(array<Lvl> a)=>
             line.set_style(lv.ln,lstyle(lvlStyle))
     0
 
+// Strongest active level of one side that price touched (lo/hi over the pattern) and closed back beyond
+touched_level(array<Lvl> a,bool supp,float lo,float hi,float zone)=>
+    int id=-1
+    float best=-1.0
+    if a.size()>0
+        for i=0 to a.size()-1
+            Lvl lv=a.get(i)
+            if lv.supp==supp and lv.sc>=paMinSc
+                bool hit=supp?lo<=lv.p+zone and close>lv.p:hi>=lv.p-zone and close<lv.p
+                if hit and lv.sc>best
+                    best:=lv.sc
+                    id:=i
+    id
+
 // 1=support, -1=resistance, 2=both sides inside the row
 level_row(array<Lvl> a,float lo,float hi)=>
     bool hasS=false
@@ -432,6 +473,86 @@ trim_lvls(lvls)
 update_lvls(lvls)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
+// ~~ Price Action Confirmation (Oliver Velez) {
+rng=high-low
+avgRng=ta.sma(rng,20)
+bodyPct=rng>0?math.abs(close-open)/rng:0.0
+clPos=rng>0?(close-low)/rng:0.5
+isBullC=close>open
+isBearC=close<open
+upWick=high-math.max(open,close)
+loWick=math.min(open,close)-low
+wideBar=rng>=avgRng*0.8
+
+// Bull/Bear 180: wide bar one way, next wide bar fully reverses its body and closes in the outer quarter
+b180Bull=isBearC[1] and bodyPct[1]>=0.5 and wideBar[1] and isBullC and bodyPct>=0.5 and wideBar and clPos>=0.75 and close>=open[1]
+b180Bear=isBullC[1] and bodyPct[1]>=0.5 and wideBar[1] and isBearC and bodyPct>=0.5 and wideBar and clPos<=0.25 and close<=open[1]
+// RBI (green-red-green) / GBI (red-green-red): middle bar retraces less than half the control body, signal closes beyond it
+rbiBull=isBullC[2] and bodyPct[2]>=0.5 and isBearC[1] and close[1]>=(open[2]+close[2])*0.5 and isBullC and close>high[1]
+gbiBear=isBearC[2] and bodyPct[2]>=0.5 and isBullC[1] and close[1]<=(open[2]+close[2])*0.5 and isBearC and close<low[1]
+// Elephant Bar
+ebBull=isBullC and bodyPct>=ebBody and rng>=avgRng*ebMult
+ebBear=isBearC and bodyPct>=ebBody and rng>=avgRng*ebMult
+// Engulfing
+engBull=isBullC and isBearC[1] and close>=open[1] and open<=close[1] and math.abs(close-open)>math.abs(close[1]-open[1])
+engBear=isBearC and isBullC[1] and close<=open[1] and open>=close[1] and math.abs(close-open)>math.abs(close[1]-open[1])
+// Bottoming / Topping Tail
+tailBull=rng>0 and loWick>=rng*tailMin and clPos>=0.5
+tailBear=rng>0 and upWick>=rng*tailMin and clPos<=0.5
+
+string bullName=use180 and b180Bull?"180":useGbi and rbiBull?"RBI":useEb and ebBull?"EB":useEng and engBull?"ENG":useTail and tailBull?"TAIL":""
+string bearName=use180 and b180Bear?"180":useGbi and gbiBear?"GBI":useEb and ebBear?"EB":useEng and engBear?"ENG":useTail and tailBear?"TAIL":""
+
+sma20=ta.sma(close,20)
+sma200=ta.sma(close,200)
+longMaOk=maFilter=="None"?true:maFilter=="20/200 Trend"?sma20>sma200:close>sma20
+shortMaOk=maFilter=="None"?true:maFilter=="20/200 Trend"?sma20<sma200:close<sma20
+
+touchLo=ta.lowest(low,3)
+touchHi=ta.highest(high,3)
+float zone=nz(atr,0.0)*zoneAtr
+int supId=touched_level(lvls,true,touchLo,touchHi,zone)
+int resId=touched_level(lvls,false,touchLo,touchHi,zone)
+
+var int lastLong=-1000
+var int lastShort=-1000
+var array<label> sigLb=array.new_label()
+var array<line> sigLn=array.new_line()
+
+bool paOk=showPA and ready and barstate.isconfirmed
+bool longSig=paOk and bullName!="" and supId>=0 and longMaOk and bar_index-lastLong>cooldown
+bool shortSig=paOk and bearName!="" and resId>=0 and shortMaOk and bar_index-lastShort>cooldown
+
+draw_signal(bool isLong,string name,Lvl lv)=>
+    float buf=nz(atr,0.0)*slAtr
+    float sl=isLong?math.min(lv.p,touchLo)-buf:math.max(lv.p,touchHi)+buf
+    float risk=math.max(math.abs(close-sl),syminfo.mintick)
+    float tp=isLong?close+risk*rr:close-risk*rr
+    color c=lvl_col(isLong)
+    string tip=(isLong?"LONG ":"SHORT ")+name+" @ level "+str.tostring(lv.p,format.mintick)+" (score "+str.tostring(lv.sc,"#")+")"
+     +"\nEntry: "+str.tostring(close,format.mintick)+"\nSL: "+str.tostring(sl,format.mintick)+"\nTP: "+str.tostring(tp,format.mintick)
+    sigLb.push(label.new(bar_index,isLong?low:high,(isLong?"▲ ":"▼ ")+name,yloc=yloc.price,
+     style=isLong?label.style_label_up:label.style_label_down,color=color.new(c,15),textcolor=color.white,size=size.small,tooltip=tip))
+    if showSLTP
+        sigLn.push(line.new(bar_index,sl,bar_index+10,sl,color=color.new(resCol,20),style=line.style_dashed,width=1))
+        sigLn.push(line.new(bar_index,tp,bar_index+10,tp,color=color.new(supCol,20),style=line.style_dashed,width=1))
+    while sigLb.size()>maxSig
+        label.delete(sigLb.shift())
+    while sigLn.size()>maxSig*2
+        line.delete(sigLn.shift())
+    0
+
+if longSig
+    draw_signal(true,bullName,lvls.get(supId))
+    lastLong:=bar_index
+if shortSig
+    draw_signal(false,bearName,lvls.get(resId))
+    lastShort:=bar_index
+
+plot(showMA?sma20:na,"20 SMA",color=color.new(coreCol,10),linewidth=1)
+plot(showMA?sma200:na,"200 SMA",color=color.new(rawCol,10),linewidth=2)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
 // ~~ Drawing {
 if barstate.islast
     clear_labels(mLb)
@@ -451,4 +572,6 @@ alertcondition(newSup,"New profile-confirmed support","A structural pivot low wa
 alertcondition(newRes,"New profile-confirmed resistance","A structural pivot high was confirmed by the large rolling volume profile and converted into resistance.")
 alertcondition(supBreak,"Support broken","An active profile-guided support was broken on a confirmed close.")
 alertcondition(resBreak,"Resistance broken","An active profile-guided resistance was broken on a confirmed close.")
+alertcondition(longSig,"PA long confirmation","{{ticker}} {{interval}}: bullish price-action confirmation at profile support @ {{close}}")
+alertcondition(shortSig,"PA short confirmation","{{ticker}} {{interval}}: bearish price-action confirmation at profile resistance @ {{close}}")
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
