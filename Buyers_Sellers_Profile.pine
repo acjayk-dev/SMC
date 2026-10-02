@@ -178,6 +178,23 @@ float delta=math.max(nz(volume,0.0),0.0)*(2.0*buyFrac-1.0)
 float deltaAvg=ta.sma(math.abs(delta),deltaLen)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
+// ~~ Bar History Buffers {
+// Ring buffers written on every bar, so the profile can be rebuilt inside conditional code without
+// history-referencing operators (which Pine flags as inconsistent when used in conditionally called functions).
+int BUF=profLb+swingLen
+var array<float> hBuf=array.new_float(BUF,na)
+var array<float> lBuf=array.new_float(BUF,na)
+var array<float> vBuf=array.new_float(BUF,0.0)
+var array<float> bBuf=array.new_float(BUF,0.5)
+hBuf.set(bar_index%BUF,high)
+lBuf.set(bar_index%BUF,low)
+vBuf.set(bar_index%BUF,math.max(nz(volume,0.0),0.0))
+bBuf.set(bar_index%BUF,buyFrac)
+
+// Value stored off bars ago (off must not exceed bar_index or BUF-1)
+buf_at(array<float> b,int off)=>b.get((bar_index-off)%BUF)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
 // ~~ Types {
 type Lvl
     float p
@@ -237,22 +254,22 @@ clear_labels(array<label> a)=>
         label.delete(a.pop())
 
 profile(int newest,int oldest,int rows)=>
-    float lo=low[newest]
-    float hi=high[newest]
+    float lo=buf_at(lBuf,newest)
+    float hi=buf_at(hBuf,newest)
     for i=newest to oldest
-        lo:=math.min(lo,low[i])
-        hi:=math.max(hi,high[i])
+        lo:=math.min(lo,buf_at(lBuf,i))
+        hi:=math.max(hi,buf_at(hBuf,i))
     float span=math.max(hi-lo,syminfo.mintick*rows)
     float bot=lo-(span-(hi-lo))*0.5
     float step=span/rows
     array<float> tot=array.new_float(rows,0.0)
     array<float> buy=array.new_float(rows,0.0)
     for i=newest to oldest
-        float l=low[i]
-        float h=high[i]
+        float l=buf_at(lBuf,i)
+        float h=buf_at(hBuf,i)
         float r=h-l
-        float v=math.max(nz(volume[i],0.0),0.0)
-        float bf=nz(buyFrac[i],0.5)
+        float v=buf_at(vBuf,i)
+        float bf=nz(buf_at(bBuf,i),0.5)
         int r0=row_id(l,bot,step,rows)
         int r1=row_id(h,bot,step,rows)
         for j=r0 to r1
@@ -298,16 +315,6 @@ nearest_opp(array<Lvl> a,bool isLong,float px)=>
 grade_of(float pts)=>pts>=gradeA?0:pts>=gradeB?1:pts>=gradeC?2:3
 grade_txt(int g)=>g==0?"A":g==1?"B":"C"
 grade_alpha(int g)=>g==0?0:g==1?30:55
-
-// vb and absSc come pre-offset from the global scope: this function runs conditionally,
-// so history references on its parameters would step per call instead of per bar.
-pivot_features(bool supp,float vb,float absSc)=>
-    float vr=vb>0?nz(volume[swingLen],0.0)/vb:1.0
-    float vSc=clip((vr-0.8)/(PIV_VOL_X-0.8))
-    float pr=math.max(high[swingLen]-low[swingLen],syminfo.mintick)
-    float wick=supp?math.min(open[swingLen],close[swingLen])-low[swingLen]:high[swingLen]-math.max(open[swingLen],close[swingLen])
-    float wSc=clip((wick/pr)/0.50)
-    [vSc,wSc,absSc]
 
 profile_node(float raw,bool supp,float atrP,float bot,float step,array<float> tot,array<float> buy)=>
     float mx=math.max(tot.max(),0.0000001)
@@ -428,14 +435,14 @@ score_tip(Lvl lv)=>"Raw pivot: "+str.tostring(lv.raw,format.mintick)+"\nProfile 
  +"%\nFinal level: "+str.tostring(lv.p,format.mintick)
  +"\nPivot touches: "+str.tostring(lv.touches)+(lv.flipped?"\nFlipped (broken level, now opposite role)":"")
 
-pivot_eval(array<Lvl> a,float raw,bool supp,float vb,float atrP,float absSc,float atr)=>
+// Pivot-bar features (vSc, wSc, aSc, bornTime) come pre-computed from the global scope: this runs conditionally
+pivot_eval(array<Lvl> a,float raw,bool supp,float atrP,float vSc,float wSc,float aSc,int bornTime,float atr)=>
     int avail=bar_index-swingLen+1
     int bars=math.max(1,math.min(profLb,avail))
     int newest=swingLen
     int oldest=swingLen+bars-1
     [bot,step,tot,buy]=profile(newest,oldest,profRows)
     [node,evid,nStr,pk,dir]=profile_node(raw,supp,atrP,bot,step,tot,buy)
-    [vSc,wSc,aSc]=pivot_features(supp,vb,absSc)
     bool ok=nStr>=nodeMin and evid>=evidMin
     float pull=ok?pullMax*clip(evid/0.65):0.0
     float p=raw+(node-raw)*pull
@@ -443,7 +450,7 @@ pivot_eval(array<Lvl> a,float raw,bool supp,float vb,float atrP,float absSc,floa
     // Reject candidates the current close already invalidates (would break on the bar they are born)
     float buf=math.max(nz(atr,0.0)*breakAtr,0.0)
     bool valid=supp?close>=p-buf:close<=p+buf
-    ok and valid and sc>=scoreMin?store_lvl(a,p,raw,node,evid,nStr,supp,sc,time[swingLen],bar_index-swingLen,atrP):false
+    ok and valid and sc>=scoreMin?store_lvl(a,p,raw,node,evid,nStr,supp,sc,bornTime,bar_index-swingLen,atrP):false
 
 manage_breaks(array<Lvl> a,float atr)=>
     bool sBreak=false
@@ -569,6 +576,11 @@ absVRat=absBase>0?absV/absBase:1.0
 absBRat=math.abs(close-open)/math.max(high-low,syminfo.mintick)
 absBar=math.sqrt(clip((ABS_BODY_MAX-absBRat)/ABS_BODY_MAX)*clip((absVRat-1.0)/(ABS_VOL_X-1.0)))
 absPiv=nz(ta.highest(absBar,ABS_RAD*2+1)[swingLen-ABS_RAD],0.0)
+pvVSc=clip(((vbPiv>0?nz(volume[swingLen],0.0)/vbPiv:1.0)-0.8)/(PIV_VOL_X-0.8))
+pvRng=math.max(high[swingLen]-low[swingLen],syminfo.mintick)
+pvWSup=clip(((math.min(open[swingLen],close[swingLen])-low[swingLen])/pvRng)/0.50)
+pvWRes=clip(((high[swingLen]-math.max(open[swingLen],close[swingLen]))/pvRng)/0.50)
+pvTime=time[swingLen]
 
 // HTF trend from the last closed HTF bar (t[1] + lookahead_on = no repaint): 2/-2 strong, 1/-1 weak, 0 unknown
 htf_trend()=>
@@ -607,10 +619,10 @@ bool newRes=false
 
 // Evaluate on confirmed bars only so realtime pivots cannot flicker in and out intrabar
 if ready and barstate.isconfirmed and not na(pl)
-    newSup:=pivot_eval(lvls,pl,true,vbPiv,atrPiv,absPiv,atr)
+    newSup:=pivot_eval(lvls,pl,true,atrPiv,pvVSc,pvWSup,absPiv,pvTime,atr)
 
 if ready and barstate.isconfirmed and not na(ph)
-    newRes:=pivot_eval(lvls,ph,false,vbPiv,atrPiv,absPiv,atr)
+    newRes:=pivot_eval(lvls,ph,false,atrPiv,pvVSc,pvWRes,absPiv,pvTime,atr)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Level Lifecycle {
