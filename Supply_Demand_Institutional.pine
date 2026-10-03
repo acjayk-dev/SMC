@@ -1,9 +1,28 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SMC + VWAP · INSTITUTIONAL v7.1
+// SMC + VWAP · INSTITUTIONAL v7.2
 // Smart Money Concepts · confirmación por bandas VWAP · Price Action de Oliver Velez
 // TF operativo 1-15 min · MNQ / MES
+//
+// v7.2 — CORRECCIONES DE LA AUDITORÍA
+//   · SIN GIROS DE POSICIÓN. Con largos abiertos, una venta llenada no abría su operación: TradingView
+//     giraba la posición entera y cerraba los largos sin pasar por su stop ni su objetivo. Ya no se
+//     coloca ninguna orden contraria a la posición abierta, y al llenarse una entrada se cancelan las
+//     pendientes del otro lado.
+//   · EL BOT SE ENTERA DE TODO. Mensajes JSON nuevos: SMC_PLACE (orden límite colocada, al crearse el
+//     OB), SMC_CANCEL (cancelada, con su motivo), SMC_EXIT (stop u objetivo) y SMC_FLAT (cierre por
+//     pérdida diaria o fuera de horario). Antes esos cierres llegaban al bot con el mensaje vacío.
+//   · LÍMITES REALISTAS. Una orden límite solo se da por llena si el precio la supera en 1 tick, y la
+//     lupa de velas (bar magnifier) resuelve las velas que tocan entrada y stop a la vez, si tu plan de
+//     TradingView la incluye.
+//   · RIESGO ACOTADO. Riesgo máximo por operación en ATR y contratos máximos por dirección.
+//   · MÁXIMO DIARIO ESTRICTO. Nunca hay más órdenes pendientes que operaciones le quedan al día, así que
+//     ni llenándose todas en la misma vela se supera el máximo.
+//   · NIVELES QUE NO DESAPARECEN. Los dibujos de estructura tienen tope propio. Antes, al pasar de 500,
+//     TradingView borraba los más antiguos, que eran PDH/PDL, PWH/PWL y la línea EQ.
+//   · NADA PINTADO SÓLIDO SIN ORDEN. Un OB confirmado que no recibe orden o la pierde (horario, bloqueo
+//     diario, máximo de operaciones, posición contraria, riesgo) se atenúa y su etiqueta dice por qué.
 //
 // v7.1 — AUDITORÍA COMPLETA Y CAPA DE ANÁLISIS INSTITUCIONAL
 //   DEFECTOS CORREGIDOS
@@ -44,10 +63,11 @@
 // SIN REPINTADO. Todo se calcula en vela cerrada; el sesgo HTF usa la vela superior ya cerrada.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-strategy("SMC + VWAP Institutional v7.1", shorttitle="SMC VWAP", overlay=true,
+strategy("SMC + VWAP Institutional v7.2", shorttitle="SMC VWAP", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500,
      default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=10,
      commission_type=strategy.commission.cash_per_contract, commission_value=0.62, slippage=1,
+     backtest_fill_limits_assumption=1, use_bar_magnifier=true,
      calc_on_every_tick=false, process_orders_on_close=true)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -174,7 +194,9 @@ trSessOn   = input.bool(false, "Operar solo en horario", group=gTr)
 trSess     = input.session("0930-1600", "Horario (hora de Nueva York)", group=gTr)
 trFlatOut  = input.bool(true, "Fuera de horario: cerrar posiciones y cancelar órdenes", group=gTr)
 trMaxLoss  = input.float(0.0, "Pérdida máxima diaria (moneda · 0 = sin límite)", minval=0.0, step=50.0, group=gTr, tooltip="Si el resultado del día (cerrado + abierto) llega a −N, cierra todo, cancela lo pendiente y no abre más hasta la sesión siguiente. Se comprueba al cierre de cada vela.")
-trMaxDay   = input.int(0, "Operaciones máximas por día (0 = sin límite)", minval=0, maxval=100, group=gTr, tooltip="Cuenta entradas ejecutadas. Al llegar al máximo se cancelan las órdenes pendientes; las abiertas siguen con su stop y su objetivo.")
+trMaxDay   = input.int(0, "Operaciones máximas por día (0 = sin límite)", minval=0, maxval=100, group=gTr, tooltip="Cuenta entradas ejecutadas. Nunca hay más órdenes pendientes que operaciones le quedan al día, así que el máximo no se supera aunque varias se llenen en la misma vela. Al llegar al máximo se cancelan las pendientes; las abiertas siguen con su stop y su objetivo.")
+trMaxRisk  = input.float(3.0, "Riesgo máximo por operación (×ATR · 0 = sin límite)", minval=0.0, step=0.25, group=gTr, tooltip="Distancia máxima de la entrada al stop, en ATR(14). Un OB que exige un stop mayor no se opera: se atenúa con «riesgo alto».")
+trMaxPos   = input.int(3, "Contratos máximos por dirección", minval=1, maxval=10, group=gTr, tooltip="Posición abierta + órdenes pendientes del mismo lado. Si el lote es mayor que este tope no se abre ninguna operación. Las órdenes contrarias a una posición abierta no se colocan nunca: TradingView las ejecutaría como un giro de toda la posición.")
 
 // ── ⑧ PRICE ACTION · OLIVER VELEZ ────────────────────────────────────────────────────────────
 // Módulo PURAMENTE VISUAL y aislado: calcula sus propios patrones, solo llama a barcolor() y lee los
@@ -230,7 +252,8 @@ exhCol   = input.color(#FFEA00, "", inline="p8", group=gPa)
 
 showDash   = input.bool(true, "Panel", group=gVs)
 dashPos    = input.string("Arriba derecha", "Posición del panel", options=["Arriba derecha", "Abajo derecha", "Arriba izquierda", "Abajo izquierda"], group=gVs)
-alOb       = input.bool(true, "Alerta: OB confirmado (JSON)", group=gVs, tooltip="Crea la alerta con 'Cualquier llamada a alert()'. Las órdenes llevan su propio JSON (SMC_ORDER) en el mensaje de 'Ejecuciones de órdenes': pon {{strategy.order.alert_message}}.")
+alOb       = input.bool(true, "Alerta: OB confirmado (JSON)", group=gVs, tooltip="Crea la alerta con 'Cualquier llamada a alert()'. Las órdenes llevan su propio JSON en el mensaje de 'Ejecuciones de órdenes': pon {{strategy.order.alert_message}}.")
+alOrd      = input.bool(true, "Alerta: órdenes para el bot (colocar · cancelar)", group=gVs, tooltip="alert() envía SMC_PLACE al colocar una orden límite (con id, entrada, stop y objetivo) y SMC_CANCEL al cancelarla. Las ejecuciones envían SMC_ORDER (entrada llenada), SMC_EXIT (stop u objetivo) y SMC_FLAT (cierre forzado: cancela todo y queda plano). Un bot que coloque sus límites con SMC_PLACE usa SMC_ORDER solo como confirmación.")
 alStruct   = input.bool(false, "Alerta: BOS / CHoCH swing", group=gVs)
 alSwp      = input.bool(false, "Alerta: barrido de liquidez", group=gVs)
 alRisk     = input.bool(true, "Alerta: límite diario alcanzado", group=gVs)
@@ -348,6 +371,54 @@ var float  trBot    = na
 var int    trTopBar = na
 var int    trBotBar = na
 
+// Dibujos de estructura con tope propio. Si el total de líneas o etiquetas pasa de 500, TradingView borra
+// las más antiguas, y las más antiguas son los niveles fijos creados en la primera vela (PDH/PDL, PWH/PWL,
+// EQ 50%). Con estos topes, más los OB y los niveles, el total nunca llega a 500.
+int MAX_DR_LN = 300
+int MAX_DR_LB = 400
+var array<line>  drLn = array.new<line>()
+var array<label> drLb = array.new<label>()
+
+f_keepLn(line l) =>
+    drLn.push(l)
+    if drLn.size() > MAX_DR_LN
+        line.delete(drLn.shift())
+    l
+
+f_keepLb(label l) =>
+    drLb.push(l)
+    if drLb.size() > MAX_DR_LB
+        label.delete(drLb.shift())
+    l
+
+// Atenúa un OB que no tiene orden y lo dice en su etiqueta: nada pintado sólido queda sin operar.
+f_markOb(OB o, string why) =>
+    color c = o.bull ? colBull : colBear
+    o.expired := true
+    box.set_bgcolor(o.bx, color.new(c, math.min(obOpac + 18, 95)))
+    box.set_text(o.bx, o.txt + " · " + why)
+
+// Cancela la orden pendiente de un OB (entrada y su salida), avisa al bot y marca el OB.
+f_cancelOb(OB o, string why) =>
+    if o.oid != ""
+        strategy.cancel(o.oid)
+        strategy.cancel(o.oid + " X")
+        if alOrd
+            alert('{"event":"SMC_CANCEL","id":"' + o.oid + '","ticker":"' + syminfo.ticker + '","reason":"' + why + '"}', alert.freq_all)
+        o.oid := ""
+        f_markOb(o, why)
+
+// Órdenes pendientes de un lado, o de los dos con both = true.
+f_pending(bool side, bool both) =>
+    int n = 0
+    for o in obs
+        if o.oid != "" and (both or o.bull == side)
+            n += 1
+    n
+
+f_flatMsg(string reason) =>
+    '{"event":"SMC_FLAT","ticker":"' + syminfo.ticker + '","reason":"' + reason + '"}'
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ GESTIÓN DE RIESGO DIARIA Y HORARIO
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -370,25 +441,23 @@ bool  outSess  = trSessOn and not inTrSess
 
 if trMaxLoss > 0 and dayPnl <= -trMaxLoss and not dayLock
     dayLock := true
-    strategy.close_all(comment = "Límite diario")
+    strategy.close_all(comment = "Límite diario", alert_message = f_flatMsg("daily_loss"))
     if alRisk
         alert(syminfo.ticker + " · límite de pérdida diaria alcanzado (" + str.tostring(dayPnl, "#,##0.00") + "): todo cerrado hasta la próxima sesión", alert.freq_once_per_bar_close)
-if outSess and trFlatOut
-    strategy.close_all(comment = "Fuera de horario")
+if outSess and trFlatOut and strategy.position_size != 0
+    strategy.close_all(comment = "Fuera de horario", alert_message = f_flatMsg("session_end"))
 if dayLock or cntHit or (outSess and trFlatOut)
+    string why = dayLock ? "bloqueo diario" : cntHit ? "máx. ops del día" : "fuera de horario"
     for o in obs
-        if o.oid != ""
-            strategy.cancel(o.oid)
-            strategy.cancel(o.oid + " X")
-            o.oid := ""
-
-bool tradeOK = trOn and not dayLock and not cntHit and inTrSess
+        f_cancelOb(o, why)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ CICLO DE VIDA DE LOS OB (antes de crear los de esta vela: un OB no se toca al nacer)
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// En modo retest la orden límite está en el proximal, así que el primer toque ES el llenado: a partir
-// de ahí la operación vive sola con su stop y su objetivo, y lo que le pase al OB ya no la toca.
+// En modo retest la orden límite está en el proximal y se llena cuando el precio la supera en 1 tick
+// (backtest_fill_limits_assumption=1), así que ese primer toque ES el llenado: a partir de ahí la
+// operación vive sola con su stop y su objetivo, y lo que le pase al OB ya no la toca. La regla del
+// toque tiene que coincidir con la de llenado o una orden quedaría pendiente sin que el script lo sepa.
 
 if obs.size() > 0
     for i = obs.size() - 1 to 0
@@ -402,23 +471,19 @@ if obs.size() > 0
                     line.delete(o.mid)
                 obs.remove(i)
             continue
-        if not o.touched and (o.bull ? low <= o.top : high >= o.bot)
+        // Con posición abierta, las pendientes del otro lado se cancelan: si se llenaran, girarían la posición.
+        if o.oid != "" and strategy.position_size != 0 and o.bull != (strategy.position_size > 0)
+            f_cancelOb(o, "posición contraria")
+        // Precios en la rejilla de ticks: "superar en 1 tick" es quedar a medio tick o más del límite.
+        if not o.touched and (o.bull ? low < o.top - 0.5 * tk : high > o.bot + 0.5 * tk)
             o.touched := true
             o.oid     := ""
             box.set_bgcolor(o.bx, color.new(c, math.min(obOpac + (o.conf ? 12 : 25), 95)))
         if o.oid != "" and bar_index - o.bar0 > trExpire
-            strategy.cancel(o.oid)
-            strategy.cancel(o.oid + " X")
-            o.oid     := ""
-            o.expired := true
-            box.set_bgcolor(o.bx, color.new(c, math.min(obOpac + 18, 95)))
-            box.set_text(o.bx, o.txt + " · caducado")
+            f_cancelOb(o, "caducado")
         bool dead = o.bull ? (obInval == "Cierre" ? close : low) < o.bot : (obInval == "Cierre" ? close : high) > o.top
         if dead
-            if o.oid != ""
-                strategy.cancel(o.oid)
-                strategy.cancel(o.oid + " X")
-                o.oid := ""
+            f_cancelOb(o, "invalidado")
             if brkShow and o.conf and obInval == "Cierre"
                 color bc = o.bull ? colBear : colBull
                 o.brk := true
@@ -490,10 +555,10 @@ method pivots(Structure s, float ph, float pl, int len, bool liq, bool marks) =>
         int pb = bar_index - len
         // EQH: dos máximos al mismo precio sin que el primero se haya roto. Encima hay un pool de stops.
         if liq and eqShow and s.hiLive and math.abs(ph - s.hi) <= atrC * eqTol
-            line.new(s.hiBar, s.hi, pb, ph, color = color.new(colBear, 25), style = line.style_dotted)
-            label.new(pb, math.max(ph, s.hi), "EQH", style = label.style_label_down, color = #00000000, textcolor = colBear, size = size.tiny)
+            f_keepLn(line.new(s.hiBar, s.hi, pb, ph, color = color.new(colBear, 25), style = line.style_dotted))
+            f_keepLb(label.new(pb, math.max(ph, s.hi), "EQH", style = label.style_label_down, color = #00000000, textcolor = colBear, size = size.tiny))
         if marks
-            label.new(pb, ph, na(s.hi) ? "H" : ph > s.hi ? "HH" : "LH", style = label.style_label_down, color = #00000000, textcolor = color.gray, size = size.tiny)
+            f_keepLb(label.new(pb, ph, na(s.hi) ? "H" : ph > s.hi ? "HH" : "LH", style = label.style_label_down, color = #00000000, textcolor = color.gray, size = size.tiny))
         s.hi     := ph
         s.hiBar  := pb
         s.hiLive := true
@@ -501,10 +566,10 @@ method pivots(Structure s, float ph, float pl, int len, bool liq, bool marks) =>
     if not na(pl)
         int pb = bar_index - len
         if liq and eqShow and s.loLive and math.abs(pl - s.lo) <= atrC * eqTol
-            line.new(s.loBar, s.lo, pb, pl, color = color.new(colBull, 25), style = line.style_dotted)
-            label.new(pb, math.min(pl, s.lo), "EQL", style = label.style_label_up, color = #00000000, textcolor = colBull, size = size.tiny)
+            f_keepLn(line.new(s.loBar, s.lo, pb, pl, color = color.new(colBull, 25), style = line.style_dotted))
+            f_keepLb(label.new(pb, math.min(pl, s.lo), "EQL", style = label.style_label_up, color = #00000000, textcolor = colBull, size = size.tiny))
         if marks
-            label.new(pb, pl, na(s.lo) ? "L" : pl < s.lo ? "LL" : "HL", style = label.style_label_up, color = #00000000, textcolor = color.gray, size = size.tiny)
+            f_keepLb(label.new(pb, pl, na(s.lo) ? "L" : pl < s.lo ? "LL" : "HL", style = label.style_label_up, color = #00000000, textcolor = color.gray, size = size.tiny))
         s.lo     := pl
         s.loBar  := pb
         s.loLive := true
@@ -514,12 +579,12 @@ method pivots(Structure s, float ph, float pl, int len, bool liq, bool marks) =>
         s.hiSwp    := true
         s.swpHiBar := bar_index
         if liq and swpShow
-            label.new(bar_index, high, "$", style = label.style_label_down, color = #00000000, textcolor = colBear, size = size.small)
+            f_keepLb(label.new(bar_index, high, "$", style = label.style_label_down, color = #00000000, textcolor = colBear, size = size.small))
     if s.loLive and not s.loSwp and low < s.lo and close >= s.lo
         s.loSwp    := true
         s.swpLoBar := bar_index
         if liq and swpShow
-            label.new(bar_index, low, "$", style = label.style_label_up, color = #00000000, textcolor = colBull, size = size.small)
+            f_keepLb(label.new(bar_index, low, "$", style = label.style_label_up, color = #00000000, textcolor = colBull, size = size.small))
 
 sSw.pivots(phS, plS, swLen, false, showSwings)
 sInt.pivots(phI, plI, intLen, true, false)
@@ -573,8 +638,8 @@ for L = 0 to 1
             else
                 s.loLive := false
             if isSw ? showSw : showInt
-                line.new(lb, lvl, bar_index, lvl, color = color.new(c, isSw ? 0 : 35), style = isSw ? line.style_solid : line.style_dashed, width = isSw ? 2 : 1)
-                label.new(int(math.round((lb + bar_index) / 2.0)), lvl, tag, style = bull ? label.style_label_down : label.style_label_up, color = #00000000, textcolor = color.new(c, isSw ? 0 : 25), size = isSw ? size.small : size.tiny)
+                f_keepLn(line.new(lb, lvl, bar_index, lvl, color = color.new(c, isSw ? 0 : 35), style = isSw ? line.style_solid : line.style_dashed, width = isSw ? 2 : 1))
+                f_keepLb(label.new(int(math.round((lb + bar_index) / 2.0)), lvl, tag, style = bull ? label.style_label_down : label.style_label_up, color = #00000000, textcolor = color.new(c, isSw ? 0 : 25), size = isSw ? size.small : size.tiny))
             if alStruct and isSw
                 alert(syminfo.ticker + " " + timeframe.period + " · " + s.evt + " @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
 
@@ -645,9 +710,7 @@ for L = 0 to 1
                     if not skipNew
                         if repl >= 0
                             OB x = obs.get(repl)
-                            if x.oid != ""
-                                strategy.cancel(x.oid)
-                                strategy.cancel(x.oid + " X")
+                            f_cancelOb(x, "sustituido")
                             box.delete(x.bx)
                             if not na(x.mid)
                                 line.delete(x.mid)
@@ -670,9 +733,7 @@ for L = 0 to 1
                             for i = 0 to obs.size() - 1
                                 OB x = obs.get(i)
                                 if x.bull == bull and not x.brk
-                                    if x.oid != ""
-                                        strategy.cancel(x.oid)
-                                        strategy.cancel(x.oid + " X")
+                                    f_cancelOb(x, "fuera del tope")
                                     box.delete(x.bx)
                                     if not na(x.mid)
                                         line.delete(x.mid)
@@ -683,24 +744,45 @@ for L = 0 to 1
                             string vwJ = na(vwapV) ? "null" : str.tostring(vwapV, format.mintick)
                             alert('{"event":"SMC_OB","side":"' + (bull ? "LONG" : "SHORT") + '","ticker":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","structure":"' + tag + '","grade":"' + gr + '","score":' + str.tostring(sc) + ',"top":' + str.tostring(top, format.mintick) + ',"bottom":' + str.tostring(bot, format.mintick) + ',"vwap":' + vwJ + '}', alert.freq_once_per_bar_close)
 
-                        // ── Operación: cada OB pintado (confirmado) abre la suya ──
-                        if cf and tradeOK and (bull ? trDir != "Solo ventas" : trDir != "Solo compras")
+                        // ── Operación: cada OB pintado (confirmado) abre la suya, salvo que un control de riesgo
+                        // lo impida. Entonces el OB se atenúa y dice por qué: nada pintado sólido queda sin orden.
+                        bool dirOK = bull ? trDir != "Solo ventas" : trDir != "Solo compras"
+                        if cf and trOn and dirOK
                             bool  mkt   = trEntry == "Al formarse (mercado)"
                             float entry = mkt ? close : bull ? top : bot
                             float sl    = trSlMode == "OB ± ticks" ? (bull ? bot - trSlTicks * tk : top + trSlTicks * tk) : (bull ? entry - trSlTicks * tk : entry + trSlTicks * tk)
                             float risk  = bull ? entry - sl : sl - entry
                             float tpD   = trTpMode == "Ratio R:R" ? risk * trTpRR : trTpTicks * tk
                             float tp    = bull ? entry + tpD : entry - tpD
-                            if risk > 0
+                            // Una entrada contraria a la posición no abriría su propia operación: TradingView giraría
+                            // la posición entera y cerraría las demás sin pasar por su stop ni su objetivo.
+                            float posSz  = strategy.position_size
+                            bool  oppOK  = posSz == 0 or (bull ? posSz > 0 : posSz < 0)
+                            bool  riskOK = trMaxRisk <= 0 or na(atrC) or risk <= atrC * trMaxRisk
+                            // Exposición: posición + pendientes del mismo lado + esta orden. Día: llenadas + TODAS las
+                            // pendientes + esta, así ni llenándose todas en la misma vela se pasa del máximo.
+                            bool  expoOK = math.abs(posSz) + (f_pending(bull, false) + 1) * trQty <= trMaxPos
+                            bool  dayOK  = trMaxDay <= 0 or dayFills + f_pending(bull, true) + 1 <= trMaxDay
+                            string why = dayLock ? "bloqueo diario" : not inTrSess ? "fuera de horario" : risk <= 0 ? "stop no válido" : not oppOK ? "posición contraria" : not riskOK ? "riesgo alto" : not expoOK ? "exposición máxima" : (cntHit or not dayOK) ? "máx. ops del día" : ""
+                            if why != ""
+                                f_markOb(o, "sin orden · " + why)
+                            else
                                 trN += 1
-                                string oid = (bull ? "Buy #" : "Sell #") + str.tostring(trN)
-                                string msg = '{"event":"SMC_ORDER","side":"' + (bull ? "buy" : "sell") + '","type":"' + (mkt ? "market" : "limit") + '","ticker":"' + syminfo.ticker + '","qty":' + str.tostring(trQty) + ',"entry":' + str.tostring(entry, format.mintick) + ',"sl":' + str.tostring(sl, format.mintick) + ',"tp":' + str.tostring(tp, format.mintick) + ',"grade":"' + gr + '"}'
+                                string oid   = (bull ? "Buy #" : "Sell #") + str.tostring(trN)
+                                string tkJ   = '","ticker":"' + syminfo.ticker + '","qty":' + str.tostring(trQty)
+                                string body  = '"id":"' + oid + '","side":"' + (bull ? "buy" : "sell") + '","type":"' + (mkt ? "market" : "limit") + tkJ + ',"entry":' + str.tostring(entry, format.mintick) + ',"sl":' + str.tostring(sl, format.mintick) + ',"tp":' + str.tostring(tp, format.mintick) + ',"grade":"' + gr + '"'
+                                string msg   = '{"event":"SMC_ORDER",' + body + '}'
+                                string xSide = bull ? "sell" : "buy"
+                                string xTp   = '{"event":"SMC_EXIT","id":"' + oid + '","reason":"tp","side":"' + xSide + tkJ + '}'
+                                string xSl   = '{"event":"SMC_EXIT","id":"' + oid + '","reason":"sl","side":"' + xSide + tkJ + '}'
                                 if mkt
                                     strategy.entry(oid, bull ? strategy.long : strategy.short, qty = trQty, comment = oid + " " + gr, alert_message = msg)
                                 else
                                     strategy.entry(oid, bull ? strategy.long : strategy.short, qty = trQty, limit = entry, comment = oid + " " + gr, alert_message = msg)
                                     o.oid := oid
-                                strategy.exit(oid + " X", from_entry = oid, stop = sl, limit = tp, comment_loss = "SL " + oid, comment_profit = "TP " + oid)
+                                    if alOrd
+                                        alert('{"event":"SMC_PLACE",' + body + '}', alert.freq_all)
+                                strategy.exit(oid + " X", from_entry = oid, stop = sl, limit = tp, comment_loss = "SL " + oid, comment_profit = "TP " + oid, alert_loss = xSl, alert_profit = xTp)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ DIBUJO DEL CONTEXTO (solo en la última vela: objetos fijos que se recolocan)
@@ -802,7 +884,7 @@ if showDash and lastBar
     float  pf    = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
     string totT  = nCl == 0 ? "—" : str.tostring(nCl) + " ops · " + str.tostring(100.0 * strategy.wintrades / nCl, "#") + "% · PF " + (na(pf) ? "∞" : str.tostring(pf, "#.##")) + " · " + (strategy.netprofit >= 0 ? "+" : "") + str.tostring(strategy.netprofit, "#,##0")
     color  pdCol = not pdOK ? color.gray : pdPct > 55 ? colBear : pdPct < 45 ? colBull : color.gray
-    table.cell(dash, 0, 0, "SMC + VWAP v7.1", text_color = #FFD700, text_size = size.small)
+    table.cell(dash, 0, 0, "SMC + VWAP v7.2", text_color = #FFD700, text_size = size.small)
     table.cell(dash, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, text_size = size.small)
     f_row(1, "Sesgo HTF " + htfTf, not htfOK ? "sin datos" : htfTrend == 1 ? "ALCISTA" : htfTrend == -1 ? "BAJISTA" : "—", htfTrend == 1 ? colBull : htfTrend == -1 ? colBear : color.gray)
     f_row(2, "Estructura", "Swing " + f_dir(sSw.trend) + " · Interna " + f_dir(sInt.trend), sSw.trend == 1 ? colBull : sSw.trend == -1 ? colBear : color.gray)
@@ -949,4 +1031,4 @@ color paFinal  = paName != "" and paCtxOK ? color.new(paCol, paOpac) : na
 barcolor(paFinal, title = "Price Action · Velez")
 
 if paTagOn and not na(paFinal) and barstate.isconfirmed
-    label.new(bar_index, paBull ? low : high, paName, style = paBull ? label.style_label_up : label.style_label_down, color = color.new(paCol, 25), textcolor = color.white, size = size.tiny)
+    f_keepLb(label.new(bar_index, paBull ? low : high, paName, style = paBull ? label.style_label_up : label.style_label_down, color = color.new(paCol, 25), textcolor = color.white, size = size.tiny))
