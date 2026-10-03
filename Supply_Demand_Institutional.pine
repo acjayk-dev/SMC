@@ -13,9 +13,9 @@
 //   · EL BOT SE ENTERA DE TODO. Mensajes JSON nuevos: SMC_PLACE (orden límite colocada, al crearse el
 //     OB), SMC_CANCEL (cancelada, con su motivo), SMC_EXIT (stop u objetivo) y SMC_FLAT (cierre por
 //     pérdida diaria o fuera de horario). Antes esos cierres llegaban al bot con el mensaje vacío.
-//   · LÍMITES REALISTAS. Una orden límite solo se da por llena si el precio la supera en 1 tick, y la
-//     lupa de velas (bar magnifier) resuelve las velas que tocan entrada y stop a la vez, si tu plan de
-//     TradingView la incluye.
+//   · LÍMITES REALISTAS. Una orden límite solo se da por llena si el precio la supera en 1 tick. La lupa
+//     de velas (bar magnifier), que resuelve las velas que tocan entrada y stop a la vez, NO va en el
+//     código: sin plan Premium da error de ejecución. Si tu plan la incluye, actívala en Propiedades.
 //   · RIESGO ACOTADO. Riesgo máximo por operación en ATR y contratos máximos por dirección.
 //   · MÁXIMO DIARIO ESTRICTO. Nunca hay más órdenes pendientes que operaciones le quedan al día, así que
 //     ni llenándose todas en la misma vela se supera el máximo.
@@ -67,7 +67,7 @@ strategy("SMC + VWAP Institutional v7.2", shorttitle="SMC VWAP", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500,
      default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=10,
      commission_type=strategy.commission.cash_per_contract, commission_value=0.62, slippage=1,
-     backtest_fill_limits_assumption=1, use_bar_magnifier=true,
+     backtest_fill_limits_assumption=1,
      calc_on_every_tick=false, process_orders_on_close=true)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
