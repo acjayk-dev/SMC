@@ -1,9 +1,27 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SMC + VWAP · INSTITUTIONAL v7.2
+// SMC + VWAP · INSTITUTIONAL v7.3
 // Smart Money Concepts · confirmación por bandas VWAP · Price Action de Oliver Velez
 // TF operativo 1-15 min · MNQ / MES
+//
+// v7.3 — PATRONES VALIDADOS CONTRA LA METODOLOGÍA (ICT / SMC / Velez)
+//   CAMBIAN EL BACKTEST
+//   · VWAP RTH. El VWAP de referencia de las mesas en ES/NQ empieza a las 9:30 de Nueva York, no con la
+//     sesión de CME (18:00). Nuevo «Inicio del VWAP», RTH 9:30 por defecto: acumula solo de 9:30 a 16:00 y
+//     fuera de ese horario se queda en el valor del cierre de contado. «Sesión completa» es el de v7.2.
+//   · VELA DEL OB SEGÚN ICT: la ÚLTIMA vela de color contrario antes del desplazamiento. Antes se buscaba
+//     solo desde el extremo hacia atrás, y si el mínimo lo marcaba una vela verde se elegía una roja anterior
+//     al mínimo en vez de la que había justo antes del impulso. La zona sigue llegando hasta el extremo.
+//   SOLO VISUALES (módulo Velez)
+//   · RBI / GBI con sus tres velas: control con cuerpo, ignorada estrecha que no retrocede más de un tercio
+//     de la de control, y señal que no rompe el mínimo de la ignorada y supera su cuerpo.
+//   · 180: las dos velas cierran en su cuarto extremo. Una 180 que cierra a mitad de rango no es un giro.
+//   · Tail: mecha de 2/3 del rango por defecto (antes 60%).
+//   OPCIONES NUEVAS, APAGADAS POR DEFECTO
+//   · FVG con vela central de desplazamiento (cierra más allá de la vela 1).
+//   · Invalidación del OB por mean threshold (cierre más allá del 50%).
+//   · Barridos de PDH/PDL y PWH/PWL: se marcan y cuentan como liquidez tomada.
 //
 // v7.2 — CORRECCIONES DE LA AUDITORÍA
 //   · SIN GIROS DE POSICIÓN. Con largos abiertos, una venta llenada no abría su operación: TradingView
@@ -63,7 +81,7 @@
 // SIN REPINTADO. Todo se calcula en vela cerrada; el sesgo HTF usa la vela superior ya cerrada.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-strategy("SMC + VWAP Institutional v7.2", shorttitle="SMC VWAP", overlay=true,
+strategy("SMC + VWAP Institutional v7.3", shorttitle="SMC VWAP", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500,
      default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=10,
      commission_type=strategy.commission.cash_per_contract, commission_value=0.62, slippage=1,
@@ -138,7 +156,7 @@ obFrom     = input.string("BOS y CHoCH", "Crear OB en", options=["BOS y CHoCH", 
 obNeedFvg  = input.bool(true, "Exigir desplazamiento (FVG en el impulso)", group=gOb, tooltip="SMC puro: un OB solo vale si el impulso que lo abandona dejó un desequilibrio (FVG).")
 obLook     = input.int(10, "Búsqueda de la vela contraria (velas)", minval=1, maxval=50, group=gOb)
 obMax      = input.int(5, "OB vivos por lado", minval=1, maxval=30, group=gOb)
-obInval    = input.string("Cierre", "Invalidación", options=["Cierre", "Mecha"], group=gOb, tooltip="Cuándo muere el OB: con un CIERRE más allá del distal o con cualquier MECHA que lo atraviese. Solo la rotura por cierre crea breaker.")
+obInval    = input.string("Cierre", "Invalidación", options=["Cierre", "Mecha", "Mean threshold (50%)"], group=gOb, tooltip="Cuándo muere el OB: con un CIERRE más allá del distal, con cualquier MECHA que lo atraviese, o (ICT, más estricto) con un cierre más allá de su 50%, el MEAN THRESHOLD. Solo un cierre más allá del distal crea breaker: con «Mecha» nunca.")
 obMid      = input.bool(true, "Línea del 50% (mean threshold)", group=gOb)
 brkShow    = input.bool(true, "Breaker blocks (OB roto por cierre)", group=gOb, tooltip="Un OB confirmado que el precio rompe POR CIERRE cambia de polaridad: la demanda rota pasa a ser resistencia y al revés. Solo se dibuja; no se opera. Muere cuando el precio cierra de vuelta al otro lado.")
 brkMax     = input.int(3, "Breakers en pantalla", minval=1, maxval=20, group=gOb)
@@ -150,6 +168,7 @@ trendFilt  = input.string("Estructura swing", "Filtro de tendencia", options=["E
 pdFilt     = input.bool(false, "Exigir descuento (compras) / premium (ventas)", group=gFl, tooltip="El punto medio del OB tiene que estar en la mitad barata del rango swing para comprar, y en la cara para vender.")
 minConf    = input.int(0, "Confluencias mínimas (0 = no filtrar)", minval=0, maxval=7, group=gFl, tooltip="De 7: sesgo swing, sesgo HTF, liquidez tomada en el tramo, descuento/premium, lado barato del VWAP, kill zone y desplazamiento fuerte (FVG ≥ 0.5×ATR o volumen ≥ 1.5× la media). Grado: A+ ≥ 6 · A ≥ 4 · B ≥ 2 · C.")
 
+vwAnchor   = input.string("RTH 9:30", "Inicio del VWAP", options=["RTH 9:30", "Sesión completa"], group=gVw, tooltip="RTH 9:30: empieza con la apertura de contado (9:30 de Nueva York) y acumula hasta las 16:00; es el VWAP contra el que se miden las mesas institucionales en ES/NQ. Fuera de ese horario se queda en el valor del cierre de contado, que sigue siendo una referencia. SESIÓN COMPLETA: empieza con la sesión del símbolo (en CME, 18:00 de Nueva York) e incluye la noche; es el de v7.2.")
 vwSig1     = input.float(1.0, "Banda interior (σ)", minval=0.25, maxval=4.0, step=0.25, group=gVw)
 vwSig2     = input.float(2.0, "Banda exterior (σ)", minval=0.5, maxval=5.0, step=0.25, group=gVw)
 vwShow     = input.bool(true, "Dibujar VWAP y bandas", group=gVw)
@@ -165,7 +184,7 @@ kzAs       = input.session("2000-2359", "", inline="k1", group=gCx)
 kzLoOn     = input.bool(true, "Londres", inline="k2", group=gCx)
 kzLo       = input.session("0200-0500", "", inline="k2", group=gCx)
 kzNaOn     = input.bool(true, "NY AM", inline="k3", group=gCx)
-kzNa       = input.session("0700-1000", "", inline="k3", group=gCx)
+kzNa       = input.session("0700-1000", "", inline="k3", group=gCx, tooltip="07:00-10:00 es la ventana clásica de ICT. Para índices (MNQ/MES) la más usada es 08:30-11:00, que cubre la apertura de contado. Solo cambia la confluencia «kill zone» del grado.")
 kzNpOn     = input.bool(true, "NY PM", inline="k4", group=gCx)
 kzNp       = input.session("1330-1600", "", inline="k4", group=gCx)
 pdlShow    = input.bool(true, "PDH / PDL (día previo)", group=gCx)
@@ -175,8 +194,10 @@ lvlCol     = input.color(#B0BEC5, "Color de niveles", group=gCx)
 eqShow     = input.bool(true, "Máximos / mínimos iguales (EQH · EQL)", group=gLq)
 eqTol      = input.float(0.1, "Tolerancia de igualdad (×ATR)", minval=0.01, maxval=1.0, step=0.01, group=gLq)
 swpShow    = input.bool(true, "Barridos de liquidez ($)", group=gLq, tooltip="Mecha más allá de un swing interno vivo que cierra de vuelta dentro: tomó los stops sin romper la estructura.")
+swpExt     = input.bool(false, "Barridos de PDH/PDL y PWH/PWL", group=gLq, tooltip="Mecha más allá del máximo o mínimo del día (o la semana) anterior que cierra de vuelta dentro: la liquidez externa, la más vigilada. Se marca una vez por nivel y cuenta como «liquidez tomada» en el grado del OB.")
 fvgShow    = input.bool(true, "Dibujar FVG", group=gLq)
 fvgMin     = input.float(0.2, "FVG: hueco mínimo (×ATR)", minval=0.0, step=0.05, group=gLq, tooltip="También es el tamaño mínimo del FVG que valida el desplazamiento de un OB.")
+fvgDisp    = input.bool(false, "FVG: exigir vela central de desplazamiento", group=gLq, tooltip="ICT: la vela central del FVG es la de desplazamiento, así que cierra más allá del extremo de la vela 1 (sobre su máximo en un FVG alcista). Descarta huecos que solo son una apertura con hueco. Se aplica a los FVG dibujados y al desplazamiento que valida los OB.")
 fvgMax     = input.int(10, "FVG vivos", minval=1, maxval=50, group=gLq)
 fvgCol     = input.color(#42A5F5, "Color FVG", group=gLq)
 
@@ -219,36 +240,39 @@ shvWick  = input.int(10,     "% mecha",   inline="p2", group=gPa, minval=0, maxv
 shvCUp   = input.color(#00E5FF, "", inline="p2", group=gPa)
 shvCDn   = input.color(#00E5FF, "", inline="p2", group=gPa)
 
-pinOn    = input.bool(true,  "Pin / Tail", inline="p3", group=gPa, tooltip="VELEZ · Bottoming / Topping Tail: rechazo. Mecha dominante, cuerpo pequeño, y en el EXTREMO del movimiento: el mínimo (o el máximo) de las últimas velas. La mecha es el rastro de las órdenes que absorbieron el movimiento.")
+pinOn    = input.bool(true,  "Pin / Tail", inline="p3", group=gPa, tooltip="VELEZ · Bottoming / Topping Tail: rechazo. La mecha ocupa 2/3 o más del rango (al menos el doble que el cuerpo), y en el EXTREMO del movimiento: el mínimo (o el máximo) de las últimas velas. La mecha es el rastro de las órdenes que absorbieron el movimiento.")
 pinRng   = input.float(0.8,  "×ATR",      inline="p3", group=gPa, step=0.1, minval=0.2)
-pinWick  = input.int(60,     "% mecha",   inline="p3", group=gPa, minval=40, maxval=90)
+pinWick  = input.int(67,     "% mecha",   inline="p3", group=gPa, minval=40, maxval=90)
 pinCUp   = input.color(#FFD600, "", inline="p3", group=gPa)
 pinCDn   = input.color(#FFD600, "", inline="p3", group=gPa)
 pinBodyP = input.int(30, "Pin: cuerpo máximo (% del rango)", minval=5, maxval=50, group=gPa)
 pinLook  = input.int(5, "Pin: extremo de las últimas N velas (0 = sin exigir)", minval=0, maxval=50, group=gPa, tooltip="Bottoming tail: su mínimo es el más bajo de las últimas N velas. Topping tail: su máximo es el más alto. Sin esto se pintan rechazos en mitad de un rango, donde no rechazan nada.")
 
-v18On    = input.bool(true,  "180",        inline="p4", group=gPa, tooltip="VELEZ · 180 bar: una vela con cuerpo real anulada por la siguiente en sentido contrario, que cierra más allá de su apertura. El giro completo en dos velas.")
+v18On    = input.bool(true,  "180",        inline="p4", group=gPa, tooltip="VELEZ · 180 bar: una vela ancha que cierra en su extremo, anulada por la siguiente, igual de ancha, que cierra en el extremo contrario y más allá de su apertura. El giro completo en dos velas.")
 v18Body  = input.int(60,     "% rango",   inline="p4", group=gPa, minval=30, maxval=100)
 v18Size  = input.int(80,     "% previa",  inline="p4", group=gPa, minval=40, maxval=200)
 v18CUp   = input.color(#7C4DFF, "", inline="p4", group=gPa)
 v18CDn   = input.color(#7C4DFF, "", inline="p4", group=gPa)
 v18Rng   = input.float(0.6, "180: rango mínimo de las dos velas (×ATR)", minval=0.0, step=0.1, group=gPa, tooltip="Las dos velas del 180 tienen que ser anchas. Sin mínimo, en un lateral dos velas pequeñas cumplen el patrón y no significan nada.")
+v18Cl    = input.int(25, "180: cierre en el extremo (% del rango)", minval=5, maxval=50, group=gPa, tooltip="Bull 180: la primera vela cierra en este % inferior de su rango y la segunda en este % superior (al revés en el bear 180). Una 180 que cierra a mitad de rango es una lucha, no un giro.")
 
 outOn    = input.bool(true,  "Outside",   inline="p5", group=gPa, tooltip="Outside bar: envuelve el rango de la vela previa y cierra más allá de su extremo.")
 outRng   = input.float(1.0,  "×ATR",      inline="p5", group=gPa, step=0.1, minval=0.3)
 outCUp   = input.color(#2962FF, "", inline="p5", group=gPa)
 outCDn   = input.color(#2962FF, "", inline="p5", group=gPa)
 
-rbiOn    = input.bool(true,  "RBI / GBI", inline="p6", group=gPa, tooltip="VELEZ · Red Bar Ignored / Green Bar Ignored: una vela contraria PEQUEÑA que la siguiente ignora por completo. Patrón de CONTINUACIÓN: solo cuenta si ya hay tendencia en esa dirección (ver «RBI/GBI: tendencia previa»).")
+rbiOn    = input.bool(true,  "RBI / GBI", inline="p6", group=gPa, tooltip="VELEZ · Red Bar Ignored / Green Bar Ignored, tres velas. CONTROL: a favor, con cuerpo. IGNORADA: contraria y estrecha, que no retrocede más de un tercio de la de control. SEÑAL: no rompe el extremo de la ignorada y supera su cuerpo. Patrón de CONTINUACIÓN: solo cuenta con tendencia en esa dirección (ver «RBI/GBI: tendencia previa»).")
 rbiSmall = input.float(0.5,  "cuerpo ×ATR", inline="p6", group=gPa, step=0.05, minval=0.1)
 rbiCUp   = input.color(#FF9100, "", inline="p6", group=gPa)
 rbiCDn   = input.color(#FF9100, "", inline="p6", group=gPa)
-rbiCtx   = input.string("SMA 20 a favor", "RBI/GBI: tendencia previa", options=["SMA 20 a favor", "Vela anterior", "Ninguna"], group=gPa, tooltip="SMA 20 A FAVOR (referencia de Velez): para RBI, cierre sobre la media de 20 y la media subiendo; al revés para GBI. VELA ANTERIOR: la vela previa a la ignorada es del color de la tendencia. NINGUNA: sin exigir tendencia; entonces el patrón también aparece en giros.")
+rbiCtlB  = input.int(55, "RBI/GBI: cuerpo mínimo de la vela de control (% del rango)", minval=30, maxval=100, group=gPa)
+rbiPos   = input.int(33, "RBI/GBI: retroceso máximo de la ignorada (% de la vela de control)", minval=10, maxval=66, group=gPa, tooltip="El cierre de la ignorada se queda en el tercio superior de la vela de control (RBI) o en el inferior (GBI). Es lo que la hace «ignorada»: el retroceso no llega a nada.")
+rbiCtx   = input.string("SMA 20 a favor", "RBI/GBI: tendencia previa", options=["SMA 20 a favor", "Ninguna"], group=gPa, tooltip="SMA 20 A FAVOR (referencia de Velez): para RBI, cierre sobre la media de 20 y la media subiendo; al revés para GBI. NINGUNA: sin exigir tendencia; entonces el patrón también aparece en giros.")
 
 insOn    = input.bool(true,  "Inside",    inline="p7", group=gPa, tooltip="Inside bar: compresión dentro de la vela madre. No dice dirección, dice que el mercado está decidiendo.")
 insCol   = input.color(#9E9E9E, "", inline="p7", group=gPa)
 
-exhOn    = input.bool(true,  "Agotamiento 3-5-8", inline="p8", group=gPa, tooltip="VELEZ · Regla 3-5-8: velas seguidas empujando en la misma dirección. A la quinta el movimiento está extendido; a la octava, agotado. Es la prioridad más baja: solo pinta si la vela no encaja en ningún otro patrón.")
+exhOn    = input.bool(true,  "Agotamiento 3-5-8", inline="p8", group=gPa, tooltip="VELEZ · Regla 3-5-8: velas seguidas empujando en la misma dirección. A la tercera ya hay que estar atento («3 a 5 velas: piensa en vender»), a la quinta el movimiento está extendido y a la octava, agotado. El aviso está en 5 para no pintar cada tercera vela; bájalo a 3 para la lectura estricta. Es la prioridad más baja: solo pinta si la vela no encaja en ningún otro patrón.")
 exhA     = input.int(5,      "aviso",     inline="p8", group=gPa, minval=3, maxval=12)
 exhB     = input.int(8,      "extremo",   inline="p8", group=gPa, minval=4, maxval=20)
 exhCol   = input.color(#F500A1, "", inline="p8", group=gPa)
@@ -274,14 +298,22 @@ volMa = ta.sma(volume, 20)
 float rvolC = na(volMa) or volMa <= 0 ? na : volume / volMa
 bool  lastBar = barstate.islastconfirmedhistory or barstate.isrealtime
 
+// Ancla RTH: se reinicia en la primera vela de contado del día y solo acumula de 9:30 a 16:00 de Nueva York.
+// Fuera de ese horario los acumuladores no se mueven, así que el VWAP queda en el valor del cierre de contado.
+bool vwRth   = vwAnchor == "RTH 9:30"
+bool vwInRth = timeframe.isintraday and not na(time(timeframe.period, "0930-1600", "America/New_York"))
+// El cambio de día cubre un gráfico solo en horario regular, donde la vela anterior a las 9:30 ya era RTH.
+bool vwReset = vwRth ? vwInRth and (not vwInRth[1] or timeframe.change("D")) : timeframe.change("D")
+bool vwAdd   = not vwRth or vwInRth
+
 var float vwSum = 0.0
 var float vwVol = 0.0
 var float vwSq  = 0.0
-if timeframe.change("D")
+if vwReset
     vwSum := 0.0
     vwVol := 0.0
     vwSq  := 0.0
-float vwVol0 = na(volume) ? 0.0 : volume
+float vwVol0 = na(volume) or not vwAdd ? 0.0 : volume
 vwSum += hlc3 * vwVol0
 vwVol += vwVol0
 vwSq  += hlc3 * hlc3 * vwVol0
@@ -485,10 +517,16 @@ if obs.size() > 0
             box.set_bgcolor(o.bx, color.new(c, math.min(obOpac + (o.conf ? 12 : 25), 95)))
         if o.oid != "" and bar_index - o.bar0 > trExpire
             f_cancelOb(o, "caducado")
-        bool dead = o.bull ? (obInval == "Cierre" ? close : low) < o.bot : (obInval == "Cierre" ? close : high) > o.top
+        // Mean threshold (ICT): el OB muere con un cierre más allá de su 50%. Breaker solo si además el cierre
+        // supera el distal: cruzar la mitad del bloque no rompe el swing que lo creó.
+        bool  mtInv  = obInval == "Mean threshold (50%)"
+        float invPx  = obInval == "Mecha" ? (o.bull ? low : high) : close
+        float invLim = mtInv ? (o.top + o.bot) / 2 : o.bull ? o.bot : o.top
+        bool  dead   = o.bull ? invPx < invLim : invPx > invLim
+        bool  fullBk = o.bull ? close < o.bot : close > o.top
         if dead
             f_cancelOb(o, "invalidado")
-            if brkShow and o.conf and obInval == "Cierre"
+            if brkShow and o.conf and obInval != "Mecha" and fullBk
                 color bc = o.bull ? colBear : colBull
                 o.brk := true
                 box.set_bgcolor(o.bx, color.new(bc, 88))
@@ -533,8 +571,8 @@ if gaps.size() > 0
             box.delete(g.bx)
             gaps.remove(i)
 
-bool fvgUp = low > high[2] and low - high[2] >= atrC * fvgMin
-bool fvgDn = high < low[2] and low[2] - high >= atrC * fvgMin
+bool fvgUp = low > high[2] and low - high[2] >= atrC * fvgMin and (not fvgDisp or close[1] > high[2])
+bool fvgDn = high < low[2] and low[2] - high >= atrC * fvgMin and (not fvgDisp or close[1] < low[2])
 if fvgShow and (fvgUp or fvgDn)
     float gT = fvgUp ? low : low[2]
     float gB = fvgUp ? high[2] : high
@@ -598,6 +636,43 @@ if alSwp and sInt.swpHiBar == bar_index
 if alSwp and sInt.swpLoBar == bar_index
     alert(syminfo.ticker + " " + timeframe.period + " · barrido de liquidez vendedora @ " + str.tostring(low, format.mintick), alert.freq_once_per_bar_close)
 
+// Liquidez EXTERNA: barrido de PDH/PDL y PWH/PWL. Misma regla que el interno (mecha más allá, cierre dentro),
+// una vez por nivel y periodo. Opcional: si está apagado, nada de aquí cambia el grado.
+var bool swPdH  = false
+var bool swPdL  = false
+var bool swPwH  = false
+var bool swPwL  = false
+var int  swpXHi = na
+var int  swpXLo = na
+if timeframe.change("D")
+    swPdH := false
+    swPdL := false
+if timeframe.change("W")
+    swPwH := false
+    swPwL := false
+
+f_extSwp(bool done, float lvl, bool hiSide, string tag) =>
+    bool hit = not done and not na(lvl) and (hiSide ? high > lvl and close <= lvl : low < lvl and close >= lvl)
+    if hit and swpShow
+        f_keepLb(label.new(bar_index, hiSide ? high : low, tag + " $", style = hiSide ? label.style_label_down : label.style_label_up, color = #00000000, textcolor = hiSide ? colBear : colBull, size = size.small))
+    if hit and alSwp
+        alert(syminfo.ticker + " " + timeframe.period + " · barrido de " + tag + " @ " + str.tostring(hiSide ? high : low, format.mintick), alert.freq_once_per_bar_close)
+    hit
+
+if swpExt and timeframe.isintraday
+    bool xPdH = f_extSwp(swPdH, pdH, true, "PDH")
+    bool xPdL = f_extSwp(swPdL, pdL, false, "PDL")
+    bool xPwH = f_extSwp(swPwH, pwH, true, "PWH")
+    bool xPwL = f_extSwp(swPwL, pwL, false, "PWL")
+    swPdH := swPdH or xPdH
+    swPdL := swPdL or xPdL
+    swPwH := swPwH or xPwH
+    swPwL := swPwL or xPwL
+    if xPdH or xPwH
+        swpXHi := bar_index
+    if xPdL or xPwL
+        swpXLo := bar_index
+
 // Rango swing para premium/discount: arranca en cada pivote swing y se estira si el precio lo supera,
 // porque un máximo ya superado no es el techo de nada.
 if not na(phS)
@@ -658,28 +733,42 @@ for L = 0 to 1
                         if bull ? p < extP : p > extP
                             extP := p
                             ext  := i
-                // La ÚLTIMA vela de color contrario en el extremo o justo antes. Si no la hay, el extremo.
-                int obI = ext
-                for k = ext to math.min(ext + obLook, win)
-                    if bull ? close[k] < open[k] : close[k] > open[k]
-                        obI := k
-                        break
-                float top = bull ? high[obI] : math.max(high[obI], extP)
-                float bot = bull ? math.min(low[obI], extP) : low[obI]
-                // Desplazamiento: el mayor FVG a favor dentro del impulso, del extremo a la rotura.
+                // Desplazamiento: el mayor FVG a favor dentro del impulso, del extremo a la rotura. El más ANTIGUO
+                // que llega al mínimo marca dónde empieza el impulso: su vela central es la de desplazamiento.
                 float maxGap = 0.0
+                int   dispJ  = -1
                 if ext >= 2
                     for j = 0 to ext - 2
-                        float g = bull ? low[j] - high[j + 2] : low[j + 2] - high[j]
+                        bool  gOk = not fvgDisp or (bull ? close[j + 1] > high[j + 2] : close[j + 1] < low[j + 2])
+                        float g   = gOk ? (bull ? low[j] - high[j + 2] : low[j + 2] - high[j]) : 0.0
                         if g > maxGap
                             maxGap := g
+                        if g > 0 and g >= atrC * fvgMin
+                            dispJ := j
                 bool fvg = maxGap > 0 and maxGap >= atrC * fvgMin
+                // ICT: la ÚLTIMA vela de color contrario antes del desplazamiento. Primero entre el extremo y el
+                // impulso (la vela 1 del FVG incluida); si no la hay, en el extremo o justo antes; si tampoco, el
+                // extremo. La zona llega siempre hasta el extremo del tramo, así que el stop queda más allá de él.
+                int obI = -1
+                if dispJ >= 0
+                    for k = dispJ + 2 to ext
+                        if bull ? close[k] < open[k] : close[k] > open[k]
+                            obI := k
+                            break
+                if obI < 0
+                    obI := ext
+                    for k = ext to math.min(ext + obLook, win)
+                        if bull ? close[k] < open[k] : close[k] > open[k]
+                            obI := k
+                            break
+                float top = bull ? high[obI] : math.max(high[obI], extP)
+                float bot = bull ? math.min(low[obI], extP) : low[obI]
 
                 // ── Confluencias (cada una suma 1) ──
                 float obMidPx = (top + bot) / 2
                 bool k1 = bull ? sSw.trend == 1 : sSw.trend == -1
                 bool k2 = bull ? htfTrend == 1 : htfTrend == -1
-                bool k3 = bull ? (f_since(sInt.swpLoBar, lb) or f_since(sSw.swpLoBar, lb)) : (f_since(sInt.swpHiBar, lb) or f_since(sSw.swpHiBar, lb))
+                bool k3 = bull ? (f_since(sInt.swpLoBar, lb) or f_since(sSw.swpLoBar, lb) or f_since(swpXLo, lb)) : (f_since(sInt.swpHiBar, lb) or f_since(sSw.swpHiBar, lb) or f_since(swpXHi, lb))
                 bool k4 = pdOK and (bull ? obMidPx <= eqLv : obMidPx >= eqLv)
                 bool k5 = vwapOK and (bull ? top <= vwapV : bot >= vwapV)
                 bool k6 = inKz
@@ -888,20 +977,20 @@ if showDash and lastBar
     float  pf    = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
     string totT  = nCl == 0 ? "—" : str.tostring(nCl) + " ops · " + str.tostring(100.0 * strategy.wintrades / nCl, "#") + "% · PF " + (na(pf) ? "∞" : str.tostring(pf, "#.##")) + " · " + (strategy.netprofit >= 0 ? "+" : "") + str.tostring(strategy.netprofit, "#,##0")
     color  pdCol = not pdOK ? color.gray : pdPct > 55 ? colBear : pdPct < 45 ? colBull : color.gray
-    table.cell(dash, 0, 0, "SMC + VWAP v7.2", text_color = #FFD700, text_size = size.small)
+    table.cell(dash, 0, 0, "SMC + VWAP v7.3", text_color = #FFD700, text_size = size.small)
     table.cell(dash, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, text_size = size.small)
     f_row(1, "Sesgo HTF " + htfTf, not htfOK ? "sin datos" : htfTrend == 1 ? "ALCISTA" : htfTrend == -1 ? "BAJISTA" : "—", htfTrend == 1 ? colBull : htfTrend == -1 ? colBear : color.gray)
     f_row(2, "Estructura", "Swing " + f_dir(sSw.trend) + " · Interna " + f_dir(sInt.trend), sSw.trend == 1 ? colBull : sSw.trend == -1 ? colBear : color.gray)
     f_row(3, "Último evento", sSw.evt + " · " + sInt.evt, color.white)
     f_row(4, "Premium/Discount", pdTxt, pdCol)
-    f_row(5, "VWAP", vwTxt, not vwapOK ? color.gray : close >= vwapV ? colBull : colBear)
+    f_row(5, vwRth ? "VWAP RTH" + (vwInRth ? "" : " (cierre)") : "VWAP", vwTxt, not vwapOK ? color.gray : close >= vwapV ? colBull : colBear)
     f_row(6, "Kill zone", inKz ? kzName : "fuera", inKz ? #FFD700 : color.gray)
     f_row(7, "OB vivos", "▲ " + str.tostring(nUp) + " · ▼ " + str.tostring(nDn) + " · último " + lastOb, color.white)
     f_row(8, "Hoy", dayT, dayLock ? colBear : pos > 0 ? colBull : pos < 0 ? colBear : color.white)
     f_row(9, "Total", totT, strategy.netprofit >= 0 ? colBull : colBear)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ██ PRICE ACTION · OLIVER VELEZ  —  MÓDULO AISLADO, SOLO PINTA  [v4.1]
+// ██ PRICE ACTION · OLIVER VELEZ  —  MÓDULO AISLADO, SOLO PINTA  [v4.2]
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // AISLADO A PROPÓSITO. Todo lo que hay debajo de esta línea calcula sus propios valores, lee los OB solo
 // para consultar si el precio está dentro de alguno, y su única salida al gráfico es barcolor() más una
@@ -925,9 +1014,15 @@ bool  paVol  = not eleVol or na(volMa) or volMa <= 0 or volume > volMa
 float paSma  = ta.sma(close, 20)
 float paLoN  = ta.lowest(low, pinLook + 1)
 float paHiN  = ta.highest(high, pinLook + 1)
+// Posición del cierre dentro del rango (0 = mínimo, 1 = máximo), de esta vela y de la anterior.
+float paClP  = paRng > 0 ? (close - low) / paRng : 0.5
+float paPClP = paPrvR > 0 ? (close[1] - low[1]) / paPrvR : 0.5
+// Vela de control del RBI/GBI (la de hace dos).
+float paCtR  = high[2] - low[2]
+float paCtB  = math.abs(close[2] - open[2])
 // Tendencia previa para RBI/GBI: el patrón es de continuación, así que necesita una tendencia que continuar.
-bool  paTrU  = rbiCtx == "Ninguna" or (rbiCtx == "Vela anterior" ? close[2] > open[2] : not na(paSma) and close > paSma and paSma > paSma[1])
-bool  paTrD  = rbiCtx == "Ninguna" or (rbiCtx == "Vela anterior" ? close[2] < open[2] : not na(paSma) and close < paSma and paSma < paSma[1])
+bool  paTrU  = rbiCtx == "Ninguna" or (not na(paSma) and close > paSma and paSma > paSma[1])
+bool  paTrD  = rbiCtx == "Ninguna" or (not na(paSma) and close < paSma and paSma < paSma[1])
 bool  paOK   = paMode != "Desactivado" and not na(atrC) and atrC > 0 and paRng > 0
 
 // ── Definiciones ──────────────────────────────────────────────────────────────────────────────
@@ -940,17 +1035,21 @@ bool shvD = paOK and shvOn and paDn and paRng >= atrC * shvRng and paBody >= paR
 // PIN / TAIL (Velez): mecha dominante y cuerpo pequeño en el extremo del movimiento — rechazo puro.
 bool pinU = paOK and pinOn and paRng >= atrC * pinRng and paDnW >= paRng * pinWick / 100.0 and paBody <= paRng * pinBodyP / 100.0 and low <= paLoN
 bool pinD = paOK and pinOn and paRng >= atrC * pinRng and paUpW >= paRng * pinWick / 100.0 and paBody <= paRng * pinBodyP / 100.0 and high >= paHiN
-// 180 (Velez): vela ancha con cuerpo real anulada por la siguiente, también ancha, que cierra más allá de
-// su apertura.
-bool v18W = paRng >= atrC * v18Rng and paPrvR >= atrC * v18Rng
-bool v18U = paOK and v18On and v18W and paPrvR > 0 and close[1] < open[1] and paPrvB >= paPrvR * 0.6 and paUp and paBody >= paRng * v18Body / 100.0 and paBody >= paPrvB * v18Size / 100.0 and close > open[1]
-bool v18D = paOK and v18On and v18W and paPrvR > 0 and close[1] > open[1] and paPrvB >= paPrvR * 0.6 and paDn and paBody >= paRng * v18Body / 100.0 and paBody >= paPrvB * v18Size / 100.0 and close < open[1]
+// 180 (Velez): vela ancha con cuerpo real que cierra en su extremo, anulada por la siguiente, también ancha,
+// que cierra en el extremo contrario y más allá de su apertura.
+float v18Q = v18Cl / 100.0
+bool  v18W = paRng >= atrC * v18Rng and paPrvR >= atrC * v18Rng
+bool  v18U = paOK and v18On and v18W and paPrvR > 0 and close[1] < open[1] and paPrvB >= paPrvR * 0.6 and paPClP <= v18Q and paUp and paBody >= paRng * v18Body / 100.0 and paBody >= paPrvB * v18Size / 100.0 and close > open[1] and paClP >= 1 - v18Q
+bool  v18D = paOK and v18On and v18W and paPrvR > 0 and close[1] > open[1] and paPrvB >= paPrvR * 0.6 and paPClP >= 1 - v18Q and paDn and paBody >= paRng * v18Body / 100.0 and paBody >= paPrvB * v18Size / 100.0 and close < open[1] and paClP <= v18Q
 // OUTSIDE: envuelve el rango previo y cierra más allá de su extremo.
 bool outU = paOK and outOn and high > high[1] and low < low[1] and close > high[1] and paRng >= atrC * outRng
 bool outD = paOK and outOn and high > high[1] and low < low[1] and close < low[1]  and paRng >= atrC * outRng
-// RBI / GBI (Velez): vela contraria pequeña que la siguiente ignora, a favor de la tendencia. Continuación.
-bool rbiU = paOK and rbiOn and close[1] < open[1] and paPrvB <= atrC * rbiSmall and paUp and close > high[1] and paTrU
-bool rbiD = paOK and rbiOn and close[1] > open[1] and paPrvB <= atrC * rbiSmall and paDn and close < low[1] and paTrD
+// RBI / GBI (Velez), tres velas a favor de la tendencia. CONTROL: con cuerpo. IGNORADA: contraria, estrecha
+// (menos rango que la de control) y con el cierre en el tercio de la de control a favor: no retrocede nada.
+// SEÑAL: no rompe el extremo de la ignorada y supera su cuerpo (su apertura).
+bool rbiCt = paCtR > 0 and paCtB >= paCtR * rbiCtlB / 100.0 and paPrvR < paCtR and paPrvB <= atrC * rbiSmall
+bool rbiU  = paOK and rbiOn and paTrU and rbiCt and close[2] > open[2] and close[1] < open[1] and close[1] >= high[2] - paCtR * rbiPos / 100.0 and paUp and low >= low[1] and close > open[1]
+bool rbiD  = paOK and rbiOn and paTrD and rbiCt and close[2] < open[2] and close[1] > open[1] and close[1] <= low[2] + paCtR * rbiPos / 100.0 and paDn and high <= high[1] and close < open[1]
 // INSIDE: compresión dentro de la vela madre.
 bool insB = paOK and insOn and high <= high[1] and low >= low[1]
 
