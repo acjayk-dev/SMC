@@ -1,80 +1,139 @@
 //@version=6
 // This work is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
 // https://creativecommons.org/licenses/by-nc-sa/4.0/
-// © Zeiierman {
-indicator("Buyers & Sellers Profile + Dynamic S/R (Zeiierman)",overlay=true,max_lines_count=250,max_labels_count=500,max_boxes_count=300,max_bars_back=5000)
+// © Zeiierman (motor original Buyers & Sellers Profile + Dynamic S/R)
+// Capa Pro (flujo de órdenes, Value Area, motor de señales por grados, estadísticas y panel) ajustada a
+// MNQ/MES en 2-3 min. Obra derivada bajo la misma licencia, para uso personal no comercial. {
+indicator("Perfil S/R Pro (motor Zeiierman)",shorttitle="PSR Pro",overlay=true,max_lines_count=500,max_labels_count=500,max_boxes_count=300,max_bars_back=5000)
 //}
 
 // ~~ Tooltips {
-var string tt1="Number of historical bars used by the large rolling volume profile. The same lookback is reconstructed historically when a pivot is evaluated, so old pivots are judged only with information available at that time."
-var string tt2="Number of price rows used to discretize the rolling profile. More rows increase price resolution but also increase drawing and calculation load."
-var string tt3="Maximum horizontal width of the displayed profile in chart bars. The POC row reaches this width; other rows scale relative to it."
-var string tt4="Horizontal gap between the current bar and the left edge of the displayed rolling profile."
-var string tt5="Master switch for the large rolling profile shown at the right side of the chart."
-var string tt6="Highlight the highest-volume profile row and draw its short guide line and price label."
-var string tt7="Outline profile rows that currently contain an active profile-guided support or resistance level."
-var string tt8="Left/right pivot confirmation length. A value of 5 means a pivot is confirmed five bars after the actual swing bar."
-var string tt9="Maximum ATR distance around a raw pivot in which the profile engine may search for a stronger nearby volume node."
-var string tt10="Minimum candidate-node volume relative to the profile POC. Lower values admit weaker nearby profile structure."
-var string tt11="Minimum combined profile evidence needed before a raw price pivot can become an active level."
-var string tt12="Maximum fraction of the distance from the raw pivot toward the selected profile node. Actual pull is scaled by profile evidence."
-var string tt13="Minimum final 0-100 score required after profile evidence, absorption, relative pivot volume and wick rejection are combined."
-var string tt14="Maximum number of active profile-guided levels. When exceeded, the weakest active level is removed first."
-var string tt15="Same-side levels within this ATR distance are treated as duplicates. A stronger new candidate replaces the weaker nearby level."
-var string tt16="ATR buffer beyond an active level required for a confirmed close to invalidate that level."
-var string tt17="Color used for active support levels, support endpoint dots and support profile-row outlines."
-var string tt18="Color used for active resistance levels, resistance endpoint dots and resistance profile-row outlines."
-var string tt19="Accent color used for the inner profile-confirmed pivot core and the raw-pivot-to-final-level pull guide."
-var string tt20="Color of the faint raw price pivot marker before the profile engine relocates the final level."
-var string tt21="Estimated buying-volume color in the large profile. Buy/sell attribution comes from candle close location inside each bar range."
-var string tt22="Estimated selling-volume color in the large profile. Buy/sell attribution is approximate rather than true bid/ask volume."
-var string tt23="Color used for the displayed profile point of control."
-var string tt24="Shared line style used by active support and resistance levels."
-var string tt25="Show the layered profile-confirmed pivot marker at the final relocated level price."
-var string tt26="Show the faint raw pivot marker and dotted vertical guide connecting it to the final profile-guided level."
-var string tt27="Show the final 0-100 level score inside the historical profile-confirmed pivot marker."
-var string tt28="Show the current endpoint dot and one-number score label at the right edge of each active level."
-var string tt29="Score added to an active level each time a new same-side pivot lands within the merge distance without beating its score. Retests reinforce the level instead of being discarded. 0 disables."
-var string tt30="Remove active levels older than this many bars since their pivot. 0 keeps levels until they break or are trimmed."
+var string tt1="Velas que usa el perfil de volumen. Al evaluar un pivot antiguo se reconstruye el perfil con las velas que había en ese momento, así que nunca se juzga con información del futuro."
+var string tt2="Filas de precio del perfil. Más filas dan más resolución, pero cuestan más cálculo y más dibujo."
+var string tt3="Ancho máximo del perfil en velas. La fila del POC llega a este ancho y las demás se escalan respecto a ella."
+var string tt4="Separación entre la vela actual y el borde izquierdo del perfil."
+var string tt5="Interruptor general del perfil que se dibuja a la derecha."
+var string tt6="Resalta la fila con más volumen (POC) con una línea guía y su precio."
+var string tt7="Enmarca las filas del perfil que contienen un soporte o resistencia activo."
+var string tt8="Velas a cada lado para confirmar un pivot. Con 5, el pivot se confirma cinco velas después de la vela de giro."
+var string tt9="Distancia máxima, en ATR, alrededor del pivot en la que el motor busca un nodo de volumen más fuerte."
+var string tt10="Volumen mínimo del nodo candidato respecto al POC. Valores bajos admiten nodos más débiles."
+var string tt11="Evidencia mínima del perfil para que un pivot se convierta en nivel."
+var string tt12="Fracción máxima del camino desde el pivot hasta el nodo del perfil. El desplazamiento real depende de la evidencia."
+var string tt13="Score 0-100 mínimo de un nivel nuevo: evidencia del perfil, absorción, volumen relativo del pivot y mecha de rechazo."
+var string tt14="Niveles activos como máximo. Si se supera, sale primero el más débil."
+var string tt15="Niveles del mismo lado a menos de esta distancia (ATR) se tratan como el mismo: se queda el de mejor score."
+var string tt16="Margen, en ATR, que un cierre tiene que superar para dar el nivel por roto."
+var string tt17="Puntos que gana un nivel cuando un pivot nuevo del mismo lado cae encima sin mejorar su score. Se reparte en decreciente: el 2º toque suma el bonus entero, el 3º la mitad y del 4º en adelante nada, porque un nivel muy tocado suele estar más débil, no más fuerte. 0 lo desactiva."
+var string tt18="Elimina los niveles con más de estas velas desde su pivot. 0 los mantiene hasta que se rompen o se recortan."
+var string tt19="CONFIRMACIÓN: la línea del nivel empieza en la vela en que se conoció (pivot + longitud del pivot), así el historial muestra solo lo que se sabía en cada momento. PIVOT: empieza en la vela de giro, más bonito pero engañoso al revisar el pasado. El punto del pivot se dibuja siempre en la vela de giro."
+var string tt20="Value Area: franja alrededor del POC con este porcentaje del volumen del perfil. VAH/VAL se dibujan en el perfil y suman como ubicación en las señales. Recalcular contexto: cada cuántas velas se recalculan POC y VA para las señales (menos = más preciso y más pesado)."
+var string tt21="POSICIÓN DEL CIERRE: la parte compradora de cada vela sale de dónde cierra cada vela del marco intravela, ponderada por su volumen. REGLA DEL TICK: el volumen de cada vela intravela va a compras si cierra por encima de la anterior y a ventas si cierra por debajo; con datos de segundos es lo más cercano a un delta real. ESTIMACIÓN POR VELA: posición del cierre de la propia vela del gráfico. Sin datos intravela se usa la estimación por vela; el panel muestra el porcentaje del historial que tuvo datos intravela."
+var string tt22="Marco intravela. En 2-3 min usa 1 (cualquier plan) o 30S/15S/10S si tu plan incluye segundos. Media del delta: velas promediadas para el umbral del giro del delta."
+var string tt23="Las señales salen solo al cierre de la vela. Cada candidata suma puntos de confluencia y recibe un grado. Solo se muestran y avisan las de grado mínimo o mejor, pero las estadísticas del panel siguen TODAS las de A, B y C, para que puedas compararlas."
+var string tt24="Puntos para cada grado. Máximo ≈ 11.5: score del nivel (0-3), tendencia superior (+2/+1/−2), lado del VWAP (+1), ubicación en Value Area (+1), gatillos extra (+1 cada uno, máx. +2), delta de la vela a favor (+1), volumen relativo ≥ 1.2× (+1) y nivel tocado por 2+ pivots (+0.5)."
+var string tt25="Solo los niveles con al menos este score dan señales. Zona de toque: distancia, en ATR, más allá del nivel que todavía cuenta como test en las últimas 3 velas."
+var string tt26="Hace falta al menos un gatillo y una vela de confirmación en la dirección de la operación. BARRIDA Y RECUPERACIÓN: una mecha atraviesa el nivel y la vela cierra de vuelta. ABSORCIÓN: vela de mucho volumen y cuerpo pequeño que toca el nivel. GIRO DEL DELTA: el delta pasa con fuerza a favor tras delta contrario. RUPTURA Y RETEST: el primer test de un nivel roto desde el otro lado."
+var string tt27="Invertir niveles rotos: un nivel roto se conserva una vez con el papel contrario (la resistencia rota pasa a soporte) para los setups de ruptura y retest. Espera entre señales: velas mínimas entre dos señales."
+var string tt28="Tendencia del marco superior por EMA 50/200, con su última vela cerrada (sin repintado). FILTRO: compras solo con tendencia alcista y ventas solo con bajista. PUNTOS: se permite operar en contra, pero resta. OFF: no se usa."
+var string tt29="Señales solo dentro de esta sesión (zona horaria a la derecha). Por defecto evita los primeros y últimos minutos de la sesión de Nueva York, donde MNQ/MES dan más latigazos. Cerrar al final de la sesión: las operaciones abiertas se cierran en la primera vela fuera de sesión."
+var string tt30="Percentil del ATR(14) en las últimas 500 velas. Bloquea señales con volatilidad anormalmente baja (lateral) o extrema (noticias)."
+var string tt31="Distancia mínima, en R, de la entrada al nivel contrario más cercano. Nunca es menor que TP2: el objetivo tiene que quedar antes del siguiente muro."
+var string tt32="El stop va más allá del nivel y del extremo del toque con este margen en ATR. Las señales con un stop más ancho que el riesgo máximo se descartan."
+var string tt33="TP1 y TP2 en múltiplos de R. En TP1 se cierra el porcentaje indicado y el stop pasa a break-even para el resto."
+var string tt34="Las operaciones abiertas después de estas velas se cierran al cierre de la vela. Una operación a la vez: no hay señal nueva mientras otra está abierta."
+var string tt35="Coste de una operación completa (comisión de entrada y salida + deslizamiento), en ticks. Se resta del resultado de cada operación en R. Orientativo: MNQ ≈ 3-4 ticks, MES ≈ 2 ticks."
+var string tt36="Dibuja entrada, stop y objetivos de cada operación mostrada y guarda como mucho este número de operaciones en el gráfico. Las estadísticas incluyen siempre todas."
+var string tt37="Contexto de mercado, posición abierta y resultados por grado: operaciones, % de acierto (cualquier resultado positivo), R medio y profit factor, con costes descontados. A, B y C cuentan todas las señales de ese grado; OPERADAS solo las que se mostraron con tus ajustes. Entrada al cierre de la vela de señal."
+var string tt38="VWAP de la sesión elegida. Suma como confluencia: compras sobre el VWAP y ventas bajo él (+1). RTH 09:30 es la referencia habitual al operar la sesión de Nueva York; SESIÓN CME 18:00 incluye la noche."
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Groups {
-gPROF="Large Rolling Profile"
-gENG="Profile-Guided Pivot Engine"
-gSTY="Visual Style"
+gPROF="Perfil de volumen"
+gENG="Motor de niveles (pivots + perfil)"
+gSIG="Motor de señales"
+gFLT="Filtros (MNQ/MES)"
+gRISK="Gestión de la operación"
+gFLOW="Flujo de órdenes"
+gDASH="Panel"
+gSTY="Estilo"
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Inputs {
-profLb=input.int(600,"Lookback",minval=100,maxval=1500,group=gPROF,inline="p1")
-profRows=input.int(72,"Rows",minval=24,maxval=100,group=gPROF,inline="p1",tooltip=tt1+"\n\n"+tt2)
-profW=input.int(58,"Width",minval=15,maxval=110,group=gPROF,inline="p2")
-profOff=input.int(8,"Offset",minval=2,maxval=50,group=gPROF,inline="p2",tooltip=tt3+"\n\n"+tt4)
-showProf=input.bool(true,"Show Profile",group=gPROF,inline="p3")
+profLb=input.int(600,"Velas",minval=100,maxval=1500,group=gPROF,inline="p1")
+profRows=input.int(72,"Filas",minval=24,maxval=100,group=gPROF,inline="p1",tooltip=tt1+"\n\n"+tt2)
+profW=input.int(58,"Ancho",minval=15,maxval=110,group=gPROF,inline="p2")
+profOff=input.int(8,"Separación",minval=2,maxval=50,group=gPROF,inline="p2",tooltip=tt3+"\n\n"+tt4)
+showProf=input.bool(true,"Mostrar perfil",group=gPROF,inline="p3")
 showPoc=input.bool(true,"POC",group=gPROF,inline="p3",active=showProf)
-showLvlRows=input.bool(true,"Level Rows",group=gPROF,inline="p3",active=showProf,tooltip=tt5+"\n\n"+tt6+"\n\n"+tt7)
-swingLen=input.int(5,"Swing Length",minval=2,maxval=25,group=gENG,inline="e1")
-srchAtr=input.float(1.20,"Search ATR",minval=0.20,maxval=3.00,step=0.05,group=gENG,inline="e1",tooltip=tt8+"\n\n"+tt9)
-nodeMin=input.float(0.08,"Min Node",minval=0.0,maxval=1.0,step=0.01,group=gENG,inline="e2")
-evidMin=input.float(0.22,"Min Evidence",minval=0.0,maxval=1.0,step=0.01,group=gENG,inline="e2",tooltip=tt10+"\n\n"+tt11)
-pullMax=input.float(0.85,"Profile Pull",minval=0.0,maxval=1.0,step=0.05,group=gENG,inline="e3")
-scoreMin=input.float(30.0,"Min Score",minval=0,maxval=100,step=1,group=gENG,inline="e3",tooltip=tt12+"\n\n"+tt13)
-maxLvl=input.int(20,"Max Levels",minval=2,maxval=40,group=gENG,inline="e4")
-mergeAtr=input.float(0.16,"Merge ATR",minval=0.0,maxval=1.0,step=0.02,group=gENG,inline="e4")
-breakAtr=input.float(0.10,"Break ATR",minval=0.0,maxval=0.5,step=0.01,group=gENG,inline="e4",tooltip=tt14+"\n\n"+tt15+"\n\n"+tt16)
-retestBonus=input.float(5.0,"Retest Bonus",minval=0.0,maxval=20.0,step=0.5,group=gENG,inline="e5")
-maxAge=input.int(0,"Max Age",minval=0,maxval=5000,group=gENG,inline="e5",tooltip=tt29+"\n\n"+tt30)
-supCol=input.color(color.rgb(31,199,116),"Support",group=gSTY,inline="c1")
-resCol=input.color(color.rgb(239,75,75),"Resistance",group=gSTY,inline="c1",tooltip=tt17+"\n\n"+tt18)
-coreCol=input.color(color.rgb(255,205,64),"Pivot Core",group=gSTY,inline="c2")
-rawCol=input.color(color.rgb(160,166,178),"Raw Pivot",group=gSTY,inline="c2",tooltip=tt19+"\n\n"+tt20)
-buyCol=input.color(color.rgb(43,158,143),"Profile Buy",group=gSTY,inline="c3")
-sellCol=input.color(color.rgb(74,88,182),"Profile Sell",group=gSTY,inline="c3")
-pocCol=input.color(color.rgb(255,145,32),"POC",group=gSTY,inline="c3",tooltip=tt21+"\n\n"+tt22+"\n\n"+tt23)
-lvlStyle=input.string("Solid","Line Style",options=["Solid","Dotted","Dashed"],group=gSTY,inline="s1",tooltip=tt24)
-showDots=input.bool(true,"Pivot Dots",group=gSTY,inline="s2")
-showRaw=input.bool(true,"Raw Pivot",group=gSTY,inline="s2",active=showDots)
-showDotScore=input.bool(true,"Dot Score",group=gSTY,inline="s2",active=showDots)
-showEdge=input.bool(true,"Right Score",group=gSTY,inline="s2",tooltip=tt25+"\n\n"+tt26+"\n\n"+tt27+"\n\n"+tt28)
+showLvlRows=input.bool(true,"Filas con nivel",group=gPROF,inline="p3",active=showProf,tooltip=tt5+"\n\n"+tt6+"\n\n"+tt7)
+showVA=input.bool(true,"Value Area",group=gPROF,inline="p4")
+vaPct=input.int(70,"VA %",minval=50,maxval=90,group=gPROF,inline="p4")
+ctxRefresh=input.int(10,"Recalcular contexto cada",minval=1,maxval=50,group=gPROF,inline="p4",tooltip=tt20)
+swingLen=input.int(5,"Longitud del pivot",minval=2,maxval=25,group=gENG,inline="e1")
+srchAtr=input.float(1.20,"Búsqueda (ATR)",minval=0.20,maxval=3.00,step=0.05,group=gENG,inline="e1",tooltip=tt8+"\n\n"+tt9)
+nodeMin=input.float(0.08,"Nodo mínimo",minval=0.0,maxval=1.0,step=0.01,group=gENG,inline="e2")
+evidMin=input.float(0.22,"Evidencia mínima",minval=0.0,maxval=1.0,step=0.01,group=gENG,inline="e2",tooltip=tt10+"\n\n"+tt11)
+pullMax=input.float(0.85,"Atracción al perfil",minval=0.0,maxval=1.0,step=0.05,group=gENG,inline="e3")
+scoreMin=input.float(30.0,"Score mínimo",minval=0,maxval=100,step=1,group=gENG,inline="e3",tooltip=tt12+"\n\n"+tt13)
+maxLvl=input.int(20,"Niveles máx.",minval=2,maxval=40,group=gENG,inline="e4")
+mergeAtr=input.float(0.16,"Fusión (ATR)",minval=0.0,maxval=1.0,step=0.02,group=gENG,inline="e4")
+breakAtr=input.float(0.10,"Rotura (ATR)",minval=0.0,maxval=0.5,step=0.01,group=gENG,inline="e4",tooltip=tt14+"\n\n"+tt15+"\n\n"+tt16)
+retestBonus=input.float(5.0,"Bonus por retest",minval=0.0,maxval=20.0,step=0.5,group=gENG,inline="e5")
+maxAge=input.int(0,"Edad máx.",minval=0,maxval=5000,group=gENG,inline="e5",tooltip=tt17+"\n\n"+tt18)
+lineFrom=input.string("Confirmación","Línea del nivel desde",options=["Confirmación","Pivot"],group=gENG,inline="e6",tooltip=tt19)
+showSig=input.bool(true,"Mostrar señales",group=gSIG,inline="g1")
+minGrade=input.string("B","Grado mínimo",options=["A","B","C"],group=gSIG,inline="g1",tooltip=tt23)
+gradeA=input.float(7.5,"A ≥",minval=0.0,maxval=12.0,step=0.5,group=gSIG,inline="g2")
+gradeB=input.float(6.0,"B ≥",minval=0.0,maxval=12.0,step=0.5,group=gSIG,inline="g2")
+gradeC=input.float(4.5,"C ≥",minval=0.0,maxval=12.0,step=0.5,group=gSIG,inline="g2",tooltip=tt24)
+sigMinLvl=input.float(55.0,"Score mínimo del nivel",minval=0,maxval=100,step=1,group=gSIG,inline="g3")
+zoneAtr=input.float(0.25,"Zona de toque (ATR)",minval=0.0,maxval=1.5,step=0.05,group=gSIG,inline="g3",tooltip=tt25)
+useSweep=input.bool(true,"Barrida y recuperación",group=gSIG,inline="g4")
+useAbs=input.bool(true,"Absorción",group=gSIG,inline="g4")
+useDflip=input.bool(true,"Giro del delta",group=gSIG,inline="g5")
+useRetest=input.bool(true,"Ruptura y retest",group=gSIG,inline="g5",tooltip=tt26)
+flipLvls=input.bool(true,"Invertir niveles rotos",group=gSIG,inline="g6")
+cooldown=input.int(5,"Espera entre señales",minval=0,maxval=100,group=gSIG,inline="g6",tooltip=tt27)
+htfTf=input.timeframe("15","Marco superior",group=gFLT,inline="f1")
+htfMode=input.string("Filtro","Tendencia",options=["Filtro","Puntos","Off"],group=gFLT,inline="f1",tooltip=tt28)
+useSess=input.bool(true,"Sesión",group=gFLT,inline="f2")
+sess=input.session("0935-1550","",group=gFLT,inline="f2")
+sessTz=input.string("America/New_York","",group=gFLT,inline="f2")
+flatEnd=input.bool(true,"Cerrar al final de la sesión",group=gFLT,inline="f3",tooltip=tt29)
+atrLoPct=input.int(15,"Percentil ATR mín.",minval=0,maxval=100,group=gFLT,inline="f4")
+atrHiPct=input.int(97,"máx.",minval=0,maxval=100,group=gFLT,inline="f4",tooltip=tt30)
+roomMin=input.float(2.0,"Espacio mínimo (R)",minval=0.0,maxval=10.0,step=0.25,group=gFLT,inline="f5",tooltip=tt31)
+vwapMode=input.string("RTH 09:30","VWAP",options=["RTH 09:30","Sesión CME 18:00"],group=gFLT,inline="f6",tooltip=tt38)
+slAtr=input.float(0.30,"Margen del stop (ATR)",minval=0.0,maxval=3.0,step=0.05,group=gRISK,inline="r1")
+maxRiskAtr=input.float(2.5,"Riesgo máx. (ATR)",minval=0.5,maxval=10.0,step=0.25,group=gRISK,inline="r1",tooltip=tt32)
+tp1R=input.float(1.0,"TP1 (R)",minval=0.25,maxval=5.0,step=0.25,group=gRISK,inline="r2")
+tp2R=input.float(2.0,"TP2 (R)",minval=0.5,maxval=10.0,step=0.25,group=gRISK,inline="r2")
+tp1Pct=input.int(50,"TP1 %",minval=0,maxval=100,step=5,group=gRISK,inline="r2",tooltip=tt33)
+maxBars=input.int(60,"Velas máx.",minval=5,maxval=500,group=gRISK,inline="r3")
+oneTrade=input.bool(true,"Una operación a la vez",group=gRISK,inline="r3",tooltip=tt34)
+costTk=input.float(3.0,"Coste por operación (ticks)",minval=0.0,maxval=50.0,step=0.5,group=gRISK,inline="r4",tooltip=tt35)
+showTrades=input.bool(true,"Dibujar SL/TP",group=gRISK,inline="r5")
+maxDrawn=input.int(30,"Operaciones dibujadas",minval=5,maxval=80,group=gRISK,inline="r5",tooltip=tt36)
+deltaSrc=input.string("Intravela · posición del cierre","Origen del delta",options=["Intravela · posición del cierre","Intravela · regla del tick","Estimación por vela"],group=gFLOW,inline="d1",tooltip=tt21)
+ltfTf=input.timeframe("1","Marco intravela",group=gFLOW,inline="d2")
+deltaLen=input.int(20,"Media del delta",minval=5,maxval=100,group=gFLOW,inline="d2",tooltip=tt22)
+showDash=input.bool(true,"Mostrar",group=gDASH,inline="h1")
+dashPos=input.string("Arriba derecha","",options=["Arriba derecha","Arriba izquierda","Abajo derecha","Abajo izquierda"],group=gDASH,inline="h1")
+dashSize=input.string("Pequeño","",options=["Diminuto","Pequeño","Normal"],group=gDASH,inline="h1",tooltip=tt37)
+supCol=input.color(color.rgb(31,199,116),"Soporte",group=gSTY,inline="c1")
+resCol=input.color(color.rgb(239,75,75),"Resistencia",group=gSTY,inline="c1")
+coreCol=input.color(color.rgb(255,205,64),"Núcleo del pivot",group=gSTY,inline="c2")
+rawCol=input.color(color.rgb(160,166,178),"Pivot original",group=gSTY,inline="c2")
+buyCol=input.color(color.rgb(43,158,143),"Compra",group=gSTY,inline="c3")
+sellCol=input.color(color.rgb(74,88,182),"Venta",group=gSTY,inline="c3")
+pocCol=input.color(color.rgb(255,145,32),"POC",group=gSTY,inline="c3",tooltip="La parte compradora y vendedora del perfil es una estimación, no volumen bid/ask real.")
+lvlStyle=input.string("Continua","Estilo de línea",options=["Continua","Punteada","Discontinua"],group=gSTY,inline="s1",tooltip="Los niveles invertidos (roturas convertidas en el papel contrario) se dibujan siempre discontinuos.")
+showDots=input.bool(true,"Puntos de pivot",group=gSTY,inline="s2")
+showRaw=input.bool(true,"Pivot original",group=gSTY,inline="s2",active=showDots)
+showDotScore=input.bool(true,"Score en el punto",group=gSTY,inline="s2",active=showDots)
+showEdge=input.bool(true,"Score a la derecha",group=gSTY,inline="s3")
+showVwap=input.bool(true,"VWAP",group=gSTY,inline="s3")
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Constants {
@@ -83,6 +142,77 @@ int ABS_RAD=math.min(3,swingLen)
 float PIV_VOL_X=2.2
 float ABS_BODY_MAX=0.40
 float ABS_VOL_X=1.5
+float ABS_SIG=0.45
+string SRC_CLV="Intravela · posición del cierre"
+string SRC_TICK="Intravela · regla del tick"
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Order Flow {
+// Parte compradora de cada vela del gráfico, por posición del cierre de sus velas intravela ponderada por volumen.
+intrabar_buy(array<float> h,array<float> l,array<float> c,array<float> v)=>
+    float b=0.0
+    float t=0.0
+    int n=v.size()
+    if n>0
+        for i=0 to n-1
+            float vi=math.max(nz(v.get(i),0.0),0.0)
+            float ri=h.get(i)-l.get(i)
+            float fi=ri>0?math.max(0.0,math.min(1.0,(c.get(i)-l.get(i))/ri)):0.5
+            b+=vi*fi
+            t+=vi
+    [b,t]
+
+[ltfH,ltfL,ltfC,ltfV]=request.security_lower_tf(syminfo.tickerid,ltfTf,[high,low,close,volume],ignore_invalid_timeframe=true)
+[ibBuy,ibTot]=intrabar_buy(ltfH,ltfL,ltfC,ltfV)
+
+// Regla del tick sobre las velas intravela: cada una va a compras si cierra por encima de la anterior y a
+// ventas si cierra por debajo; si iguala, repite la dirección previa. El último cierre se arrastra entre velas.
+var float ltfPrevC=na
+var int ltfPrevDir=0
+float tkBuy=0.0
+float tkTot=0.0
+int nLtf=ltfC.size()
+if nLtf>0
+    for i=0 to nLtf-1
+        float ci=ltfC.get(i)
+        float vi=math.max(nz(ltfV.get(i),0.0),0.0)
+        int di=na(ltfPrevC)?0:ci>ltfPrevC?1:ci<ltfPrevC?-1:ltfPrevDir
+        tkBuy+=di>0?vi:di==0?vi*0.5:0.0
+        tkTot+=vi
+        ltfPrevC:=ci
+        ltfPrevDir:=di
+
+float barRng=high-low
+float clvFrac=barRng>0?math.max(0.0,math.min(1.0,(close-low)/barRng)):0.5
+bool ibWanted=deltaSrc!="Estimación por vela"
+bool ibOk=deltaSrc==SRC_CLV?ibTot>0:deltaSrc==SRC_TICK?tkTot>0:false
+float buyFrac=deltaSrc==SRC_CLV and ibTot>0?ibBuy/ibTot:deltaSrc==SRC_TICK and tkTot>0?tkBuy/tkTot:clvFrac
+float delta=math.max(nz(volume,0.0),0.0)*(2.0*buyFrac-1.0)
+float deltaAvg=ta.sma(math.abs(delta),deltaLen)
+
+// Cobertura: qué parte del historial tuvo datos intravela. Donde no los hay se usa la estimación por vela.
+var int covN=0
+var int covIb=0
+if barstate.isconfirmed and ibWanted
+    covN+=1
+    covIb+=ibOk?1:0
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Bar History Buffers {
+// Buffers circulares escritos en cada vela, para reconstruir el perfil dentro de código condicional sin el
+// operador de historial (Pine avisa de inconsistencia si se usa en funciones llamadas condicionalmente).
+int BUF=profLb+swingLen
+var array<float> hBuf=array.new_float(BUF,na)
+var array<float> lBuf=array.new_float(BUF,na)
+var array<float> vBuf=array.new_float(BUF,0.0)
+var array<float> bBuf=array.new_float(BUF,0.5)
+hBuf.set(bar_index%BUF,high)
+lBuf.set(bar_index%BUF,low)
+vBuf.set(bar_index%BUF,math.max(nz(volume,0.0),0.0))
+bBuf.set(bar_index%BUF,buyFrac)
+
+// Valor guardado hace `ago` velas (ago no puede superar bar_index ni BUF-1)
+buf_at(array<float> b,int ago)=>b.get((bar_index-ago)%BUF)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Types {
@@ -94,15 +224,38 @@ type Lvl
     float evid
     float nStr
     bool supp
-    int born
+    int born            // hora de la vela del pivot
     int bornIdx
     int touches
     line ln
+    bool flipped=false
+    int flipBar=0
+    int confT           // hora de la vela en que se confirmó
+    int rtBar           // primer test tras invertirse; marca el retest válido (na hasta entonces)
+
+type Trade
+    bool isLong
+    int grade
+    int openBar
+    float entry
+    float sl
+    float tp1
+    float tp2
+    float curStop
+    bool tp1Hit=false
+    bool done=false
+    float res=0.0
+    bool shown=false
+    line lEn
+    line lSl
+    line lT1
+    line lT2
+    label lb
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Helpers {
 clip(float x)=>math.max(0.0,math.min(1.0,x))
-lstyle(string s)=>s=="Dotted"?line.style_dotted:s=="Dashed"?line.style_dashed:line.style_solid
+lstyle(string s)=>s=="Punteada"?line.style_dotted:s=="Discontinua"?line.style_dashed:line.style_solid
 lwidth(float s)=>s>=82?4:s>=62?3:2
 lalpha(float s)=>s>=82?8:s>=62?22:s>=45?38:52
 rings(float s)=>s>=82?4:s>=66?3:s>=50?2:1
@@ -110,6 +263,7 @@ rsize(int r)=>r>=4?size.large:r==3?size.normal:r==2?size.small:size.tiny
 ralpha(int r)=>r>=4?68:r==3?52:r==2?30:4
 row_id(float p,float bot,float step,int rows)=>math.max(0,math.min(rows-1,int(math.floor((p-bot)/step))))
 lvl_col(bool supp)=>supp?supCol:resCol
+line_x1(int born,int confT)=>lineFrom=="Pivot"?born:confT
 
 clear_boxes(array<box> a)=>
     while a.size()>0
@@ -124,22 +278,22 @@ clear_labels(array<label> a)=>
         label.delete(a.pop())
 
 profile(int newest,int oldest,int rows)=>
-    float lo=low[newest]
-    float hi=high[newest]
+    float lo=buf_at(lBuf,newest)
+    float hi=buf_at(hBuf,newest)
     for i=newest to oldest
-        lo:=math.min(lo,low[i])
-        hi:=math.max(hi,high[i])
+        lo:=math.min(lo,buf_at(lBuf,i))
+        hi:=math.max(hi,buf_at(hBuf,i))
     float span=math.max(hi-lo,syminfo.mintick*rows)
     float bot=lo-(span-(hi-lo))*0.5
     float step=span/rows
     array<float> tot=array.new_float(rows,0.0)
     array<float> buy=array.new_float(rows,0.0)
     for i=newest to oldest
-        float l=low[i]
-        float h=high[i]
+        float l=buf_at(lBuf,i)
+        float h=buf_at(hBuf,i)
         float r=h-l
-        float v=math.max(nz(volume[i],0.0),0.0)
-        float bf=r>0?clip((close[i]-l)/r):0.5
+        float v=buf_at(vBuf,i)
+        float bf=nz(buf_at(bBuf,i),0.5)
         int r0=row_id(l,bot,step,rows)
         int r1=row_id(h,bot,step,rows)
         for j=r0 to r1
@@ -152,15 +306,39 @@ profile(int newest,int oldest,int rows)=>
                 buy.set(j,buy.get(j)+av*bf)
     [bot,step,tot,buy]
 
-// vb and absSc come pre-offset from the global scope: this function runs conditionally,
-// so history references on its parameters would step per call instead of per bar.
-pivot_features(bool supp,float vb,float absSc)=>
-    float vr=vb>0?nz(volume[swingLen],0.0)/vb:1.0
-    float vSc=clip((vr-0.8)/(PIV_VOL_X-0.8))
-    float pr=math.max(high[swingLen]-low[swingLen],syminfo.mintick)
-    float wick=supp?math.min(open[swingLen],close[swingLen])-low[swingLen]:high[swingLen]-math.max(open[swingLen],close[swingLen])
-    float wSc=clip((wick/pr)/0.50)
-    [vSc,wSc,absSc]
+// Filas [lo,hi] alrededor del POC que reúnen pct del volumen del perfil
+value_area(array<float> tot,int poc,float pct)=>
+    float total=tot.sum()
+    int n=tot.size()
+    int lo=poc
+    int hi=poc
+    float acc=tot.get(poc)
+    while acc<total*pct and (lo>0 or hi<n-1)
+        float up=hi<n-1?tot.get(hi+1):-1.0
+        float dn=lo>0?tot.get(lo-1):-1.0
+        if up>=dn
+            hi+=1
+            acc+=up
+        else
+            lo-=1
+            acc+=dn
+    [lo,hi]
+
+// Distancia de px al nivel contrario más cercano (resistencia encima para compras, soporte debajo para ventas)
+nearest_opp(array<Lvl> a,bool isLong,float px)=>
+    float best=na
+    if a.size()>0
+        for i=0 to a.size()-1
+            Lvl lv=a.get(i)
+            if lv.supp!=isLong
+                float d=isLong?lv.p-px:px-lv.p
+                if d>0 and (na(best) or d<best)
+                    best:=d
+    best
+
+grade_of(float pts)=>pts>=gradeA?0:pts>=gradeB?1:pts>=gradeC?2:3
+grade_txt(int g)=>g==0?"A":g==1?"B":"C"
+grade_alpha(int g)=>g==0?0:g==1?30:55
 
 profile_node(float raw,bool supp,float atrP,float bot,float step,array<float> tot,array<float> buy)=>
     float mx=math.max(tot.max(),0.0000001)
@@ -206,7 +384,7 @@ nearby(array<Lvl> a,float p,bool supp,float tol)=>
                     id:=i
     id
 
-make_line(int born,float p,bool supp,float sc)=>line.new(born,p,time,p,xloc=xloc.bar_time,extend=extend.none,
+make_line(int x1,float p,bool supp,float sc)=>line.new(x1,p,time,p,xloc=xloc.bar_time,extend=extend.none,
  color=color.new(lvl_col(supp),lalpha(sc)),width=lwidth(sc),style=lstyle(lvlStyle))
 
 store_lvl(array<Lvl> a,float p,float raw,float node,float evid,float nStr,bool supp,float sc,int born,int bornIdx,float atrP)=>
@@ -225,15 +403,19 @@ store_lvl(array<Lvl> a,float p,float raw,float node,float evid,float nStr,bool s
             lv.nStr:=nStr
             lv.born:=born
             lv.bornIdx:=bornIdx
-            line.set_xy1(lv.ln,born,p)
+            lv.confT:=time
+            line.set_xy1(lv.ln,line_x1(born,time),p)
             line.set_xy2(lv.ln,time,p)
             changed:=true
         else
-            lv.sc:=math.min(100.0,lv.sc+retestBonus)
+            // Bonus decreciente: el 2º toque suma entero, el 3º la mitad y a partir del 4º nada.
+            float bonus=lv.touches<=3?retestBonus/(lv.touches-1):0.0
+            lv.sc:=math.min(100.0,lv.sc+bonus)
         line.set_color(lv.ln,color.new(lvl_col(supp),lalpha(lv.sc)))
         line.set_width(lv.ln,lwidth(lv.sc))
     else
-        a.push(Lvl.new(p,sc,raw,node,evid,nStr,supp,born,bornIdx,1,make_line(born,p,supp,sc)))
+        a.push(Lvl.new(p=p,sc=sc,raw=raw,node=node,evid=evid,nStr=nStr,supp=supp,born=born,bornIdx=bornIdx,touches=1,
+         ln=make_line(line_x1(born,time),p,supp,sc),confT=time))
         changed:=true
     changed
 
@@ -261,10 +443,10 @@ update_lvls(array<Lvl> a)=>
             line.set_xy2(lv.ln,time,lv.p)
             line.set_color(lv.ln,color.new(lvl_col(lv.supp),lalpha(lv.sc)))
             line.set_width(lv.ln,lwidth(lv.sc))
-            line.set_style(lv.ln,lstyle(lvlStyle))
+            line.set_style(lv.ln,lv.flipped?line.style_dashed:lstyle(lvlStyle))
     0
 
-// 1=support, -1=resistance, 2=both sides inside the row
+// 1=soporte, -1=resistencia, 2=los dos lados dentro de la fila
 level_row(array<Lvl> a,float lo,float hi)=>
     bool hasS=false
     bool hasR=false
@@ -276,41 +458,45 @@ level_row(array<Lvl> a,float lo,float hi)=>
                 hasR:=hasR or not lv.supp
     hasS and hasR?2:hasS?1:hasR?-1:0
 
-score_tip(Lvl lv)=>"Raw pivot: "+str.tostring(lv.raw,format.mintick)+"\nProfile node: "+str.tostring(lv.node,format.mintick)
- +"\nProfile evidence: "+str.tostring(lv.evid*100.0,"#")+"%\nNode strength vs POC: "+str.tostring(lv.nStr*100.0,"#")
- +"%\nFinal level: "+str.tostring(lv.p,format.mintick)
- +"\nPivot touches: "+str.tostring(lv.touches)
+score_tip(Lvl lv)=>"Pivot original: "+str.tostring(lv.raw,format.mintick)+"\nNodo del perfil: "+str.tostring(lv.node,format.mintick)
+ +"\nEvidencia del perfil: "+str.tostring(lv.evid*100.0,"#")+"%\nFuerza del nodo vs POC: "+str.tostring(lv.nStr*100.0,"#")
+ +"%\nNivel final: "+str.tostring(lv.p,format.mintick)
+ +"\nToques de pivot: "+str.tostring(lv.touches)+(lv.flipped?"\nInvertido (nivel roto, ahora con el papel contrario)":"")
 
-pivot_eval(array<Lvl> a,float raw,bool supp,float vb,float atrP,float absSc,float atr)=>
-    int avail=bar_index-swingLen+1
-    int bars=math.max(1,math.min(profLb,avail))
-    int newest=swingLen
-    int oldest=swingLen+bars-1
-    [bot,step,tot,buy]=profile(newest,oldest,profRows)
+// El perfil llega ya calculado (una vez por vela) y los rasgos de la vela del pivot vienen del ámbito global,
+// porque esto se ejecuta de forma condicional.
+pivot_eval(array<Lvl> a,float bot,float step,array<float> tot,array<float> buy,float raw,bool supp,float atrP,float vSc,float wSc,float aSc,int bornTime,float atr)=>
     [node,evid,nStr,pk,dir]=profile_node(raw,supp,atrP,bot,step,tot,buy)
-    [vSc,wSc,aSc]=pivot_features(supp,vb,absSc)
     bool ok=nStr>=nodeMin and evid>=evidMin
     float pull=ok?pullMax*clip(evid/0.65):0.0
     float p=raw+(node-raw)*pull
     float sc=100.0*(0.50*evid+0.20*aSc+0.15*vSc+0.15*wSc)
-    // Reject candidates the current close already invalidates (would break on the bar they are born)
+    // Se descarta el candidato que el cierre actual ya invalida (se rompería en la misma vela en que nace)
     float buf=math.max(nz(atr,0.0)*breakAtr,0.0)
     bool valid=supp?close>=p-buf:close<=p+buf
-    ok and valid and sc>=scoreMin?store_lvl(a,p,raw,node,evid,nStr,supp,sc,time[swingLen],bar_index-swingLen,atrP):false
+    ok and valid and sc>=scoreMin?store_lvl(a,p,raw,node,evid,nStr,supp,sc,bornTime,bar_index-swingLen,atrP):false
 
 manage_breaks(array<Lvl> a,float atr)=>
     bool sBreak=false
     bool rBreak=false
     if a.size()>0
+        float buf=math.max(nz(atr,0.0)*breakAtr,0.0)
+        float tol=math.max(nz(atr,0.0)*mergeAtr,syminfo.mintick)
         for i=a.size()-1 to 0
             Lvl lv=a.get(i)
-            float buf=math.max(nz(atr,0.0)*breakAtr,0.0)
             bool broken=barstate.isconfirmed and (lv.supp?close<lv.p-buf:close>lv.p+buf)
             bool expired=maxAge>0 and bar_index-lv.bornIdx>maxAge
             if broken
                 sBreak:=sBreak or lv.supp
                 rBreak:=rBreak or not lv.supp
-            if broken or expired
+            // Inversión (una vez): la resistencia rota pasa a soporte y al revés, salvo que ese lado ya tenga nivel aquí
+            bool flip=broken and not expired and flipLvls and not lv.flipped and nearby(a,lv.p,not lv.supp,tol)<0
+            if flip
+                lv.supp:=not lv.supp
+                lv.flipped:=true
+                lv.flipBar:=bar_index
+                lv.sc:=lv.sc*0.9
+            else if broken or expired
                 remove_lvl(a,i)
     [sBreak,rBreak]
 
@@ -352,6 +538,7 @@ draw_profile(array<Lvl> a,array<box> bx,array<line> ln,array<label> lb)=>
     float mx=tot.max()
     if mx>0
         int poc=tot.indexof(mx)
+        [vaLo,vaHi]=value_area(tot,poc,vaPct/100.0)
         int x=bar_index+profOff
         for r=0 to profRows-1
             float rv=tot.get(r)
@@ -363,7 +550,8 @@ draw_profile(array<Lvl> a,array<box> bx,array<line> ln,array<label> lb)=>
                 int sw=tw-bw
                 float y0=bot+(r+0.08)*step
                 float y1=bot+(r+0.92)*step
-                int fade=int(math.round(76.0-46.0*str))
+                bool inVA=r>=vaLo and r<=vaHi
+                int fade=math.min(92,int(math.round(76.0-46.0*str))+(showVA and not inVA?12:0))
                 if bw>0
                     bx.push(box.new(left=x,top=y1,right=x+bw,bottom=y0,xloc=xloc.bar_index,border_color=color.new(buyCol,100),
                      bgcolor=color.new(buyCol,fade)))
@@ -384,6 +572,15 @@ draw_profile(array<Lvl> a,array<box> bx,array<line> ln,array<label> lb)=>
             ln.push(line.new(x1=math.max(0,bar_index-18),y1=p,x2=x,y2=p,xloc=xloc.bar_index,color=color.new(pocCol,25),width=2))
             lb.push(label.new(x=x+profW+2,y=p,text="POC "+str.tostring(p,format.mintick),xloc=xloc.bar_index,yloc=yloc.price,
              style=label.style_label_left,color=color.new(pocCol,100),textcolor=pocCol,size=size.tiny))
+        if showVA
+            float vah=bot+(vaHi+1)*step
+            float val=bot+vaLo*step
+            ln.push(line.new(x1=math.max(0,bar_index-18),y1=vah,x2=x+profW,y2=vah,xloc=xloc.bar_index,color=color.new(rawCol,30),width=1,style=line.style_dashed))
+            ln.push(line.new(x1=math.max(0,bar_index-18),y1=val,x2=x+profW,y2=val,xloc=xloc.bar_index,color=color.new(rawCol,30),width=1,style=line.style_dashed))
+            lb.push(label.new(x=x+profW+2,y=vah,text="VAH "+str.tostring(vah,format.mintick),xloc=xloc.bar_index,yloc=yloc.price,
+             style=label.style_label_left,color=color.new(rawCol,100),textcolor=rawCol,size=size.tiny))
+            lb.push(label.new(x=x+profW+2,y=val,text="VAL "+str.tostring(val,format.mintick),xloc=xloc.bar_index,yloc=yloc.price,
+             style=label.style_label_left,color=color.new(rawCol,100),textcolor=rawCol,size=size.tiny))
     0
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
@@ -394,7 +591,7 @@ ph=ta.pivothigh(high,swingLen,swingLen)
 pl=ta.pivotlow(low,swingLen,swingLen)
 ready=bar_index>VOL_LEN+swingLen*2+5
 
-// Pivot-bar values computed every bar so their history is bar-based
+// Rasgos de la vela del pivot, calculados en cada vela para que su historial sea por vela
 atrPiv=math.max(nz(atr[swingLen],syminfo.mintick),syminfo.mintick)
 vbPiv=nz(avgVol[swingLen],volume[swingLen])
 absV=math.max(nz(volume,0.0),0.0)
@@ -403,6 +600,31 @@ absVRat=absBase>0?absV/absBase:1.0
 absBRat=math.abs(close-open)/math.max(high-low,syminfo.mintick)
 absBar=math.sqrt(clip((ABS_BODY_MAX-absBRat)/ABS_BODY_MAX)*clip((absVRat-1.0)/(ABS_VOL_X-1.0)))
 absPiv=nz(ta.highest(absBar,ABS_RAD*2+1)[swingLen-ABS_RAD],0.0)
+pvVSc=clip(((vbPiv>0?nz(volume[swingLen],0.0)/vbPiv:1.0)-0.8)/(PIV_VOL_X-0.8))
+pvRng=math.max(high[swingLen]-low[swingLen],syminfo.mintick)
+pvWSup=clip(((math.min(open[swingLen],close[swingLen])-low[swingLen])/pvRng)/0.50)
+pvWRes=clip(((high[swingLen]-math.max(open[swingLen],close[swingLen]))/pvRng)/0.50)
+pvTime=time[swingLen]
+
+// Tendencia del marco superior con su última vela cerrada (t[1] + lookahead_on = sin repintado): 2/-2 fuerte, 1/-1 débil, 0 sin datos
+htf_trend()=>
+    float e50=ta.ema(close,50)
+    float e200=ta.ema(close,200)
+    int t=na(e200)?0:e50>e200?(close>e50?2:1):(close<e50?-2:-1)
+    t[1]
+htfTrend=nz(request.security(syminfo.tickerid,htfTf,htf_trend(),lookahead=barmerge.lookahead_on),0)
+
+// VWAP: de la sesión CME (reinicio a las 18:00 ET) o RTH, anclado a las 09:30 ET y sin valor fuera de esa sesión
+bool inRth=not na(time(timeframe.period,"0930-1600","America/New_York"))
+bool rthStart=inRth and not inRth[1]
+float vwCme=ta.vwap(hlc3)
+float vwRth=ta.vwap(hlc3,rthStart)
+vwapV=vwapMode=="RTH 09:30"?(inRth?vwRth:na):vwCme
+
+atrPct=nz(ta.percentrank(atr,500),50.0)
+volOk=atrPct>=atrLoPct and atrPct<=atrHiPct
+inSess=not useSess or not na(time(timeframe.period,sess,sessTz))
+volRel=nz(avgVol)>0?volume/avgVol:1.0
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Objects & State {
@@ -412,24 +634,330 @@ var array<label> eLb=array.new_label()
 var array<label> pLb=array.new_label()
 var array<box> pBx=array.new_box()
 var array<line> tLn=array.new_line()
+var array<Trade> trades=array.new<Trade>()    // operaciones mostradas (con dibujo y alertas)
+var array<Trade> shadows=array.new<Trade>()   // todas las señales A/B/C, solo para estadísticas
+// Estadísticas, índice 0=A, 1=B, 2=C (todas las señales del grado), 3=OPERADAS (las mostradas):
+// operaciones, ganadoras, suma de R, R ganado bruto, R perdido bruto
+var array<float> stN=array.new_float(4,0.0)
+var array<float> stW=array.new_float(4,0.0)
+var array<float> stR=array.new_float(4,0.0)
+var array<float> stGW=array.new_float(4,0.0)
+var array<float> stGL=array.new_float(4,0.0)
+var int lastSig=-100000
+var array<int> lastSh=array.new_int(3,-100000)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Pivot Evaluation {
 bool newSup=false
 bool newRes=false
 
-// Evaluate on confirmed bars only so realtime pivots cannot flicker in and out intrabar
-if ready and barstate.isconfirmed and not na(pl)
-    newSup:=pivot_eval(lvls,pl,true,vbPiv,atrPiv,absPiv,atr)
-
-if ready and barstate.isconfirmed and not na(ph)
-    newRes:=pivot_eval(lvls,ph,false,vbPiv,atrPiv,absPiv,atr)
+// Solo con la vela cerrada, para que un pivot en tiempo real no aparezca y desaparezca dentro de la vela.
+// El perfil se calcula una sola vez aunque haya pivot alto y bajo en la misma vela.
+if ready and barstate.isconfirmed and (not na(pl) or not na(ph))
+    int pvBars=math.max(1,math.min(profLb,bar_index-swingLen+1))
+    [pvBot,pvStep,pvTot,pvBuy]=profile(swingLen,swingLen+pvBars-1,profRows)
+    if not na(pl)
+        newSup:=pivot_eval(lvls,pvBot,pvStep,pvTot,pvBuy,pl,true,atrPiv,pvVSc,pvWSup,absPiv,pvTime,atr)
+    if not na(ph)
+        newRes:=pivot_eval(lvls,pvBot,pvStep,pvTot,pvBuy,ph,false,atrPiv,pvVSc,pvWRes,absPiv,pvTime,atr)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Level Lifecycle {
 [supBreak,resBreak]=manage_breaks(lvls,atr)
 trim_lvls(lvls)
 update_lvls(lvls)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Market Context (POC / Value Area en caché para el motor de señales) {
+var float ctxPoc=na
+var float ctxVah=na
+var float ctxVal=na
+if ready and barstate.isconfirmed and (na(ctxPoc) or bar_index%ctxRefresh==0)
+    int cBars=math.max(1,math.min(profLb,bar_index+1))
+    [cBot,cStep,cTot,cBuy]=profile(0,cBars-1,profRows)
+    float cMx=cTot.max()
+    if cMx>0
+        int cPoc=cTot.indexof(cMx)
+        [cLo,cHi]=value_area(cTot,cPoc,vaPct/100.0)
+        ctxPoc:=cBot+(cPoc+0.5)*cStep
+        ctxVah:=cBot+(cHi+1)*cStep
+        ctxVal:=cBot+cLo*cStep
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Trade Engine {
+set_x2(line l,int x)=>
+    if not na(l)
+        line.set_x2(l,x)
+    0
+
+del_trade(Trade t)=>
+    if not na(t.lEn)
+        line.delete(t.lEn)
+        line.delete(t.lSl)
+        line.delete(t.lT1)
+        line.delete(t.lT2)
+    if not na(t.lb)
+        label.delete(t.lb)
+    0
+
+record(Trade t,int idx)=>
+    stN.set(idx,stN.get(idx)+1.0)
+    stR.set(idx,stR.get(idx)+t.res)
+    if t.res>0
+        stW.set(idx,stW.get(idx)+1.0)
+        stGW.set(idx,stGW.get(idx)+t.res)
+    else if t.res<0
+        stGL.set(idx,stGL.get(idx)-t.res)
+    0
+
+// Cierra con r (en R, antes de costes) y descuenta el coste de la operación completa
+close_trade(Trade t,float r)=>
+    float risk=math.abs(t.entry-t.sl)
+    float costR=risk>0?costTk*syminfo.mintick/risk:0.0
+    t.done:=true
+    t.res:=r-costR
+    record(t,t.shown?3:t.grade)
+    set_x2(t.lEn,bar_index)
+    set_x2(t.lSl,bar_index)
+    set_x2(t.lT1,bar_index)
+    set_x2(t.lT2,bar_index)
+    if not na(t.lb)
+        label.set_text(t.lb,grade_txt(t.grade)+(t.isLong?" ▲ ":" ▼ ")+(t.res>=0?"+":"")+str.tostring(t.res,"#.##")+"R")
+    0
+
+// Resuelve una operación abierta en la vela cerrada actual. Cuando una vela toca a la vez varios precios, se
+// elige siempre la lectura prudente: primero el stop, y TP1 + vuelta a la entrada cuenta como break-even.
+update_trade(Trade t)=>
+    string ev=""
+    if not t.done and bar_index>t.openBar
+        float risk=math.abs(t.entry-t.sl)
+        float w1=tp1Pct/100.0
+        float bank=t.tp1Hit?w1*tp1R:0.0
+        float rest=t.tp1Hit?1.0-w1:1.0
+        bool eos=flatEnd and useSess and not inSess
+        bool hitStop=t.isLong?low<=t.curStop:high>=t.curStop
+        bool hitT1=t.isLong?high>=t.tp1:low<=t.tp1
+        bool hitT2=t.isLong?high>=t.tp2:low<=t.tp2
+        if eos
+            float mv=risk>0?(t.isLong?open-t.entry:t.entry-open)/risk:0.0
+            close_trade(t,bank+rest*mv)
+            ev:="FIN DE SESIÓN"
+        else if hitStop
+            close_trade(t,t.tp1Hit?bank:-1.0)
+            ev:=t.tp1Hit?"BREAK-EVEN":"STOP"
+        else if hitT2
+            t.tp1Hit:=true
+            close_trade(t,w1*tp1R+(1.0-w1)*tp2R)
+            ev:="TP2"
+        else
+            if hitT1 and not t.tp1Hit
+                t.tp1Hit:=true
+                t.curStop:=t.entry
+                ev:="TP1"
+                if t.isLong?low<=t.entry:high>=t.entry
+                    close_trade(t,w1*tp1R)
+                    ev:="TP1 + BREAK-EVEN"
+            if not t.done and bar_index-t.openBar>=maxBars
+                float bank2=t.tp1Hit?w1*tp1R:0.0
+                float rest2=t.tp1Hit?1.0-w1:1.0
+                float mv2=risk>0?(t.isLong?close-t.entry:t.entry-close)/risk:0.0
+                close_trade(t,bank2+rest2*mv2)
+                ev:="TIEMPO"
+        if not t.done
+            set_x2(t.lEn,bar_index+1)
+            set_x2(t.lSl,bar_index+1)
+            set_x2(t.lT1,bar_index+1)
+            set_x2(t.lT2,bar_index+1)
+    ev
+
+// Operación de estadísticas: sin dibujo ni alertas
+shadow_trade(bool isLong,int g,float entry,float sl)=>
+    float risk=math.abs(entry-sl)
+    Trade.new(isLong=isLong,grade=g,openBar=bar_index,entry=entry,sl=sl,tp1=isLong?entry+risk*tp1R:entry-risk*tp1R,
+     tp2=isLong?entry+risk*tp2R:entry-risk*tp2R,curStop=sl)
+
+open_trade(bool isLong,int g,float entry,float sl,string trig,Lvl lv,float pts)=>
+    float risk=math.abs(entry-sl)
+    float tp1=isLong?entry+risk*tp1R:entry-risk*tp1R
+    float tp2=isLong?entry+risk*tp2R:entry-risk*tp2R
+    line lEn=na
+    line lSl=na
+    line lT1=na
+    line lT2=na
+    if showTrades
+        lEn:=line.new(bar_index,entry,bar_index+1,entry,color=color.new(rawCol,10),width=1)
+        lSl:=line.new(bar_index,sl,bar_index+1,sl,color=color.new(resCol,10),width=1)
+        lT1:=line.new(bar_index,tp1,bar_index+1,tp1,color=color.new(supCol,40),width=1,style=line.style_dashed)
+        lT2:=line.new(bar_index,tp2,bar_index+1,tp2,color=color.new(supCol,10),width=1)
+    string tip=(isLong?"COMPRA ":"VENTA ")+grade_txt(g)+"  ("+str.tostring(pts,"#.#")+" pts)"
+     +"\nGatillo: "+trig
+     +"\nNivel: "+str.tostring(lv.p,format.mintick)+" (score "+str.tostring(lv.sc,"#")+(lv.flipped?", invertido":"")+")"
+     +"\nEntrada: "+str.tostring(entry,format.mintick)+"   SL: "+str.tostring(sl,format.mintick)
+     +"\nTP1: "+str.tostring(tp1,format.mintick)+"   TP2: "+str.tostring(tp2,format.mintick)
+    label lb=label.new(bar_index,isLong?low:high,grade_txt(g)+(isLong?" ▲":" ▼"),yloc=yloc.price,
+     style=isLong?label.style_label_up:label.style_label_down,color=color.new(lvl_col(isLong),grade_alpha(g)),
+     textcolor=color.white,size=size.small,tooltip=tip)
+    Trade.new(isLong=isLong,grade=g,openBar=bar_index,entry=entry,sl=sl,tp1=tp1,tp2=tp2,curStop=sl,shown=true,
+     lEn=lEn,lSl=lSl,lT1=lT1,lT2=lT2,lb=lb)
+
+// Operaciones de estadísticas: se resuelven y las cerradas salen del array (su resultado ya está anotado)
+if barstate.isconfirmed and shadows.size()>0
+    for i=shadows.size()-1 to 0
+        Trade t=shadows.get(i)
+        update_trade(t)
+        if t.done
+            shadows.remove(i)
+
+// Operaciones mostradas: todos los eventos de la vela van en una sola alerta
+string evMsg=""
+if barstate.isconfirmed and trades.size()>0
+    for i=0 to trades.size()-1
+        Trade t=trades.get(i)
+        if not t.done
+            string ev=update_trade(t)
+            if ev!=""
+                evMsg+=(evMsg==""?"":" || ")+(t.isLong?"COMPRA ":"VENTA ")+grade_txt(t.grade)+" @ "+str.tostring(t.entry,format.mintick)+" → "+ev
+                 +(t.done?" ("+(t.res>=0?"+":"")+str.tostring(t.res,"#.##")+"R)":" (stop a break-even)")
+
+// Recorta el dibujo de las operaciones mostradas más antiguas ya cerradas
+while trades.size()>maxDrawn
+    if trades.first().done
+        del_trade(trades.shift())
+    else
+        break
+
+bool hasOpen=false
+if trades.size()>0
+    for i=0 to trades.size()-1
+        if not trades.get(i).done
+            hasOpen:=true
+            break
+
+if evMsg!=""
+    alert(syminfo.ticker+" "+timeframe.period+" | "+evMsg,alert.freq_once_per_bar_close)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Signal Engine {
+float zone=nz(atr,0.0)*zoneAtr
+float tLo=ta.lowest(low,3)
+float tHi=ta.highest(high,3)
+float lo2=math.min(low,low[1])
+float hi2=math.max(high,high[1])
+float low1=low[1]
+float high1=high[1]
+float clPos=high>low?(close-low)/(high-low):0.5
+bool bullBody=close>open and clPos>=0.5
+bool bearBody=close<open and clPos<=0.5
+bool absNow=absBar>=ABS_SIG
+bool absPrev=nz(absBar[1])>=ABS_SIG
+bool dFlipUp=not na(deltaAvg) and delta>0 and delta>=deltaAvg and math.min(nz(delta[1]),nz(delta[2]))<0
+bool dFlipDn=not na(deltaAvg) and delta<0 and -delta>=deltaAvg and math.max(nz(delta[1]),nz(delta[2]))>0
+
+// Nivel más fuerte de un lado testado en las últimas 3 velas, que aguanta en este cierre y tiene al menos un
+// gatillo. Devuelve su índice, el número de gatillos y sus nombres. También registra el primer test de cada
+// nivel invertido: solo ese episodio vale como ruptura y retest.
+scan_triggers(array<Lvl> a,bool supp,bool bodyOk,bool flipOk)=>
+    int bestId=-1
+    int bestN=0
+    float bestSc=-1.0
+    string bestName=""
+    if a.size()>0
+        for i=0 to a.size()-1
+            Lvl lv=a.get(i)
+            // Un nivel recién invertido necesita unas velas para que la propia vela de rotura no cuente como retest
+            bool fresh=not lv.flipped or bar_index-lv.flipBar>3
+            if lv.supp==supp and fresh
+                bool touched=supp?tLo<=lv.p+zone:tHi>=lv.p-zone
+                if barstate.isconfirmed and lv.flipped and touched and na(lv.rtBar)
+                    lv.rtBar:=bar_index
+                bool holds=supp?close>lv.p:close<lv.p
+                if bodyOk and lv.sc>=sigMinLvl and touched and holds
+                    bool sw=useSweep and (supp?lo2<lv.p:hi2>lv.p)
+                    // La vela de absorción tiene que estar en el nivel, no en cualquier parte
+                    bool ab=useAbs and (supp?(absNow and low<=lv.p+zone) or (absPrev and low1<=lv.p+zone):(absNow and high>=lv.p-zone) or (absPrev and high1>=lv.p-zone))
+                    bool df=useDflip and flipOk
+                    bool rt=useRetest and lv.flipped and not na(lv.rtBar) and bar_index-lv.rtBar<=2
+                    int n=(sw?1:0)+(ab?1:0)+(df?1:0)+(rt?1:0)
+                    if n>0 and lv.sc>bestSc
+                        string nm=sw?"Barrida":""
+                        nm:=ab?(nm==""?"Absorción":nm+" + Absorción"):nm
+                        nm:=df?(nm==""?"Giro del delta":nm+" + Giro del delta"):nm
+                        nm:=rt?(nm==""?"Ruptura y retest":nm+" + Ruptura y retest"):nm
+                        bestSc:=lv.sc
+                        bestId:=i
+                        bestN:=n
+                        bestName:=nm
+    [bestId,bestN,bestName]
+
+// Puntos de confluencia, stop y veredicto de los filtros duros para una candidata
+candidate(bool isLong,Lvl lv,int nTrig)=>
+    float a=nz(atr,0.0)
+    float sl=isLong?math.min(lv.p,tLo)-a*slAtr:math.max(lv.p,tHi)+a*slAtr
+    float risk=math.abs(close-sl)
+    float room=nearest_opp(lvls,isLong,close)
+    // El objetivo final tiene que caber antes del siguiente nivel contrario
+    bool roomOk=na(room) or (risk>0 and room/risk>=math.max(roomMin,tp2R))
+    bool riskOk=risk>0 and risk<=a*maxRiskAtr
+    int al=htfTrend*(isLong?1:-1)
+    bool htfOk=htfMode!="Filtro" or al>0
+    float pts=3.0*lv.sc/100.0
+    if htfMode!="Off"
+        pts+=al>=2?2.0:al==1?1.0:al<0?-2.0:0.0
+    pts+=(isLong?close>vwapV:close<vwapV)?1.0:0.0
+    bool vaLoc=not na(ctxPoc) and (math.abs(lv.p-ctxPoc)<=zone or (isLong?lv.p<=ctxVal+zone:lv.p>=ctxVah-zone))
+    pts+=vaLoc?1.0:0.0
+    pts+=math.min(nTrig-1.0,2.0)
+    pts+=(isLong?delta>0:delta<0)?1.0:0.0
+    pts+=volRel>=1.2?1.0:0.0
+    pts+=lv.touches>=2?0.5:0.0
+    [pts,sl,roomOk and riskOk and htfOk]
+
+[lId,lN,lName]=scan_triggers(lvls,true,bullBody,dFlipUp)
+[sId,sN,sName]=scan_triggers(lvls,false,bearBody,dFlipDn)
+
+bool longSig=false
+bool shortSig=false
+int minG=minGrade=="A"?0:minGrade=="B"?1:2
+
+// La mejor candidata de la vela pasa por los filtros. Si tiene grado A, B o C se sigue SIEMPRE en estadísticas
+// (con su propia espera por grado), y además se muestra y avisa si cumple el grado mínimo y "una a la vez".
+if ready and barstate.isconfirmed and inSess and volOk
+    float bestPts=-100.0
+    bool bestLong=false
+    float bestSl=na
+    int bestLv=-1
+    string bestName=""
+    if lId>=0
+        [lp,lsl,lok]=candidate(true,lvls.get(lId),lN)
+        if lok and lp>bestPts
+            bestPts:=lp
+            bestLong:=true
+            bestSl:=lsl
+            bestLv:=lId
+            bestName:=lName
+    if sId>=0
+        [sp,ssl,sok]=candidate(false,lvls.get(sId),sN)
+        if sok and sp>bestPts
+            bestPts:=sp
+            bestLong:=false
+            bestSl:=ssl
+            bestLv:=sId
+            bestName:=sName
+    if bestLv>=0
+        int g=grade_of(bestPts)
+        if g<=2
+            if bar_index-lastSh.get(g)>cooldown
+                shadows.push(shadow_trade(bestLong,g,close,bestSl))
+                lastSh.set(g,bar_index)
+            if showSig and g<=minG and bar_index-lastSig>cooldown and not (oneTrade and hasOpen)
+                Trade nt=open_trade(bestLong,g,close,bestSl,bestName,lvls.get(bestLv),bestPts)
+                trades.push(nt)
+                lastSig:=bar_index
+                longSig:=bestLong
+                shortSig:=not bestLong
+                alert(syminfo.ticker+" "+timeframe.period+" | "+(bestLong?"COMPRA ":"VENTA ")+grade_txt(g)+" | "+bestName
+                 +" | Entrada "+str.tostring(nt.entry,format.mintick)+" SL "+str.tostring(nt.sl,format.mintick)
+                 +" TP1 "+str.tostring(nt.tp1,format.mintick)+" TP2 "+str.tostring(nt.tp2,format.mintick),alert.freq_once_per_bar_close)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Drawing {
@@ -444,11 +972,84 @@ if barstate.islast
     draw_edge(lvls,eLb)
     if showProf
         draw_profile(lvls,pBx,tLn,pLb)
+
+plot(showVwap?vwapV:na,"VWAP",color=color.new(coreCol,15),linewidth=2,style=plot.style_linebr)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Dashboard {
+dash_pos(string p)=>p=="Arriba izquierda"?position.top_left:p=="Abajo derecha"?position.bottom_right:p=="Abajo izquierda"?position.bottom_left:position.top_right
+var table dash=table.new(dash_pos(dashPos),5,13,bgcolor=color.new(#131722,6),border_width=1,border_color=color.new(color.gray,82),
+ frame_width=1,frame_color=color.new(color.gray,60))
+dSz=dashSize=="Diminuto"?size.tiny:dashSize=="Normal"?size.normal:size.small
+color dTxt=color.new(color.white,8)
+color dMut=color.new(color.gray,5)
+
+dcell(int c,int r,string t,color tc)=>
+    table.cell(dash,c,r,t,text_color=tc,text_size=dSz,text_halign=text.align_left)
+    0
+
+stat_row(int r,string name,float n,float w,float sr,float gw,float gl)=>
+    float wr=n>0?w/n*100.0:na
+    float ar=n>0?sr/n:na
+    float pf=gl>0?gw/gl:na
+    dcell(0,r,name,dTxt)
+    dcell(1,r,n>0?str.tostring(n,"#"):"-",dTxt)
+    dcell(2,r,na(wr)?"-":str.tostring(wr,"#")+"%",na(wr)?dMut:wr>=55?supCol:wr<45?resCol:dTxt)
+    dcell(3,r,na(ar)?"-":(ar>=0?"+":"")+str.tostring(ar,"#.##")+"R",na(ar)?dMut:ar>0?supCol:resCol)
+    dcell(4,r,na(pf)?(gw>0?"∞":"-"):str.tostring(pf,"#.##"),na(pf)?(gw>0?supCol:dMut):pf>=1.3?supCol:pf<1.0?resCol:dTxt)
+    0
+
+var bool dashMerged=false
+if showDash and barstate.islast
+    if not dashMerged
+        for r=0 to 7
+            table.merge_cells(dash,1,r,4,r)
+        dashMerged:=true
+    string ht=htfTrend>=2?"ALCISTA ▲▲":htfTrend==1?"ALCISTA ▲":htfTrend<=-2?"BAJISTA ▼▼":htfTrend==-1?"BAJISTA ▼":"—"
+    float dS=nearest_opp(lvls,false,close)
+    float dR=nearest_opp(lvls,true,close)
+    string pos="Plano"
+    color posC=dMut
+    if trades.size()>0
+        Trade lt=trades.last()
+        if not lt.done
+            pos:=(lt.isLong?"COMPRA ":"VENTA ")+grade_txt(lt.grade)+" @ "+str.tostring(lt.entry,format.mintick)+" · SL "+str.tostring(lt.curStop,format.mintick)
+             +(lt.tp1Hit?" · TP1 ✓ (BE)":" · TP1 "+str.tostring(lt.tp1,format.mintick))
+            posC:=lt.isLong?supCol:resCol
+    string cov=ibWanted and covN>0?" · datos "+str.tostring(100.0*covIb/covN,"#")+"% hist.":""
+    dcell(0,0,"PSR PRO",coreCol)
+    dcell(1,0,syminfo.ticker+" · "+timeframe.period,dTxt)
+    dcell(0,1,"Marco "+htfTf,dMut)
+    dcell(1,1,ht+(htfMode=="Filtro"?"  (filtro)":""),htfTrend>0?supCol:htfTrend<0?resCol:dMut)
+    dcell(0,2,"VWAP "+(vwapMode=="RTH 09:30"?"RTH":"CME"),dMut)
+    dcell(1,2,na(vwapV)?"— (fuera de RTH)":(close>vwapV?"Encima · ":"Debajo · ")+str.tostring(vwapV,format.mintick),na(vwapV)?dMut:close>vwapV?supCol:resCol)
+    dcell(0,3,"Volatilidad",dMut)
+    dcell(1,3,"ATR "+str.tostring(atr,format.mintick)+" · pctl "+str.tostring(atrPct,"#")+(volOk?" · OK":atrPct<atrLoPct?" · DEMASIADO BAJA":" · DEMASIADO ALTA"),volOk?dTxt:resCol)
+    dcell(0,4,"Sesión",dMut)
+    dcell(1,4,inSess?"ABIERTA":"CERRADA",inSess?supCol:dMut)
+    dcell(0,5,"Flujo",dMut)
+    dcell(1,5,(ibOk?(deltaSrc==SRC_TICK?"Tick ":"Intravela ")+ltfTf:"Estimación por vela")+" · Δ "+str.tostring(delta,"#")+cov,delta>0?supCol:resCol)
+    dcell(0,6,"S / R próximos",dMut)
+    dcell(1,6,(na(dS)?"—":str.tostring(close-dS,format.mintick))+"  /  "+(na(dR)?"—":str.tostring(close+dR,format.mintick)),dTxt)
+    dcell(0,7,"Posición",dMut)
+    dcell(1,7,pos,posC)
+    dcell(0,8,"Grado",dMut)
+    dcell(1,8,"Ops",dMut)
+    dcell(2,8,"Acierto",dMut)
+    dcell(3,8,"R medio",dMut)
+    dcell(4,8,"PF",dMut)
+    for g=0 to 2
+        stat_row(9+g,grade_txt(g)+(g>minG?" (sin señal)":""),stN.get(g),stW.get(g),stR.get(g),stGW.get(g),stGL.get(g))
+    stat_row(12,"OPERADAS",stN.get(3),stW.get(3),stR.get(3),stGW.get(3),stGL.get(3))
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
 
 // ~~ Alerts {
-alertcondition(newSup,"New profile-confirmed support","A structural pivot low was confirmed by the large rolling volume profile and converted into support.")
-alertcondition(newRes,"New profile-confirmed resistance","A structural pivot high was confirmed by the large rolling volume profile and converted into resistance.")
-alertcondition(supBreak,"Support broken","An active profile-guided support was broken on a confirmed close.")
-alertcondition(resBreak,"Resistance broken","An active profile-guided resistance was broken on a confirmed close.")
+alertcondition(newSup,"Soporte nuevo","Un pivot bajo confirmado por el perfil de volumen se ha convertido en soporte.")
+alertcondition(newRes,"Resistencia nueva","Un pivot alto confirmado por el perfil de volumen se ha convertido en resistencia.")
+alertcondition(supBreak,"Soporte roto","Un soporte activo se ha roto con un cierre confirmado.")
+alertcondition(resBreak,"Resistencia rota","Una resistencia activa se ha roto con un cierre confirmado.")
+alertcondition(longSig,"PSR Pro COMPRA","{{ticker}} {{interval}}: señal de COMPRA de PSR Pro @ {{close}}")
+alertcondition(shortSig,"PSR Pro VENTA","{{ticker}} {{interval}}: señal de VENTA de PSR Pro @ {{close}}")
+// Para el detalle completo (grado, gatillo, entrada, SL, TP1, TP2 y los eventos TP1 / BE / stop / objetivo)
+// crea la alerta con "Cualquier llamada a la función alert()".
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
