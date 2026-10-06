@@ -6,6 +6,12 @@
 // TF operativo 1-15 min · MNQ / MES
 //
 // v7.3 — PATRONES VALIDADOS CONTRA LA METODOLOGÍA (ICT / SMC / Velez)
+//   AJUSTES DE LA AUDITORÍA DE METODOLOGÍA
+//   · Sin vela contraria no hay OB: ya no se usa la vela del extremo cuando es del mismo color.
+//   · «Rango del OB»: vela ICT (por defecto) o vela + extremo del tramo (comportamiento anterior).
+//   · Kill zone NY AM 08:30-11:00, la de ICT para futuros de índices.
+//   · 180: las dos velas ≥ 1×ATR y la segunda envuelve el cuerpo entero de la primera.
+//   · El conteo de agotamiento deja de llamarse «regla 3-5-8 de Velez»: no hay fuente que la respalde.
 //   CAMBIAN EL BACKTEST
 //   · VWAP RTH. El VWAP de referencia de las mesas en ES/NQ empieza a las 9:30 de Nueva York, no con la
 //     sesión de CME (18:00). Nuevo «Inicio del VWAP», RTH 9:30 por defecto: acumula solo de 9:30 a 16:00 y
@@ -154,7 +160,8 @@ colBear    = input.color(#F23645, "Bajista", inline="cs", group=gSt)
 obSrc      = input.string("Interna", "Origen de los OB", options=["Interna", "Swing"], group=gOb, tooltip="INTERNA: OB de cada iBOS/iCHoCH, más frecuentes; con el filtro de tendencia swing son las entradas a favor del sesgo. SWING: solo los OB de las roturas mayores.")
 obFrom     = input.string("BOS y CHoCH", "Crear OB en", options=["BOS y CHoCH", "Solo CHoCH", "Solo BOS"], group=gOb, tooltip="CHoCH: el OB que origina el cambio de carácter. BOS: el OB de continuación.")
 obNeedFvg  = input.bool(true, "Exigir desplazamiento (FVG en el impulso)", group=gOb, tooltip="SMC puro: un OB solo vale si el impulso que lo abandona dejó un desequilibrio (FVG).")
-obLook     = input.int(10, "Búsqueda de la vela contraria (velas)", minval=1, maxval=50, group=gOb)
+obLook     = input.int(10, "Búsqueda de la vela contraria (velas)", minval=1, maxval=50, group=gOb, tooltip="Velas, desde el extremo del tramo hacia atrás, en las que se busca la última vela de color contrario si no la hay entre el extremo y el impulso. Si no aparece ninguna, no hay Order Block.")
+obRange    = input.string("Vela ICT", "Rango del OB", options=["Vela ICT", "Vela + extremo del tramo"], group=gOb, tooltip="VELA ICT: el OB es el rango (máximo-mínimo) de la última vela contraria, como lo define ICT. VELA + EXTREMO: la caja se estira hasta el extremo del tramo aunque esté en otra vela (comportamiento anterior); deja el stop más allá del extremo, pero agranda la caja y desplaza el mean threshold.")
 obMax      = input.int(5, "OB vivos por lado", minval=1, maxval=30, group=gOb)
 obInval    = input.string("Cierre", "Invalidación", options=["Cierre", "Mecha", "Mean threshold (50%)"], group=gOb, tooltip="Cuándo muere el OB: con un CIERRE más allá del distal, con cualquier MECHA que lo atraviese, o (ICT, más estricto) con un cierre más allá de su 50%, el MEAN THRESHOLD. Solo un cierre más allá del distal crea breaker: con «Mecha» nunca.")
 obMid      = input.bool(true, "Línea del 50% (mean threshold)", group=gOb)
@@ -184,7 +191,7 @@ kzAs       = input.session("2000-2359", "", inline="k1", group=gCx)
 kzLoOn     = input.bool(true, "Londres", inline="k2", group=gCx)
 kzLo       = input.session("0200-0500", "", inline="k2", group=gCx)
 kzNaOn     = input.bool(true, "NY AM", inline="k3", group=gCx)
-kzNa       = input.session("0700-1000", "", inline="k3", group=gCx, tooltip="07:00-10:00 es la ventana clásica de ICT. Para índices (MNQ/MES) la más usada es 08:30-11:00, que cubre la apertura de contado. Solo cambia la confluencia «kill zone» del grado.")
+kzNa       = input.session("0830-1100", "", inline="k3", group=gCx, tooltip="ICT para futuros de índices (MNQ/MES): 08:30-11:00, que cubre la apertura de contado. La ventana de forex es 07:00-10:00. Solo cambia la confluencia «kill zone» del grado.")
 kzNpOn     = input.bool(true, "NY PM", inline="k4", group=gCx)
 kzNp       = input.session("1330-1600", "", inline="k4", group=gCx)
 pdlShow    = input.bool(true, "PDH / PDL (día previo)", group=gCx)
@@ -253,7 +260,7 @@ v18Body  = input.int(60,     "% rango",   inline="p4", group=gPa, minval=30, max
 v18Size  = input.int(80,     "% previa",  inline="p4", group=gPa, minval=40, maxval=200)
 v18CUp   = input.color(#7C4DFF, "", inline="p4", group=gPa)
 v18CDn   = input.color(#7C4DFF, "", inline="p4", group=gPa)
-v18Rng   = input.float(0.6, "180: rango mínimo de las dos velas (×ATR)", minval=0.0, step=0.1, group=gPa, tooltip="Las dos velas del 180 tienen que ser anchas. Sin mínimo, en un lateral dos velas pequeñas cumplen el patrón y no significan nada.")
+v18Rng   = input.float(1.0, "180: rango mínimo de las dos velas (×ATR)", minval=0.0, step=0.1, group=gPa, tooltip="Las dos velas del 180 tienen que ser anchas, al menos del tamaño medio. Sin mínimo, en un lateral dos velas pequeñas cumplen el patrón y no significan nada.")
 v18Cl    = input.int(25, "180: cierre en el extremo (% del rango)", minval=5, maxval=50, group=gPa, tooltip="Bull 180: la primera vela cierra en este % inferior de su rango y la segunda en este % superior (al revés en el bear 180). Una 180 que cierra a mitad de rango es una lucha, no un giro.")
 
 outOn    = input.bool(true,  "Outside",   inline="p5", group=gPa, tooltip="Outside bar: envuelve el rango de la vela previa y cierra más allá de su extremo.")
@@ -272,11 +279,11 @@ rbiCtx   = input.string("SMA 20 a favor", "RBI/GBI: tendencia previa", options=[
 insOn    = input.bool(true,  "Inside",    inline="p7", group=gPa, tooltip="Inside bar: compresión dentro de la vela madre. No dice dirección, dice que el mercado está decidiendo.")
 insCol   = input.color(#9E9E9E, "", inline="p7", group=gPa)
 
-exhOn    = input.bool(true,  "Agotamiento 3-5-8", inline="p8", group=gPa, tooltip="VELEZ · Regla 3-5-8: velas seguidas empujando en la misma dirección. A la tercera ya hay que estar atento («3 a 5 velas: piensa en vender»), a la quinta el movimiento está extendido y a la octava, agotado. El aviso está en 5 para no pintar cada tercera vela; bájalo a 3 para la lectura estricta. Es la prioridad más baja: solo pinta si la vela no encaja en ningún otro patrón.")
+exhOn    = input.bool(true,  "Agotamiento (conteo)", inline="p8", group=gPa, tooltip="Heurística de extensión, no una regla atribuible a Velez con fuente verificable: cuenta velas seguidas empujando en la misma dirección. Con el aviso el movimiento está extendido; con el extremo, agotado. Es la prioridad más baja: solo pinta si la vela no encaja en ningún otro patrón.")
 exhA     = input.int(5,      "aviso",     inline="p8", group=gPa, minval=3, maxval=12)
 exhB     = input.int(8,      "extremo",   inline="p8", group=gPa, minval=4, maxval=20)
 exhCol   = input.color(#F500A1, "", inline="p8", group=gPa)
-exhMode  = input.string("Máximos / mínimos", "3-5-8: cómo contar", options=["Máximos / mínimos", "Color de la vela"], group=gPa, tooltip="MÁXIMOS / MÍNIMOS (Velez): velas seguidas con máximo más alto que la anterior (alcista) o mínimo más bajo (bajista); un doji no corta la cuenta. COLOR: velas seguidas del mismo color, como en versiones anteriores.")
+exhMode  = input.string("Máximos / mínimos", "Agotamiento: cómo contar", options=["Máximos / mínimos", "Color de la vela"], group=gPa, tooltip="MÁXIMOS / MÍNIMOS: velas seguidas con máximo más alto que la anterior (alcista) o mínimo más bajo (bajista); un doji no corta la cuenta. COLOR: velas seguidas del mismo color, como en versiones anteriores.")
 
 showDash   = input.bool(true, "Panel", group=gVs)
 dashPos    = input.string("Arriba derecha", "Posición del panel", options=["Arriba derecha", "Abajo derecha", "Arriba izquierda", "Abajo izquierda"], group=gVs)
@@ -747,8 +754,8 @@ for L = 0 to 1
                             dispJ := j
                 bool fvg = maxGap > 0 and maxGap >= atrC * fvgMin
                 // ICT: la ÚLTIMA vela de color contrario antes del desplazamiento. Primero entre el extremo y el
-                // impulso (la vela 1 del FVG incluida); si no la hay, en el extremo o justo antes; si tampoco, el
-                // extremo. La zona llega siempre hasta el extremo del tramo, así que el stop queda más allá de él.
+                // impulso (la vela 1 del FVG incluida); si no la hay, en el extremo o justo antes. Si tampoco hay
+                // ninguna vela contraria, no hay OB: la vela del extremo del mismo color no lo es.
                 int obI = -1
                 if dispJ >= 0
                     for k = dispJ + 2 to ext
@@ -756,13 +763,15 @@ for L = 0 to 1
                             obI := k
                             break
                 if obI < 0
-                    obI := ext
                     for k = ext to math.min(ext + obLook, win)
                         if bull ? close[k] < open[k] : close[k] > open[k]
                             obI := k
                             break
-                float top = bull ? high[obI] : math.max(high[obI], extP)
-                float bot = bull ? math.min(low[obI], extP) : low[obI]
+                bool  hasOb  = obI >= 0
+                obI := hasOb ? obI : ext
+                bool  ictRng = obRange == "Vela ICT"
+                float top    = bull or ictRng ? high[obI] : math.max(high[obI], extP)
+                float bot    = not bull or ictRng ? low[obI] : math.min(low[obI], extP)
 
                 // ── Confluencias (cada una suma 1) ──
                 float obMidPx = (top + bot) / 2
@@ -784,7 +793,7 @@ for L = 0 to 1
                     =>                    k1 and k2
                 bool cf = f_vwapConf(bull, top, bot) and gT and (not pdFilt or k4) and sc >= minConf
 
-                if (fvg or not obNeedFvg) and top > bot and (cf or obShowUnc)
+                if hasOb and (fvg or not obNeedFvg) and top > bot and (cf or obShowUnc)
                     // Duplicado: un OB vivo del mismo lado que solapa ≥ 50% es el mismo nivel. Se queda el
                     // viejo si sigue intacto; si ya se mitigó, caducó o no estaba confirmado, lo sustituye.
                     bool skipNew = false
@@ -1039,8 +1048,8 @@ bool pinD = paOK and pinOn and paRng >= atrC * pinRng and paUpW >= paRng * pinWi
 // que cierra en el extremo contrario y más allá de su apertura.
 float v18Q = v18Cl / 100.0
 bool  v18W = paRng >= atrC * v18Rng and paPrvR >= atrC * v18Rng
-bool  v18U = paOK and v18On and v18W and paPrvR > 0 and close[1] < open[1] and paPrvB >= paPrvR * 0.6 and paPClP <= v18Q and paUp and paBody >= paRng * v18Body / 100.0 and paBody >= paPrvB * v18Size / 100.0 and close > open[1] and paClP >= 1 - v18Q
-bool  v18D = paOK and v18On and v18W and paPrvR > 0 and close[1] > open[1] and paPrvB >= paPrvR * 0.6 and paPClP >= 1 - v18Q and paDn and paBody >= paRng * v18Body / 100.0 and paBody >= paPrvB * v18Size / 100.0 and close < open[1] and paClP <= v18Q
+bool  v18U = paOK and v18On and v18W and paPrvR > 0 and close[1] < open[1] and paPrvB >= paPrvR * 0.6 and paPClP <= v18Q and paUp and paBody >= paRng * v18Body / 100.0 and paBody >= paPrvB * v18Size / 100.0 and open <= close[1] and close > open[1] and paClP >= 1 - v18Q
+bool  v18D = paOK and v18On and v18W and paPrvR > 0 and close[1] > open[1] and paPrvB >= paPrvR * 0.6 and paPClP >= 1 - v18Q and paDn and paBody >= paRng * v18Body / 100.0 and paBody >= paPrvB * v18Size / 100.0 and open >= close[1] and close < open[1] and paClP <= v18Q
 // OUTSIDE: envuelve el rango previo y cierra más allá de su extremo.
 bool outU = paOK and outOn and high > high[1] and low < low[1] and close > high[1] and paRng >= atrC * outRng
 bool outD = paOK and outOn and high > high[1] and low < low[1] and close < low[1]  and paRng >= atrC * outRng
@@ -1053,7 +1062,7 @@ bool rbiD  = paOK and rbiOn and paTrD and rbiCt and close[2] < open[2] and close
 // INSIDE: compresión dentro de la vela madre.
 bool insB = paOK and insOn and high <= high[1] and low >= low[1]
 
-// AGOTAMIENTO 3-5-8 (Velez): velas seguidas empujando en la misma dirección. Por defecto cuenta máximos más
+// AGOTAMIENTO (heurística, no regla de Velez): velas seguidas empujando en la misma dirección. Por defecto cuenta máximos más
 // altos (o mínimos más bajos), así que un doji no corta la cuenta. Solo muta en vela cerrada, como el resto
 // del script, así que la cuenta que ves es la de la última vela confirmada.
 bool paPushU = exhMode == "Color de la vela" ? paUp : high > high[1]
