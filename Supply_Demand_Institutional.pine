@@ -1,9 +1,21 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SMC + VWAP · INSTITUTIONAL v7.4
+// SMC + VWAP · INSTITUTIONAL v8.0
 // Smart Money Concepts · confirmación por bandas VWAP · Price Action de Oliver Velez
 // TF operativo 1-15 min · MNQ / MES
+//
+// v8.0 — CONTEXTO DE ÍNDICES: IFVG, NIVELES DE SESIÓN Y SMT
+//   · IFVG. Un FVG que el precio atraviesa con un CIERRE ha fallado y cambia de polaridad: el hueco alcista
+//     roto pasa a resistencia y el bajista a soporte, como un breaker. Muere con un cierre de vuelta.
+//   · CE (consequent encroachment): línea del 50% de cada FVG e IFVG.
+//   · NIVELES DE SESIÓN: máximo y mínimo de la noche (ONH/ONL, 18:00-9:30), rangos de Asia y Londres (los
+//     de sus kill zones), apertura de medianoche y apertura de contado. Con «Barridos de niveles externos»
+//     encendido, barrer uno ya cerrado cuenta como liquidez tomada en el grado.
+//   · SMT. Un índice hace un máximo más alto y su hermano no (o al revés en los mínimos): la divergencia
+//     de ICT entre activos correlacionados. Par automático MNQ↔MES y NQ↔ES, o el que escribas. Se dibuja
+//     y, si lo activas, suma como octava confluencia del grado.
+//   · Panel con fila SMT.
 //
 // v7.4 — SOLO ANÁLISIS, SIN TRADING AUTOMÁTICO
 //   · Pasa de estrategia a indicador. Fuera: órdenes, stop y objetivo, horario de trading, pérdida y
@@ -95,10 +107,11 @@
 //   más allá del OB y objetivo 3R.
 //
 // SIN REPINTADO. Estructura, OB, FVG y barridos se deciden en vela cerrada; el sesgo HTF usa la vela
-// superior ya cerrada. Solo el color de vela del módulo Velez puede cambiar con la vela abierta.
+// superior ya cerrada. Con la vela abierta solo cambian el color de vela del módulo Velez y los niveles
+// de la sesión en curso, que se van formando.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-indicator("SMC + VWAP Institutional v7.4", shorttitle="SMC VWAP", overlay=true,
+indicator("SMC + VWAP Institutional v8.0", shorttitle="SMC VWAP", overlay=true,
      max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -128,7 +141,7 @@ type OB
     bool   bull
     bool   conf                // pasó todos los filtros: se pinta sólido y alerta
     int    bar0                // vela de la rotura que lo creó
-    int    score               // confluencias, de 0 a 7
+    int    score               // confluencias, de 0 a 7 (8 con SMT en el grado)
     string grade
     string txt
     bool   touched = false     // mitigado: el precio volvió al OB
@@ -136,9 +149,11 @@ type OB
 
 type Gap
     box   bx
+    line  ce                   // consequent encroachment (50%)
     float top
     float bot
     bool  bull
+    bool  inv = false          // IFVG: roto por cierre, polaridad invertida
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ INPUTS
@@ -150,8 +165,9 @@ gFl = "③ Filtros de confirmación"
 gVw = "④ VWAP"
 gCx = "⑤ Contexto institucional"
 gLq = "⑥ Liquidez y FVG"
-gPa = "⑦ Price Action · Oliver Velez"
-gVs = "⑧ Panel y alertas"
+gSm = "⑦ SMT · divergencia entre índices"
+gPa = "⑧ Price Action · Oliver Velez"
+gVs = "⑨ Panel y alertas"
 
 intLen     = input.int(5, "Estructura interna: longitud del swing", minval=2, maxval=20, group=gSt, tooltip="Velas a cada lado para confirmar un pivote INTERNO. De aquí salen los iBOS/iCHoCH y, por defecto, los OB. 3-5 en 1-5 min.")
 swLen      = input.int(20, "Estructura swing: longitud del swing", minval=5, maxval=100, group=gSt, tooltip="Velas a cada lado para confirmar un pivote SWING. Define el sesgo (BOS/CHoCH) y el rango premium/discount. 15-30 en 1-5 min; 10-20 en 15 min.")
@@ -177,7 +193,7 @@ obOpac     = input.int(70, "Transparencia", minval=0, maxval=95, group=gOb)
 vwConf     = input.string("Tendencia", "Regla VWAP", options=["Tendencia", "Descuento", "Banda σ", "Ninguna"], group=gFl, tooltip="TENDENCIA: la rotura cierra del lado bueno del VWAP (compras sobre él, ventas bajo él). DESCUENTO: el OB está del lado barato del VWAP. BANDA σ: el OB alcanza la banda interior contraria. NINGUNA: sin filtro VWAP. Sin VWAP (sin volumen o fuera de intradía) solo pasa 'Ninguna'.")
 trendFilt  = input.string("Estructura swing", "Filtro de tendencia", options=["Estructura swing", "Sesgo HTF", "Swing + HTF", "Ninguno"], group=gFl, tooltip="Solo OB a favor del sesgo elegido: compras con estructura alcista, ventas con bajista. Con 'Sesgo HTF' y el marco superior sin datos no pasa ningún OB.")
 pdFilt     = input.bool(false, "Exigir descuento (compras) / premium (ventas)", group=gFl, tooltip="El punto medio del OB tiene que estar en la mitad barata del rango swing para comprar, y en la cara para vender.")
-minConf    = input.int(0, "Confluencias mínimas (0 = no filtrar)", minval=0, maxval=7, group=gFl, tooltip="De 7: sesgo swing, sesgo HTF, liquidez tomada en el tramo, descuento/premium, lado barato del VWAP, kill zone y desplazamiento fuerte (FVG ≥ 0.5×ATR o volumen ≥ 1.5× la media). Grado: A+ ≥ 6 · A ≥ 4 · B ≥ 2 · C.")
+minConf    = input.int(0, "Confluencias mínimas (0 = no filtrar)", minval=0, maxval=8, group=gFl, tooltip="De 7: sesgo swing, sesgo HTF, liquidez tomada en el tramo, descuento/premium, lado barato del VWAP, kill zone y desplazamiento fuerte (FVG ≥ 0.5×ATR o volumen ≥ 1.5× la media). Grado: A+ ≥ 6 · A ≥ 4 · B ≥ 2 · C. Con «SMT en el grado» son 8 y cada corte sube uno: A+ ≥ 7 · A ≥ 5 · B ≥ 3.")
 
 vwAnchor   = input.string("RTH 9:30", "Inicio del VWAP", options=["RTH 9:30", "Sesión completa"], group=gVw, tooltip="RTH 9:30: empieza con la apertura de contado (9:30 de Nueva York) y acumula hasta las 16:00; es el VWAP contra el que se miden las mesas institucionales en ES/NQ. Fuera de ese horario se queda en el valor del cierre de contado, que sigue siendo una referencia. SESIÓN COMPLETA: empieza con la sesión del símbolo (en CME, 18:00 de Nueva York) e incluye la noche; es el de v7.2.")
 vwSig1     = input.float(1.0, "Banda interior (σ)", minval=0.25, maxval=4.0, step=0.25, group=gVw)
@@ -200,20 +216,33 @@ kzNpOn     = input.bool(true, "NY PM", inline="k4", group=gCx)
 kzNp       = input.session("1330-1600", "", inline="k4", group=gCx)
 pdlShow    = input.bool(true, "PDH / PDL (día previo)", group=gCx)
 pwlShow    = input.bool(false, "PWH / PWL (semana previa)", group=gCx)
+onShow     = input.bool(true, "ONH / ONL (máximo y mínimo de la noche)", group=gCx, tooltip="La liquidez que más se busca en la apertura de contado: los stops encima del máximo y debajo del mínimo de la sesión nocturna. Se dibujan mientras se forman y quedan fijos al terminar la noche.")
+onSess     = input.session("1800-0930", "Sesión nocturna (hora de Nueva York)", group=gCx)
+asRngShow  = input.bool(false, "Máximo / mínimo de Asia", group=gCx, tooltip="El rango de la kill zone de Asia (su horario se ajusta arriba).")
+loRngShow  = input.bool(false, "Máximo / mínimo de Londres", group=gCx, tooltip="El rango de la kill zone de Londres. En NY AM, el barrido de uno de sus extremos suele preceder al movimiento del día.")
+moShow     = input.bool(true, "Apertura de medianoche (00:00)", group=gCx, tooltip="ICT: la apertura real del día. Sobre ella el precio está caro para el día (premium); debajo, barato (discount).")
+roShow     = input.bool(true, "Apertura de contado (9:30)", group=gCx)
 lvlCol     = input.color(#B0BEC5, "Color de niveles", group=gCx)
 
 eqShow     = input.bool(true, "Máximos / mínimos iguales (EQH · EQL)", group=gLq)
 eqTol      = input.float(0.1, "Tolerancia de igualdad (×ATR)", minval=0.01, maxval=1.0, step=0.01, group=gLq)
 swpShow    = input.bool(true, "Barridos de liquidez ($)", group=gLq, tooltip="Mecha más allá de un swing interno vivo que cierra de vuelta dentro: tomó los stops sin romper la estructura.")
-swpExt     = input.bool(false, "Barridos de PDH/PDL y PWH/PWL", group=gLq, tooltip="Mecha más allá del máximo o mínimo del día (o la semana) anterior que cierra de vuelta dentro: la liquidez externa, la más vigilada. Se marca una vez por nivel y cuenta como «liquidez tomada» en el grado del OB.")
+swpExt     = input.bool(false, "Barridos de niveles externos (PDH/PDL, PWH/PWL y sesión)", group=gLq, tooltip="Mecha más allá de PDH/PDL, PWH/PWL o de un nivel de sesión ya cerrado (ONH/ONL, Asia, Londres) que cierra de vuelta dentro: la liquidez externa, la más vigilada. Los de sesión solo si ese nivel está dibujado. Se marca una vez por nivel y periodo y cuenta como «liquidez tomada» en el grado del OB.")
 fvgShow    = input.bool(true, "Dibujar FVG", group=gLq)
 fvgMin     = input.float(0.2, "FVG: hueco mínimo (×ATR)", minval=0.0, step=0.05, group=gLq, tooltip="También es el tamaño mínimo del FVG que valida el desplazamiento de un OB.")
 fvgDisp    = input.bool(false, "FVG: exigir vela central de desplazamiento", group=gLq, tooltip="ICT: la vela central del FVG es la de desplazamiento, así que cierra más allá del extremo de la vela 1 (sobre su máximo en un FVG alcista). Descarta huecos que solo son una apertura con hueco. Se aplica a los FVG dibujados y al desplazamiento que valida los OB.")
+fvgCE      = input.bool(true, "FVG: línea del 50% (consequent encroachment)", group=gLq, tooltip="ICT: el 50% del hueco. Un FVG sano respeta su CE: el precio entra, no cierra más allá de la mitad y sale.")
+ifvgOn     = input.bool(true, "IFVG: el FVG roto por cierre cambia de polaridad", group=gLq, tooltip="ICT · Inversion FVG. Un FVG alcista que el precio atraviesa con un CIERRE bajo su mínimo no ha sostenido el precio: pasa a resistencia (y el bajista roto al alza, a soporte). Se pinta con el color de su nueva dirección y muere con un cierre de vuelta al otro lado. Apagado, el FVG roto simplemente desaparece.")
 fvgMax     = input.int(10, "FVG vivos", minval=1, maxval=50, group=gLq)
 fvgCol     = input.color(#42A5F5, "Color FVG", group=gLq)
 
+smtOn      = input.bool(true, "Detectar SMT", group=gSm, tooltip="ICT · Smart Money Technique. En cada swing interno se compara con el índice hermano: si uno hace un máximo más alto y el otro no, es SMT bajista (en los mínimos, alcista). El índice que no acompaña delata que el barrido no tiene continuación. Necesita los datos del otro índice en tu plan de TradingView.")
+smtSym     = input.string("", "Índice de comparación (vacío = automático)", group=gSm, tooltip="Automático: MNQ↔MES y NQ↔ES, contrato continuo (1!). Para otro par escribe el ticker completo, p. ej. CME_MINI:RTY1! o CBOT_MINI:YM1!. Un ticker que no existe detiene el indicador.")
+smtMax     = input.int(60, "Velas máximas entre los dos swings", minval=5, maxval=500, group=gSm, tooltip="Solo se comparan dos swings seguidos si están a menos de N velas: un máximo de ayer no diverge de uno de hoy.")
+smtGrade   = input.bool(false, "Sumar SMT al grado del OB (8.ª confluencia)", group=gSm, tooltip="Un OB alcista suma 1 si hubo SMT alcista en el tramo que rompió (bajista para un OB bajista). El grado pasa a contar sobre 8.")
 
-// ── ⑦ PRICE ACTION · OLIVER VELEZ ────────────────────────────────────────────────────────────
+
+// ── ⑧ PRICE ACTION · OLIVER VELEZ ────────────────────────────────────────────────────────────
 // Módulo PURAMENTE VISUAL y aislado: calcula sus propios patrones, solo llama a barcolor() y lee los
 // OB en modo consulta. No toca la estructura, los OB, la confirmación VWAP ni las alertas.
 paMode   = input.string("Desactivado", "Pintar velas", options=["Desactivado", "Todas las velas", "Solo dentro de OB"], group=gPa, tooltip="Solo dentro de OB: las velas alcistas se pintan únicamente dentro de un OB alcista vivo, y las bajistas dentro de uno bajista. Es la lectura de Velez —la vela de giro vale donde hay un nivel detrás— pero es solo un filtro de PINTADO: no cambia ninguna señal.")
@@ -277,6 +306,7 @@ dashPos    = input.string("Arriba derecha", "Posición del panel", options=["Arr
 alOb       = input.bool(true, "Alerta: OB confirmado (JSON)", group=gVs, tooltip="Crea la alerta con «Cualquier llamada a alert()». Envía un JSON SMC_OB con lado, ticker, marco, estructura, grado, zona (top/bottom) y VWAP, al cierre de la vela que confirma el OB.")
 alStruct   = input.bool(false, "Alerta: BOS / CHoCH swing", group=gVs)
 alSwp      = input.bool(false, "Alerta: barrido de liquidez", group=gVs)
+alSmt      = input.bool(false, "Alerta: SMT", group=gVs)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ CÁLCULOS BASE · VWAP DE SESIÓN CON BANDAS σ
@@ -294,7 +324,8 @@ bool  lastBar = barstate.islast
 bool vwRth   = vwAnchor == "RTH 9:30"
 bool vwInRth = timeframe.isintraday and not na(time(timeframe.period, "0930-1600", "America/New_York"))
 // El cambio de día cubre un gráfico solo en horario regular, donde la vela anterior a las 9:30 ya era RTH.
-bool vwReset = vwRth ? vwInRth and (not vwInRth[1] or timeframe.change("D")) : timeframe.change("D")
+bool rthOpen = vwInRth and (not vwInRth[1] or timeframe.change("D"))
+bool vwReset = vwRth ? rthOpen : timeframe.change("D")
 bool vwAdd   = not vwRth or vwInRth
 
 var float vwSum = 0.0
@@ -382,6 +413,49 @@ bgcolor(kzShow ? (inLo ? color.new(#2962FF, 93) : inNa ? color.new(#FF9800, 93) 
 // apertura del día o la semana, así que lookahead_on no adelanta nada.
 [pdH, pdL] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
 [pwH, pwL] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+
+// Niveles de sesión. Cada rango se reinicia al empezar su sesión y se estira mientras dura; al terminar
+// queda fijo hasta la siguiente.
+f_range(bool inS) =>
+    var float h = na
+    var float l = na
+    var int   t = na
+    bool st = inS and not inS[1]
+    if st
+        h := high
+        l := low
+        t := time
+    else if inS
+        h := math.max(h, high)
+        l := math.min(l, low)
+    [h, l, t, st]
+
+bool inOnR = f_inSess(onSess)
+bool inAsR = f_inSess(kzAs)
+bool inLoR = f_inSess(kzLo)
+[onH, onL, onT, onSt] = f_range(inOnR)
+[asH, asL, asT, asSt] = f_range(inAsR)
+[loH, loL, loT, loSt] = f_range(inLoR)
+
+// Aperturas: la primera vela de las 00:00 de Nueva York (la del domingo a las 18:00 no lo es) y la de las 9:30.
+var float moPx = na
+var int   moT  = na
+var float roPx = na
+var int   roT  = na
+int nyDay = dayofmonth(time, "America/New_York")
+if timeframe.isintraday and nyDay != nyDay[1] and hour(time, "America/New_York") == 0
+    moPx := open
+    moT  := time
+if rthOpen
+    roPx := open
+    roT  := time
+
+// SMT: el índice hermano en el mismo marco. Sin par conocido se pide el propio símbolo y el SMT queda apagado.
+string smtAutoR = syminfo.root == "NQ" ? "ES" : syminfo.root == "ES" ? "NQ" : syminfo.root == "MNQ" ? "MES" : syminfo.root == "MES" ? "MNQ" : ""
+string smtTk    = smtSym != "" ? smtSym : smtAutoR != "" ? syminfo.prefix + ":" + smtAutoR + "1!" : ""
+string smtName  = smtSym != "" ? smtSym : smtAutoR
+bool   smtOK    = smtOn and smtTk != "" and timeframe.isintraday
+[pxH, pxL] = request.security(smtOK ? smtTk : syminfo.tickerid, timeframe.period, [high, low])
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ ESTADO
@@ -484,11 +558,25 @@ while nBrk > brkMax
 // Hueco de tres velas: el mínimo de la vela actual por encima del máximo de hace dos (alcista), o al
 // revés. Vive hasta que el precio lo rellena entero.
 
+// Un cierre al otro lado del hueco lo invierte (IFVG); un IFVG muere con un cierre de vuelta. Un FVG que solo
+// se rellena con mecha desaparece.
 if barstate.isconfirmed and gaps.size() > 0
     for i = gaps.size() - 1 to 0
-        Gap g = gaps.get(i)
-        if g.bull ? low <= g.bot : high >= g.top
+        Gap  g    = gaps.get(i)
+        bool thru = g.bull ? close < g.bot : close > g.top
+        if thru and ifvgOn and not g.inv
+            g.inv  := true
+            g.bull := not g.bull
+            color ic = g.bull ? colBull : colBear
+            box.set_bgcolor(g.bx, color.new(ic, 86))
+            box.set_text(g.bx, "IFVG")
+            box.set_text_color(g.bx, color.new(ic, 30))
+            if not na(g.ce)
+                line.set_color(g.ce, color.new(ic, 40))
+        else if g.inv ? thru : (g.bull ? low <= g.bot : high >= g.top)
             box.delete(g.bx)
+            if not na(g.ce)
+                line.delete(g.ce)
             gaps.remove(i)
 
 bool fvgUp = low > high[2] and low - high[2] >= atrC * fvgMin and (not fvgDisp or close[1] > high[2])
@@ -497,9 +585,13 @@ if barstate.isconfirmed and fvgShow and (fvgUp or fvgDn)
     float gT = fvgUp ? low : low[2]
     float gB = fvgUp ? high[2] : high
     box gb = box.new(time[1], gT, time, gB, xloc = xloc.bar_time, extend = extend.right, border_width = 0, bgcolor = color.new(fvgCol, 86), text = "FVG", text_size = size.tiny, text_color = color.new(fvgCol, 40), text_halign = text.align_left)
-    gaps.push(Gap.new(gb, gT, gB, fvgUp))
+    line gce = fvgCE ? line.new(time[1], (gT + gB) / 2, time, (gT + gB) / 2, xloc = xloc.bar_time, extend = extend.right, color = color.new(fvgCol, 40), style = line.style_dotted) : na
+    gaps.push(Gap.new(bx = gb, ce = gce, top = gT, bot = gB, bull = fvgUp))
     if gaps.size() > fvgMax
-        box.delete(gaps.shift().bx)
+        Gap old = gaps.shift()
+        box.delete(old.bx)
+        if not na(old.ce)
+            line.delete(old.ce)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ ESTRUCTURA · SWINGS, LIQUIDEZ Y RANGO
@@ -558,6 +650,49 @@ if alSwp and sInt.swpHiBar == bar_index
 if alSwp and sInt.swpLoBar == bar_index
     alert(syminfo.ticker + " " + timeframe.period + " · barrido de liquidez vendedora @ " + str.tostring(low, format.mintick), alert.freq_once_per_bar_close)
 
+// SMT en cada swing interno. El extremo del otro índice es el de la misma ventana del pivote (len velas a cada
+// lado): sus swings no caen siempre en la misma vela. Hay divergencia cuando uno supera su swing anterior y el
+// otro no.
+float smtHw = ta.highest(pxH, 2 * intLen + 1)
+float smtLw = ta.lowest(pxL, 2 * intLen + 1)
+var float  smtPH    = na
+var float  smtPHx   = na
+var int    smtPHb   = na
+var float  smtPL    = na
+var float  smtPLx   = na
+var int    smtPLb   = na
+var int    smtHiBar = na       // pivote del último SMT bajista
+var int    smtLoBar = na       // pivote del último SMT alcista
+var int    smtLastB = na
+var int    smtDir   = 0
+if smtOK and barstate.isconfirmed
+    if not na(phI)
+        int pb = bar_index - intLen
+        if not na(smtPH) and not na(smtPHx) and not na(smtHw) and pb - smtPHb <= smtMax and (phI > smtPH) != (smtHw > smtPHx)
+            smtHiBar := pb
+            smtLastB := pb
+            smtDir   := -1
+            f_keepLn(line.new(smtPHb, smtPH, pb, phI, color = colBear, width = 2))
+            f_keepLb(label.new(pb, phI, "SMT", style = label.style_label_down, color = #00000000, textcolor = colBear, size = size.tiny))
+            if alSmt
+                alert(syminfo.ticker + " " + timeframe.period + " · SMT bajista con " + smtName + " @ " + str.tostring(phI, format.mintick), alert.freq_once_per_bar_close)
+        smtPH  := phI
+        smtPHx := smtHw
+        smtPHb := pb
+    if not na(plI)
+        int pb = bar_index - intLen
+        if not na(smtPL) and not na(smtPLx) and not na(smtLw) and pb - smtPLb <= smtMax and (plI < smtPL) != (smtLw < smtPLx)
+            smtLoBar := pb
+            smtLastB := pb
+            smtDir   := 1
+            f_keepLn(line.new(smtPLb, smtPL, pb, plI, color = colBull, width = 2))
+            f_keepLb(label.new(pb, plI, "SMT", style = label.style_label_up, color = #00000000, textcolor = colBull, size = size.tiny))
+            if alSmt
+                alert(syminfo.ticker + " " + timeframe.period + " · SMT alcista con " + smtName + " @ " + str.tostring(plI, format.mintick), alert.freq_once_per_bar_close)
+        smtPL  := plI
+        smtPLx := smtLw
+        smtPLb := pb
+
 // Liquidez EXTERNA: barrido de PDH/PDL y PWH/PWL. Misma regla que el interno (mecha más allá, cierre dentro),
 // una vez por nivel y periodo. Opcional: si está apagado, nada de aquí cambia el grado.
 var bool swPdH  = false
@@ -572,6 +707,21 @@ if timeframe.change("D")
 if timeframe.change("W")
     swPwH := false
     swPwL := false
+var bool swOnH = false
+var bool swOnL = false
+var bool swAsH = false
+var bool swAsL = false
+var bool swLoH = false
+var bool swLoL = false
+if onSt
+    swOnH := false
+    swOnL := false
+if asSt
+    swAsH := false
+    swAsL := false
+if loSt
+    swLoH := false
+    swLoL := false
 
 f_extSwp(bool done, float lvl, bool hiSide, string tag) =>
     bool hit = not done and not na(lvl) and (hiSide ? high > lvl and close <= lvl : low < lvl and close >= lvl)
@@ -590,9 +740,22 @@ if swpExt and timeframe.isintraday and barstate.isconfirmed
     swPdL := swPdL or xPdL
     swPwH := swPwH or xPwH
     swPwL := swPwL or xPwL
-    if xPdH or xPwH
+    // Sesión: solo niveles dibujados y ya cerrados. Mientras la sesión dura, su máximo es el precio, no liquidez.
+    bool xOnH = f_extSwp(swOnH or not onShow or inOnR, onH, true, "ONH")
+    bool xOnL = f_extSwp(swOnL or not onShow or inOnR, onL, false, "ONL")
+    bool xAsH = f_extSwp(swAsH or not asRngShow or inAsR, asH, true, "Asia H")
+    bool xAsL = f_extSwp(swAsL or not asRngShow or inAsR, asL, false, "Asia L")
+    bool xLoH = f_extSwp(swLoH or not loRngShow or inLoR, loH, true, "Londres H")
+    bool xLoL = f_extSwp(swLoL or not loRngShow or inLoR, loL, false, "Londres L")
+    swOnH := swOnH or xOnH
+    swOnL := swOnL or xOnL
+    swAsH := swAsH or xAsH
+    swAsL := swAsL or xAsL
+    swLoH := swLoH or xLoH
+    swLoL := swLoL or xLoL
+    if xPdH or xPwH or xOnH or xAsH or xLoH
         swpXHi := bar_index
-    if xPdL or xPwL
+    if xPdL or xPwL or xOnL or xAsL or xLoL
         swpXLo := bar_index
 
 // Rango swing para premium/discount: arranca en cada pivote swing y se estira si el precio lo supera,
@@ -697,8 +860,10 @@ for L = 0 to 1
                 bool k5 = vwapOK and (bull ? top <= vwapV : bot >= vwapV)
                 bool k6 = inKz
                 bool k7 = maxGap >= atrC * 0.5 or (not na(rvolC) and rvolC >= 1.5)
-                int    sc = (k1 ? 1 : 0) + (k2 ? 1 : 0) + (k3 ? 1 : 0) + (k4 ? 1 : 0) + (k5 ? 1 : 0) + (k6 ? 1 : 0) + (k7 ? 1 : 0)
-                string gr = sc >= 6 ? "A+" : sc >= 4 ? "A" : sc >= 2 ? "B" : "C"
+                bool k8 = smtGrade and smtOK and (bull ? f_since(smtLoBar, lb) : f_since(smtHiBar, lb))
+                int    nK = smtGrade ? 8 : 7
+                int    sc = (k1 ? 1 : 0) + (k2 ? 1 : 0) + (k3 ? 1 : 0) + (k4 ? 1 : 0) + (k5 ? 1 : 0) + (k6 ? 1 : 0) + (k7 ? 1 : 0) + (k8 ? 1 : 0)
+                string gr = sc >= nK - 1 ? "A+" : sc >= nK - 3 ? "A" : sc >= nK - 5 ? "B" : "C"
 
                 // ── Filtros: todo lo que hay que pasar para pintarse sólido y alertar ──
                 bool gT = switch trendFilt
@@ -732,13 +897,13 @@ for L = 0 to 1
                                 line.delete(x.mid)
                             obs.remove(repl)
 
-                        string txt = tag + " OB · " + gr + " " + str.tostring(sc) + "/7" + (cf ? "" : " · s/c")
+                        string txt = tag + " OB · " + gr + " " + str.tostring(sc) + "/" + str.tostring(nK) + (cf ? "" : " · s/c")
                         box  bx = box.new(time[obI], top, time, bot, xloc = xloc.bar_time, extend = extend.right, border_color = color.new(c, cf ? 30 : 75), bgcolor = color.new(c, cf ? obOpac : math.min(obOpac + 20, 95)), text = txt, text_size = size.tiny, text_color = color.new(c, cf ? 10 : 50), text_halign = text.align_right, text_valign = text.align_top)
                         line ml = obMid ? line.new(time[obI], obMidPx, time, obMidPx, xloc = xloc.bar_time, extend = extend.right, color = color.new(c, cf ? 40 : 75), style = line.style_dotted) : na
                         OB   o  = OB.new(bx = bx, mid = ml, top = top, bot = bot, bull = bull, conf = cf, bar0 = bar_index, score = sc, grade = gr, txt = txt)
                         obs.push(o)
                         if cf
-                            lastOb := (bull ? "▲ " : "▼ ") + gr + " " + str.tostring(sc) + "/7"
+                            lastOb := (bull ? "▲ " : "▼ ") + gr + " " + str.tostring(sc) + "/" + str.tostring(nK)
 
                         // Tope por lado: sale el más antiguo (los breakers no cuentan).
                         int cnt = 0
@@ -778,8 +943,9 @@ if timeframe.change("W")
 var array<line>  lvlLn = array.new<line>()
 var array<label> lvlLb = array.new<label>()
 if barstate.isfirst
-    for i = 0 to 3
-        lvlLn.push(line.new(na, na, na, na, xloc = xloc.bar_time, extend = extend.right, style = line.style_dashed))
+    // 0-3 día y semana previos · 4-9 rangos de sesión · 10-11 aperturas (punteadas)
+    for i = 0 to 11
+        lvlLn.push(line.new(na, na, na, na, xloc = xloc.bar_time, extend = extend.right, style = i >= 10 ? line.style_dotted : line.style_dashed))
         lvlLb.push(label.new(na, na, "", xloc = xloc.bar_time, style = label.style_label_left, color = #00000000, size = size.tiny))
 
 f_lvl(int slot, bool show, int x0, float px, string txt) =>
@@ -819,6 +985,14 @@ if lastBar
     f_lvl(1, intra and pdlShow, dStart, pdL, "PDL")
     f_lvl(2, intra and pwlShow, wStart, pwH, "PWH")
     f_lvl(3, intra and pwlShow, wStart, pwL, "PWL")
+    f_lvl(4, intra and onShow, onT, onH, "ONH")
+    f_lvl(5, intra and onShow, onT, onL, "ONL")
+    f_lvl(6, intra and asRngShow, asT, asH, "Asia H")
+    f_lvl(7, intra and asRngShow, asT, asL, "Asia L")
+    f_lvl(8, intra and loRngShow, loT, loH, "Londres H")
+    f_lvl(9, intra and loRngShow, loT, loL, "Londres L")
+    f_lvl(10, intra and moShow, moT, moPx, "00:00")
+    f_lvl(11, intra and roShow, roT, roPx, "9:30")
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ██ PANEL
@@ -829,7 +1003,7 @@ string dashP = switch dashPos
     "Arriba izquierda" => position.top_left
     "Abajo izquierda"  => position.bottom_left
     =>                    position.top_right
-var table dash = table.new(dashP, 2, 8, bgcolor = color.new(#161B22, 5), border_width = 1, border_color = color.new(color.gray, 70))
+var table dash = table.new(dashP, 2, 9, bgcolor = color.new(#161B22, 5), border_width = 1, border_color = color.new(color.gray, 70))
 
 f_row(int r, string k, string v, color vc) =>
     table.cell(dash, 0, r, k, text_color = color.gray, text_size = size.small, text_halign = text.align_left)
@@ -851,7 +1025,7 @@ if showDash and lastBar
     string pdTxt = not pdOK ? "—" : pdPct > 55 ? "PREMIUM " + str.tostring(pdPct, "#") + "%" : pdPct < 45 ? "DISCOUNT " + str.tostring(pdPct, "#") + "%" : "EQUILIBRIO " + str.tostring(pdPct, "#") + "%"
     string vwTxt = not vwapOK ? "sin datos" : close > vwU2 ? "▲ sobre +σ ext" : close > vwU1 ? "▲ +σ int … +σ ext" : close >= vwapV ? "▲ sobre VWAP" : close >= vwL1 ? "▼ bajo VWAP" : close >= vwL2 ? "▼ −σ int … −σ ext" : "▼ bajo −σ ext"
     color  pdCol = not pdOK ? color.gray : pdPct > 55 ? colBear : pdPct < 45 ? colBull : color.gray
-    table.cell(dash, 0, 0, "SMC + VWAP v7.4", text_color = #FFD700, text_size = size.small)
+    table.cell(dash, 0, 0, "SMC + VWAP v8.0", text_color = #FFD700, text_size = size.small)
     table.cell(dash, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, text_size = size.small)
     f_row(1, "Sesgo HTF " + htfTf, not htfOK ? "sin datos" : htfTrend == 1 ? "ALCISTA" : htfTrend == -1 ? "BAJISTA" : "—", htfTrend == 1 ? colBull : htfTrend == -1 ? colBear : color.gray)
     f_row(2, "Estructura", "Swing " + f_dir(sSw.trend) + " · Interna " + f_dir(sInt.trend), sSw.trend == 1 ? colBull : sSw.trend == -1 ? colBear : color.gray)
@@ -859,6 +1033,8 @@ if showDash and lastBar
     f_row(4, "Premium/Discount", pdTxt, pdCol)
     f_row(5, vwRth ? "VWAP RTH" + (vwInRth ? "" : " (cierre)") : "VWAP", vwTxt, not vwapOK ? color.gray : close >= vwapV ? colBull : colBear)
     f_row(6, "Kill zone", inKz ? kzName : "fuera", inKz ? #FFD700 : color.gray)
+    string smtT = not smtOK ? (smtOn ? "sin par" : "apagado") : na(smtLastB) ? "—" : (smtDir == 1 ? "▲ alcista" : "▼ bajista") + " · hace " + str.tostring(bar_index - smtLastB) + " velas"
+    f_row(8, "SMT" + (smtOK ? " vs " + smtName : ""), smtT, not smtOK or na(smtLastB) ? color.gray : smtDir == 1 ? colBull : colBear)
     f_row(7, "OB vivos", "▲ " + str.tostring(nUp) + " · ▼ " + str.tostring(nDn) + " · último " + lastOb, color.white)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
