@@ -1,8 +1,16 @@
 // This work is licensed under Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
 // © LuxAlgo
+// Modified for intraday index futures (MNQ/NQ). Changes from the original:
+//  - Relative volume measured against the same clock time over recent sessions (no open/lunch bias)
+//  - Optional session mode: baseline, ATR, trend maturity and range expansion use session bars only,
+//    and climaxes are flagged only inside the session
+//  - Exhaustion watch: timeout checked on every bar, restarted by a marginal new extreme, faded on expiry;
+//    the run's peak volume includes that last push
+//  - Dashboard follows the side with an active episode; alert() messages carry prices and measurements
+// Distributed under the same CC BY-NC-SA 4.0 license.
 
 //@version=6
-indicator("Climactic Moves", "Climactic Moves", overlay = true, max_labels_count = 500, max_lines_count = 500)
+indicator("Climactic Moves [MNQ]", "Climactic MNQ", overlay = true, max_labels_count = 500, max_lines_count = 500)
 
 //---------------------------------------------------------------------------------------------------------------------}
 // Constants
@@ -21,6 +29,9 @@ PHASE_IDLE  = 0
 PHASE_MOVE  = 1
 PHASE_WATCH = 2
 
+TZ = "America/New_York"
+
+SESSION_GROUP = "Session"
 TREND_GROUP  = "Mature Trend"
 LADDER_GROUP = "Acceleration Ladder"
 EFFORT_GROUP = "Effort"
@@ -31,6 +42,10 @@ DASH_GROUP   = "Dashboard"
 //---------------------------------------------------------------------------------------------------------------------}
 // Settings
 //---------------------------------------------------------------------------------------------------------------------{
+sessOnlyInput = input.bool(true, "Session Mode", inline = "sess", group = SESSION_GROUP
+  , tooltip = "Intraday only. Baseline, ATR, trend maturity and range expansion are computed from session bars alone, and climaxes are flagged only inside the session. Keeps thin overnight bars from diluting the averages and the session open from reading as expansion. Episodes already running keep being tracked outside it.")
+sessInput = input.session("0930-1600", "", inline = "sess", group = SESSION_GROUP)
+
 baseLenInput = input.int(50, "Baseline SMA", minval = 5, group = TREND_GROUP
   , tooltip = "Moving-average baseline the trend matures against and the climactic run stretches away from.")
 
@@ -60,7 +75,14 @@ volumeMultInput = input.float(2, "", minval = 1, step = 0.25, inline = "volume",
 effortLenInput = input.int(10, "Effort Window", minval = 2, group = EFFORT_GROUP
   , tooltip = "Recent bars checked for the volume surge and for range expansion: the window's average range must exceed that of the window before it.")
 
-volumeLenInput = input.int(20, "Volume Average Length", minval = 2, group = EFFORT_GROUP)
+volumeLenInput = input.int(20, "Volume Average Length", minval = 2, group = EFFORT_GROUP
+  , tooltip = "Bars in the simple volume average. Used on non-intraday charts, in Simple mode, and while the time-of-day average warms up.")
+
+volModeInput = input.string("Time of Day", "Volume Normalization", options = ["Time of Day", "Simple"], group = EFFORT_GROUP
+  , tooltip = "Time of Day compares each bar's volume with the average volume at the same clock time (New York) over recent sessions, so the opening rush does not read as a surge and the lunch lull does not read as light effort. Needs 3 sessions of history per time slot; until then the simple average is used.")
+
+todDaysInput = input.int(20, "Time-of-Day Sessions", minval = 3, maxval = 100, group = EFFORT_GROUP
+  , tooltip = "Sessions averaged per clock-time slot.")
 
 stallInput = input.int(5, "Failure to Extend (bars)", minval = 1, maxval = 100, group = TELL_GROUP
   , tooltip = "Ends the vertical phase when this many bars pass without a fresh extreme. Alongside it, a close through the steepest rung and an abrupt wide-range reversal also end the phase, whichever prints first.")
@@ -81,7 +103,7 @@ continuationInput = input.float(1.25, "Continuation Effort (x avg volume)", minv
   , tooltip = "A close beyond the climactic extreme reclassifies the surge as continuation and ends the watch only when it trades at least this multiple of average volume: a push through on sustained effort. A marginal new extreme on lighter volume is treated as the last push of the climax and the watched extreme moves to it.")
 
 watchInput = input.int(60, "Exhaustion Watch (bars)", minval = 2, maxval = 500, group = TELL_GROUP
-  , tooltip = "Bars after the exhaustion tell during which the extreme is watched for its retest. A close beyond the extreme ends the watch early: the surge reclassifies as continuation.")
+  , tooltip = "Bars after the exhaustion tell, or after the latest marginal new extreme, during which the extreme is watched for its retest. A close beyond the extreme on sustained effort ends the watch early: the surge reclassifies as continuation.")
 
 showLadderInput = input.bool(true, "Trendline Ladder", group = STYLE_GROUP
   , tooltip = "Draw the steepening trendlines of each climactic run: earlier rungs dotted, the steepest solid and projected until the vertical phase ends.")
@@ -160,26 +182,73 @@ rungAt(Side s, int t) =>
 //---------------------------------------------------------------------------------------------------------------------{
 labelSize = getSize(labelSizeInput)
 
-atrValue  = ta.atr(atrLenInput)
-baseline  = ta.sma(close, baseLenInput)
+bool sessMode = sessOnlyInput and timeframe.isintraday
+bool inSess   = not sessMode or not na(time(timeframe.period, sessInput, TZ))
 trueRange = ta.tr(true)
 
-//Effort: volume multiples and range expansion window over window
-volAvg     = ta.sma(volume, volumeLenInput)
+//Chart-wide baseline, ATR, range expansion and maturity (used outside session mode)
+float atrAll      = ta.atr(atrLenInput)
+float baseAll     = ta.sma(close, baseLenInput)
+float rangeAll    = ta.sma(trueRange, effortLenInput)
+bool  expAll      = not na(rangeAll[effortLenInput]) and rangeAll > rangeAll[effortLenInput]
+int   aboveAll    = ta.barssince(close < baseAll)
+int   belowAll    = ta.barssince(close > baseAll)
+bool  seasonedAll = not na(baseAll[maturityInput])
+
+//Session mode: the same measurements from session bars only, held unchanged outside the session
+var array<float> sessCloses = array.new<float>()
+var array<float> sessRanges = array.new<float>()
+var float sessAtr   = na
+var float sessBase  = na
+var bool  sessExp   = false
+var int   sessBars  = 0
+var int   sessAbove = 0
+var int   sessBelow = 0
+if sessMode and inSess
+    sessBars += 1
+    //Running mean while warming up, Wilder smoothing afterwards (as ta.atr)
+    sessAtr := sessBars <= atrLenInput ? nz(sessAtr) + (trueRange - nz(sessAtr)) / sessBars : sessAtr + (trueRange - sessAtr) / atrLenInput
+    sessCloses.push(close)
+    if sessCloses.size() > baseLenInput
+        sessCloses.shift()
+    sessBase := sessCloses.size() == baseLenInput ? sessCloses.avg() : na
+    sessRanges.push(trueRange)
+    if sessRanges.size() > 2 * effortLenInput
+        sessRanges.shift()
+    sessExp := sessRanges.size() == 2 * effortLenInput and sessRanges.slice(effortLenInput, 2 * effortLenInput).avg() > sessRanges.slice(0, effortLenInput).avg()
+    if not na(sessBase)
+        sessAbove := close < sessBase ? 0 : sessAbove + 1
+        sessBelow := close > sessBase ? 0 : sessBelow + 1
+
+float atrValue       = sessMode ? sessAtr : atrAll
+float baseline       = sessMode ? sessBase : baseAll
+bool  rangeExpanding = sessMode ? sessExp : expAll
+
+//Effort: volume against the same clock time over recent sessions (or a simple average)
+float volSma = ta.sma(volume, volumeLenInput)
+int   todKey = hour(time, TZ) * 60 + minute(time, TZ)
+var map<int, float> todAvg = map.new<int, float>()
+var map<int, int>   todCnt = map.new<int, int>()
+int   todN   = todCnt.contains(todKey) ? todCnt.get(todKey) : 0
+float todVol = todN > 0 ? todAvg.get(todKey) : na
+bool  useTod = volModeInput == "Time of Day" and timeframe.isintraday and todN >= 3
+if volModeInput == "Time of Day" and timeframe.isintraday and barstate.isconfirmed and not na(volume)
+    todAvg.put(todKey, na(todVol) ? volume : todVol + (volume - todVol) / math.min(todN + 1, todDaysInput))
+    todCnt.put(todKey, todN + 1)
+
+volAvg     = useTod ? todVol : volSma
 volumeOk   = not na(volAvg) and volAvg > 0
 relVol     = volumeOk ? volume / volAvg : na
 peakRelVol = ta.highest(nz(relVol), effortLenInput)
-rangeNow   = ta.sma(trueRange, effortLenInput)
-rangeExpanding = not na(rangeNow[effortLenInput]) and rangeNow > rangeNow[effortLenInput]
 surgeOk    = not useVolumeInput or not volumeOk or peakRelVol >= volumeMultInput
 effortOk   = rangeExpanding and surgeOk
 
 //Maturity: closes held on the trend side of a seasoned baseline
-barsAbove = ta.barssince(close < baseline)
-barsBelow = ta.barssince(close > baseline)
-seasoned  = not na(baseline[maturityInput])
-matureUp  = seasoned and nz(barsAbove, bar_index) >= maturityInput
-matureDn  = seasoned and nz(barsBelow, bar_index) >= maturityInput
+int  barsAbove = sessMode ? sessAbove : nz(aboveAll, bar_index)
+int  barsBelow = sessMode ? sessBelow : nz(belowAll, bar_index)
+bool seasoned  = sessMode ? sessBars >= baseLenInput + maturityInput : seasonedAll
+matureUp  = seasoned and barsAbove >= maturityInput
+matureDn  = seasoned and barsBelow >= maturityInput
 
 extAtr = atrValue > 0 and not na(baseline) ? (close - baseline) / atrValue : na
 
@@ -250,7 +319,7 @@ processSide(Side s, int dir, float pivot, bool mature, bool fresh, bool reversal
                 rungs := 0
 
         //3. Detection: mature trend, accelerating ladder, stretched from the baseline, effort, at a fresh extreme
-        if s.phase != PHASE_MOVE and rungs >= minRungsInput and mature and not na(extAtr) and dir * extAtr >= extensionInput and fresh and effortOk
+        if inSess and s.phase != PHASE_MOVE and rungs >= minRungsInput and mature and not na(extAtr) and dir * extAtr >= extensionInput and fresh and effortOk
             if s.phase == PHASE_WATCH and not na(s.levelLine)
                 line.set_x2(s.levelLine, bar_index)
                 line.set_color(s.levelLine, color.new(c, 75))
@@ -340,9 +409,12 @@ processSide(Side s, int dir, float pivot, bool mature, bool fresh, bool reversal
                     line.set_color(s.levelLine, color.new(c, 75))
                     s.levelLine := line(na)
             else if dir * (edge - s.extreme) > 0
-                //A marginal new extreme on light effort is the last push of the climax: the watch moves to it
+                //A marginal new extreme on light effort is the last push of the climax: the watch moves to it,
+                //restarts from it, and the retest is measured against this push's effort as well
                 s.extreme    := edge
                 s.extremeBar := bar_index
+                s.endBar     := bar_index
+                s.peakVol    := math.max(s.peakVol, nz(relVol))
                 s.leftZone   := false
                 if not na(s.levelLine)
                     line.set_xy1(s.levelLine, bar_index, edge)
@@ -369,8 +441,12 @@ processSide(Side s, int dir, float pivot, bool mature, bool fresh, bool reversal
                               , textcolor = color.white
                               , size      = labelSize
                               , tooltip   = tip)
-                if s.phase == PHASE_WATCH and bar_index - s.endBar >= watchInput
-                    s.phase     := PHASE_IDLE
+            //Watch expiry is checked on every bar of the watch; the expired level is faded like a failed one
+            if s.phase == PHASE_WATCH and bar_index - s.endBar >= watchInput
+                s.phase := PHASE_IDLE
+                if not na(s.levelLine)
+                    line.set_color(s.levelLine, color.new(c, 75))
+                    line.set_style(s.levelLine, line.style_dotted)
                     s.levelLine := line(na)
     [startEv, tellEv, confirmEv, failEv, rungs]
 
@@ -386,7 +462,7 @@ var Side dn = Side.new(array.new<int>(), array.new<float>())
 //---------------------------------------------------------------------------------------------------------------------}
 // Visuals & Dashboard
 //---------------------------------------------------------------------------------------------------------------------{
-plot(baseline, "Baseline", showBaselineInput ? color.new(baseColorInput, 30) : na, 1)
+plot(inSess ? baseline : na, "Baseline", showBaselineInput ? color.new(baseColorInput, 30) : na, 1, plot.style_linebr)
 
 var table dash = na
 
@@ -398,10 +474,12 @@ phaseText(Side s) =>
 
 if barstate.islast and showDashInput
     if na(dash)
-        dash := table.new(getPosition(dashPosInput), 2, 5, bgcolor = DASH_BG, border_width = 0, frame_color = DASH_FRAME, frame_width = 1)
+        dash := table.new(getPosition(dashPosInput), 2, 7, bgcolor = DASH_BG, border_width = 0, frame_color = DASH_FRAME, frame_width = 1)
     ts = getSize(dashSizeInput)
-    //Report the side the trend currently leans to
-    bool  upSide   = nz(extAtr) >= 0
+    //Report the side with a running episode; when both or neither run, the side the trend leans to
+    bool  upActive = up.phase != PHASE_IDLE
+    bool  dnActive = dn.phase != PHASE_IDLE
+    bool  upSide   = upActive != dnActive ? upActive : nz(extAtr) >= 0
     Side  s        = upSide ? up : dn
     color sc       = upSide ? blowColorInput : capColorInput
     int   rungsNow = upSide ? upRungs : dnRungs
@@ -415,7 +493,11 @@ if barstate.islast and showDashInput
     table.cell(dash, 0, 3, "Trend Age", text_color = DASH_HEADER, text_size = ts, text_halign = text.align_left)
     table.cell(dash, 1, 3, str.tostring(upSide ? nz(barsAbove) : nz(barsBelow)) + " bars", text_color = DASH_TEXT, text_size = ts, text_halign = text.align_right)
     table.cell(dash, 0, 4, "Peak Volume", text_color = DASH_HEADER, text_size = ts, text_halign = text.align_left)
-    table.cell(dash, 1, 4, volumeOk ? str.tostring(peakRelVol, "#.#") + "x avg" : "n/a", text_color = DASH_TEXT, text_size = ts, text_halign = text.align_right)
+    table.cell(dash, 1, 4, volumeOk ? str.tostring(peakRelVol, "#.#") + (useTod ? "x time-of-day avg" : "x avg") : "n/a", text_color = DASH_TEXT, text_size = ts, text_halign = text.align_right)
+    table.cell(dash, 0, 5, "Watched Extreme", text_color = DASH_HEADER, text_size = ts, text_halign = text.align_left)
+    table.cell(dash, 1, 5, s.phase == PHASE_IDLE ? "-" : str.tostring(s.extreme, format.mintick), text_color = s.phase == PHASE_IDLE ? DASH_TEXT : sc, text_size = ts, text_halign = text.align_right)
+    table.cell(dash, 0, 6, "Session", text_color = DASH_HEADER, text_size = ts, text_halign = text.align_left)
+    table.cell(dash, 1, 6, not sessMode ? "All bars" : inSess ? "In session" : "Outside session (no new climaxes)", text_color = DASH_TEXT, text_size = ts, text_halign = text.align_right)
 
 //---------------------------------------------------------------------------------------------------------------------}
 // Alerts
@@ -428,5 +510,29 @@ alertcondition(blowConfirm, "Blow-off Weak Retest", "Climactic Moves: weak retes
 alertcondition(capConfirm, "Capitulation Weak Retest", "Climactic Moves: weak retest of the capitulation low on {{ticker}}, lighter volume failing short of the extreme ({{interval}})")
 alertcondition(blowFail, "Blow-off Continuation", "Climactic Moves: close above the blow-off extreme on {{ticker}}, the surge reclassifies as continuation ({{interval}})")
 alertcondition(capFail, "Capitulation Continuation", "Climactic Moves: close below the capitulation extreme on {{ticker}}, the cascade reclassifies as continuation ({{interval}})")
+
+//Detailed messages for alerts created on "Any alert() function call"
+alertText(string evt, Side s) =>
+    "Climactic Moves: " + evt + " on " + syminfo.ticker + " (" + timeframe.period + ") | extreme " + str.tostring(s.extreme, format.mintick)
+      + " | close " + str.tostring(close, format.mintick)
+      + (na(extAtr) ? "" : " | " + str.tostring(extAtr, "+#.#;-#.#") + " ATR from baseline")
+      + (volumeOk and not na(s.peakVol) ? " | peak volume " + str.tostring(s.peakVol, "#.#") + "x" : "")
+
+if blowStart
+    alert(alertText("blow-off", up), alert.freq_once_per_bar_close)
+if capStart
+    alert(alertText("capitulation", dn), alert.freq_once_per_bar_close)
+if blowTell
+    alert(alertText("blow-off exhaustion tell", up), alert.freq_once_per_bar_close)
+if capTell
+    alert(alertText("capitulation exhaustion tell", dn), alert.freq_once_per_bar_close)
+if blowConfirm
+    alert(alertText("weak retest of the blow-off high", up), alert.freq_once_per_bar_close)
+if capConfirm
+    alert(alertText("weak retest of the capitulation low", dn), alert.freq_once_per_bar_close)
+if blowFail
+    alert(alertText("blow-off reclassified as continuation", up), alert.freq_once_per_bar_close)
+if capFail
+    alert(alertText("capitulation reclassified as continuation", dn), alert.freq_once_per_bar_close)
 
 //---------------------------------------------------------------------------------------------------------------------}
