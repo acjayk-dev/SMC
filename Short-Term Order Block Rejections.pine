@@ -1,17 +1,34 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/ MPL-2.0
+// Modified: order blocks anchored to the origin swing of the CHoCH leg with an optional displacement (FVG) check,
+// configurable zone interaction (touch / midpoint / sweep), overlap tested against active blocks only, mitigated
+// blocks kept on the chart faded, CHoCH confirmed on bar close, session filter, stop and targets per signal and
+// detailed alert() messages.
 //@version=6
-indicator("Short-Term Order Block Rejections", shorttitle="ST OB Rejections", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+indicator("Short-Term Order Block Rejections", shorttitle="ST OB Rejections", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
 // --- Constants ---
 const color BULL_COLOR = #089981
 const color BEAR_COLOR = #f23645
+const string TZ = "America/New_York"
+
+// --- Types ---
+type OrderBlock
+    float top
+    float bottom
+    int   bornBar
+    float extreme       // best price reached by the break leg since the CHoCH: first target of a signal
+    bool  used = false
+    box   bx
 
 // --- Inputs ---
 int pivotLengthInput = input.int(3, "Structure pivot bars", minval=1, maxval=20, tooltip="Bars on each side required to confirm a swing high or low for market structure.")
-int obSearchBarsInput = input.int(8, "Search back for order block", minval=1, maxval=30, tooltip="Maximum candles searched before a CHoCH. The highest bullish candle is selected for bearish blocks, and the lowest bearish candle for bullish blocks, to anchor zones at the structural extreme.")
-int maxReactionBarsInput = input.int(8, "Maximum reaction window", minval=1, maxval=100, tooltip="Signals are allowed only this many bars after a CHoCH order block forms. Blocks remain drawn afterward as historical context.")
+int obSearchBarsInput = input.int(8, "Search before the leg origin", minval=1, maxval=30, tooltip="The order block is searched from the CHoCH back to the origin of the break leg (the lowest low since the broken swing high for bullish blocks, the highest high since the broken swing low for bearish ones) plus this many candles before that origin. The lowest bearish candle is selected for bullish blocks and the highest bullish candle for bearish blocks, anchoring the zone at the structural extreme.")
+int maxLegBarsInput = input.int(100, "Maximum CHoCH leg length", minval=10, maxval=300, tooltip="Longest leg, in bars from the broken swing to the CHoCH, scanned for the origin and the order block.")
+bool requireDisplacementInput = input.bool(true, "Require displacement (FVG in the leg)", tooltip="Creates a block only when the leg from its origin to the CHoCH left at least one fair value gap in the direction of the break: the impulsive move that makes an order block valid.")
+int maxReactionBarsInput = input.int(8, "Maximum reaction window", minval=1, maxval=100, tooltip="Signals are allowed only this many bars after a CHoCH order block forms. Blocks remain drawn afterward as historical context. On 1-minute charts 15–30 gives retracements time to arrive.")
+string touchModeInput = input.string("Touch", "Zone interaction", options=["Touch", "Midpoint", "Sweep"], tooltip="Touch: the wick enters the block and the candle closes back out of it.\nMidpoint: the wick reaches the block's 50% and the candle closes back out of it.\nSweep (original): the wick runs through the whole block and the candle closes back inside or beyond it.\nA candle that engulfs the whole block from the far side always qualifies.")
 float minBodyPercentInput = input.float(60.0, "Minimum signal body (% of candle range)", minval=1.0, maxval=100.0, step=1.0, tooltip="The signal candle body must use at least this percentage of its full high-low range.")
-int maxBlocksPerSideInput = input.int(100, "Historical blocks per direction", minval=1, maxval=200, tooltip="Maximum number of bullish and bearish blocks retained. Oldest blocks are removed when this limit is reached.")
+int maxBlocksPerSideInput = input.int(100, "Tracked blocks per direction", minval=1, maxval=200, tooltip="Maximum number of unmitigated bullish and bearish blocks tracked for mitigation. The oldest stops being tracked when this limit is reached; its drawing stays.")
 
 bool showChochInput = input.bool(true, "Show CHoCH levels", group="Market Structure", tooltip="Draws a dashed line from the broken confirmed swing level and marks each change of character.")
 bool filterSignalsByTrendInput = input.bool(true, "Only signal with current structure", group="Market Structure", tooltip="Allows bullish rejection signals only after bullish CHoCH and bearish rejection signals only after bearish CHoCH.")
@@ -21,8 +38,16 @@ bool filterChopSignalsInput = input.bool(true, "Require significant pivot-to-blo
 int rangeAtrLengthInput = input.int(14, "Range ATR length", minval=1, maxval=100, group="Range Filter", tooltip="ATR period used to normalize pivot-to-block distance across symbols and timeframes.")
 float minPivotRangeAtrInput = input.float(2.0, "Minimum pivot-to-block distance (ATR)", minval=0.1, maxval=10.0, step=0.1, group="Range Filter", tooltip="The latest confirmed pivot must be at least this many ATRs away from the order block before a rejection signal is allowed. Increase it to filter more chop.")
 
-bool removeOverlappingInput = input.bool(true, "Suppress overlapping blocks", group="Cleanup", tooltip="Avoids adding a block when it substantially overlaps any existing bullish or bearish block.")
-float overlapThresholdInput = input.float(25.0, "Overlap threshold (%)", minval=1.0, maxval=100.0, step=1.0, group="Cleanup", tooltip="A new block is skipped when its overlap with any existing block covers at least this percentage of the smaller zone.")
+bool useSessionInput = input.bool(true, "Signals only in session", inline="sess", group="Session", tooltip="Intraday charts only. Blocks keep forming around the clock; rejection signals print only inside this New York session.")
+string sessionInput = input.session("0930-1600", "", inline="sess", group="Session")
+
+bool removeOverlappingInput = input.bool(true, "Suppress overlapping blocks", group="Cleanup", tooltip="Avoids adding a block when it substantially overlaps an active block (still inside its reaction window) of either direction.")
+float overlapThresholdInput = input.float(25.0, "Overlap threshold (%)", minval=1.0, maxval=100.0, step=1.0, group="Cleanup", tooltip="A new block is skipped when its overlap with an active block covers at least this percentage of the smaller zone.")
+
+bool showRiskInput = input.bool(true, "Project stop and targets of the latest signal", group="Risk")
+int stopBufferTicksInput = input.int(2, "Stop buffer (ticks)", minval=0, maxval=100, group="Risk", tooltip="Stop goes this many ticks beyond the signal candle's wick or the block's far edge, whichever is further.")
+float rrInput = input.float(2.0, "Second target (R)", minval=0.5, maxval=20.0, step=0.5, group="Risk", tooltip="First target: the extreme the break leg reached after the CHoCH. Second target: this multiple of the risk.")
+int riskBarsInput = input.int(20, "Projection length (bars)", minval=5, maxval=200, group="Risk")
 
 color bullBlockColorInput = input.color(color.new(BULL_COLOR, 84), "Bullish block fill", group="Style", tooltip="Fill color for bullish order blocks.")
 color bearBlockColorInput = input.color(color.new(BEAR_COLOR, 84), "Bearish block fill", group="Style", tooltip="Fill color for bearish order blocks.")
@@ -30,19 +55,47 @@ color bullBorderColorInput = input.color(BULL_COLOR, "Bullish block border", gro
 color bearBorderColorInput = input.color(BEAR_COLOR, "Bearish block border", group="Style", tooltip="Border color for bearish order blocks.")
 
 // --- Functions ---
-f_isDuplicateZone(float newTop, float newBottom, array<float> existingTops, array<float> existingBottoms, float thresholdPercent) =>
+// True when the zone overlaps, by at least the threshold of the smaller zone, a block still inside its reaction window
+f_overlapsActive(float newTop, float newBottom, array<OrderBlock> blocks, float thresholdPercent) =>
     bool isDuplicate = false
     float newHeight = math.max(newTop - newBottom, syminfo.mintick)
-    if array.size(existingTops) > 0
-        for zoneIndex = 0 to array.size(existingTops) - 1
-            float existingTop = array.get(existingTops, zoneIndex)
-            float existingBottom = array.get(existingBottoms, zoneIndex)
-            float existingHeight = math.max(existingTop - existingBottom, syminfo.mintick)
-            float intersection = math.max(0.0, math.min(newTop, existingTop) - math.max(newBottom, existingBottom))
-            float smallerHeight = math.min(newHeight, existingHeight)
-            if intersection / smallerHeight * 100.0 >= thresholdPercent
+    for ob in blocks
+        if bar_index - ob.bornBar <= maxReactionBarsInput
+            float existingHeight = math.max(ob.top - ob.bottom, syminfo.mintick)
+            float intersection = math.max(0.0, math.min(newTop, ob.top) - math.max(newBottom, ob.bottom))
+            if intersection / math.min(newHeight, existingHeight) * 100.0 >= thresholdPercent
                 isDuplicate := true
     isDuplicate
+
+// Locates the order block of a CHoCH leg. dir = 1 for a bullish break of the swing high at swingBar, -1 for a bearish one.
+// Returns [found, top, bottom, offset, displacement].
+f_findBlock(int dir, int swingBar) =>
+    int legBars = math.max(math.min(bar_index - swingBar, maxLegBarsInput), 1)
+    // Origin of the leg: the lowest low (highest high) since the broken swing
+    int originOffset = 1
+    for i = 1 to legBars
+        if dir == 1 ? low[i] < low[originOffset] : high[i] > high[originOffset]
+            originOffset := i
+    // Block: the lowest bearish (highest bullish) candle from the CHoCH back to a few candles before the origin
+    bool  found  = false
+    float top    = na
+    float bottom = na
+    int   offset = na
+    for i = 1 to math.min(originOffset + obSearchBarsInput, legBars)
+        bool opposite = dir == 1 ? close[i] < open[i] : close[i] > open[i]
+        if opposite and (not found or (dir == 1 ? low[i] < bottom : high[i] > top))
+            top    := high[i]
+            bottom := low[i]
+            offset := i
+            found  := true
+    // Displacement: a fair value gap in the direction of the break between the origin and the CHoCH bar
+    bool displacement = false
+    if originOffset >= 2
+        for j = 0 to originOffset - 2
+            if dir == 1 ? low[j] > high[j + 2] : high[j] < low[j + 2]
+                displacement := true
+                break
+    [found, top, bottom, offset, displacement]
 
 // --- Confirmed swing structure ---
 float confirmedPivotHigh = ta.pivothigh(high, pivotLengthInput, pivotLengthInput)
@@ -76,8 +129,9 @@ if structureTrend == 0
         structureTrend := -1
 
 // A CHoCH is a confirmed close through the protected swing against the established trend.
-bool bullishChoch = structureTrend == -1 and not na(lastSwingHigh) and not na(lastSwingHighBar) and close > lastSwingHigh and close[1] <= lastSwingHigh
-bool bearishChoch = structureTrend == 1 and not na(lastSwingLow) and not na(lastSwingLowBar) and close < lastSwingLow and close[1] >= lastSwingLow
+// Evaluated on bar close only, so CHoCH drawings and blocks do not flicker on the live bar.
+bool bullishChoch = barstate.isconfirmed and structureTrend == -1 and not na(lastSwingHigh) and not na(lastSwingHighBar) and close > lastSwingHigh and close[1] <= lastSwingHigh
+bool bearishChoch = barstate.isconfirmed and structureTrend == 1 and not na(lastSwingLow) and not na(lastSwingLowBar) and close < lastSwingLow and close[1] >= lastSwingLow
 
 if bullishChoch
     structureTrend := 1
@@ -96,77 +150,36 @@ if showChochInput and bearishChoch
     line.new(x1=lastSwingLowBar, y1=lastSwingLow, x2=bar_index, y2=lastSwingLow, xloc=xloc.bar_index, color=BEAR_COLOR, style=line.style_dashed, width=1)
     label.new(x=lastSwingLowBar + int((bar_index - lastSwingLowBar) / 2), y=lastSwingLow, text="CHoCH", xloc=xloc.bar_index, style=label.style_label_up, color=color.new(BEAR_COLOR, 100), textcolor=BEAR_COLOR, size=size.tiny)
 
-// --- Historical order block storage ---
-var array<float> bullTops = array.new_float()
-var array<float> bullBottoms = array.new_float()
-var array<int> bullBornBars = array.new_int()
-var array<bool> bullUsedFlags = array.new_bool()
-var array<box> bullBoxes = array.new_box()
-
-var array<float> bearTops = array.new_float()
-var array<float> bearBottoms = array.new_float()
-var array<int> bearBornBars = array.new_int()
-var array<bool> bearUsedFlags = array.new_bool()
-var array<box> bearBoxes = array.new_box()
+// --- Tracked (unmitigated) order blocks ---
+var array<OrderBlock> bullBlocks = array.new<OrderBlock>()
+var array<OrderBlock> bearBlocks = array.new<OrderBlock>()
 
 // --- CHoCH-only order block creation ---
 if bullishChoch
-    bool foundBullCandle = false
-    float foundBullTop = na
-    float foundBullBottom = na
-    int foundBullOffset = na
-    for i = 1 to obSearchBarsInput
-        if close[i] < open[i] and (not foundBullCandle or low[i] < foundBullBottom)
-            foundBullTop := high[i]
-            foundBullBottom := low[i]
-            foundBullOffset := i
-            foundBullCandle := true
-    bool bullSourceWithinSwing = not requireSwingRangeInput or foundBullTop < lastSwingHigh
-    if foundBullCandle and bullSourceWithinSwing
-        bool duplicateBull = removeOverlappingInput and (f_isDuplicateZone(foundBullTop, foundBullBottom, bullTops, bullBottoms, overlapThresholdInput) or f_isDuplicateZone(foundBullTop, foundBullBottom, bearTops, bearBottoms, overlapThresholdInput))
-        if not duplicateBull
-            box newBullBox = box.new(left=bar_index - foundBullOffset, top=foundBullTop, right=bar_index + 1, bottom=foundBullBottom, xloc=xloc.bar_index, bgcolor=bullBlockColorInput, border_color=bullBorderColorInput)
-            array.push(bullTops, foundBullTop)
-            array.push(bullBottoms, foundBullBottom)
-            array.push(bullBornBars, bar_index)
-            array.push(bullUsedFlags, false)
-            array.push(bullBoxes, newBullBox)
-            if array.size(bullBoxes) > maxBlocksPerSideInput
-                box.delete(array.shift(bullBoxes))
-                array.shift(bullTops)
-                array.shift(bullBottoms)
-                array.shift(bullBornBars)
-                array.shift(bullUsedFlags)
+    [found, top, bottom, offset, displacement] = f_findBlock(1, lastSwingHighBar)
+    bool withinSwing = not requireSwingRangeInput or top < lastSwingHigh
+    bool impulsive = not requireDisplacementInput or displacement
+    if found and withinSwing and impulsive
+        bool duplicate = removeOverlappingInput and (f_overlapsActive(top, bottom, bullBlocks, overlapThresholdInput) or f_overlapsActive(top, bottom, bearBlocks, overlapThresholdInput))
+        if not duplicate
+            box bx = box.new(left=bar_index - offset, top=top, right=bar_index + 1, bottom=bottom, xloc=xloc.bar_index, bgcolor=bullBlockColorInput, border_color=bullBorderColorInput)
+            bullBlocks.push(OrderBlock.new(top, bottom, bar_index, high, false, bx))
+            if bullBlocks.size() > maxBlocksPerSideInput
+                bullBlocks.shift()
 
 if bearishChoch
-    bool foundBearCandle = false
-    float foundBearTop = na
-    float foundBearBottom = na
-    int foundBearOffset = na
-    for i = 1 to obSearchBarsInput
-        if close[i] > open[i] and (not foundBearCandle or high[i] > foundBearTop)
-            foundBearTop := high[i]
-            foundBearBottom := low[i]
-            foundBearOffset := i
-            foundBearCandle := true
-    bool bearSourceWithinSwing = not requireSwingRangeInput or foundBearBottom > lastSwingLow
-    if foundBearCandle and bearSourceWithinSwing
-        bool duplicateBear = removeOverlappingInput and (f_isDuplicateZone(foundBearTop, foundBearBottom, bearTops, bearBottoms, overlapThresholdInput) or f_isDuplicateZone(foundBearTop, foundBearBottom, bullTops, bullBottoms, overlapThresholdInput))
-        if not duplicateBear
-            box newBearBox = box.new(left=bar_index - foundBearOffset, top=foundBearTop, right=bar_index + 1, bottom=foundBearBottom, xloc=xloc.bar_index, bgcolor=bearBlockColorInput, border_color=bearBorderColorInput)
-            array.push(bearTops, foundBearTop)
-            array.push(bearBottoms, foundBearBottom)
-            array.push(bearBornBars, bar_index)
-            array.push(bearUsedFlags, false)
-            array.push(bearBoxes, newBearBox)
-            if array.size(bearBoxes) > maxBlocksPerSideInput
-                box.delete(array.shift(bearBoxes))
-                array.shift(bearTops)
-                array.shift(bearBottoms)
-                array.shift(bearBornBars)
-                array.shift(bearUsedFlags)
+    [found, top, bottom, offset, displacement] = f_findBlock(-1, lastSwingLowBar)
+    bool withinSwing = not requireSwingRangeInput or bottom > lastSwingLow
+    bool impulsive = not requireDisplacementInput or displacement
+    if found and withinSwing and impulsive
+        bool duplicate = removeOverlappingInput and (f_overlapsActive(top, bottom, bearBlocks, overlapThresholdInput) or f_overlapsActive(top, bottom, bullBlocks, overlapThresholdInput))
+        if not duplicate
+            box bx = box.new(left=bar_index - offset, top=top, right=bar_index + 1, bottom=bottom, xloc=xloc.bar_index, bgcolor=bearBlockColorInput, border_color=bearBorderColorInput)
+            bearBlocks.push(OrderBlock.new(top, bottom, bar_index, low, false, bx))
+            if bearBlocks.size() > maxBlocksPerSideInput
+                bearBlocks.shift()
 
-// --- Rejection signals and historical box extension ---
+// --- Rejection signals, box extension and mitigation ---
 float candleRange = math.max(high - low, syminfo.mintick)
 float bodyPercent = math.abs(close - open) / candleRange * 100.0
 float rangeAtrValue = ta.atr(rangeAtrLengthInput)
@@ -175,66 +188,120 @@ float priorLookbackLow = ta.lowest(low[1], swingExtremeLookback)
 float priorLookbackHigh = ta.highest(high[1], swingExtremeLookback)
 bool bearishAtFreshLow = low < priorLookbackLow
 bool bullishAtFreshHigh = high > priorLookbackHigh
-bool bullishSignal = false
-bool bearishSignal = false
+bool inSession = not useSessionInput or not timeframe.isintraday or not na(time(timeframe.period, sessionInput, TZ))
+float stopBuffer = stopBufferTicksInput * syminfo.mintick
 
-int bullZoneIndex = array.size(bullTops) - 1
-while bullZoneIndex >= 0
-    float zoneTop = array.get(bullTops, bullZoneIndex)
-    float zoneBottom = array.get(bullBottoms, bullZoneIndex)
-    int bornBar = array.get(bullBornBars, bullZoneIndex)
-    int zoneAge = bar_index - bornBar
-    box zoneBox = array.get(bullBoxes, bullZoneIndex)
-    bool zoneMitigated = barstate.isconfirmed and zoneAge > 0 and close < zoneBottom
-    bool fullZoneReclaim = low < zoneBottom and close > zoneTop
-    bool wickRejection = low < zoneBottom and open > zoneBottom and close > zoneBottom
+bool  bullishSignal = false
+float bullStop = na
+float bullTp1 = na
+bool  bearishSignal = false
+float bearStop = na
+float bearTp1 = na
+
+int bullIndex = bullBlocks.size() - 1
+while bullIndex >= 0
+    OrderBlock ob = bullBlocks.get(bullIndex)
+    int zoneAge = bar_index - ob.bornBar
+    float zoneMid = (ob.top + ob.bottom) / 2
+    bool zoneMitigated = barstate.isconfirmed and zoneAge > 0 and close < ob.bottom
+    bool fullZoneReclaim = low < ob.bottom and close > ob.top
+    bool touched = switch touchModeInput
+        "Touch"    => low <= ob.top
+        "Midpoint" => low <= zoneMid
+        =>            low < ob.bottom
+    bool rejected = touchModeInput == "Sweep" ? open > ob.bottom and close > ob.bottom : close > ob.top
     bool zoneInReactionWindow = zoneAge > 0 and zoneAge <= maxReactionBarsInput
-    bool bullishRangePass = not filterChopSignalsInput or (not na(lastSwingHigh) and not na(rangeAtrValue) and lastSwingHigh - zoneTop >= rangeAtrValue * minPivotRangeAtrInput)
-    bool zoneSignal = barstate.isconfirmed and bullishRangePass and (bullishStructureAllowed or fullZoneReclaim) and (fullZoneReclaim or not avoidFreshExtremeSignalsInput or not bullishAtFreshHigh) and zoneInReactionWindow and not array.get(bullUsedFlags, bullZoneIndex) and (wickRejection or fullZoneReclaim) and close > open and bodyPercent >= minBodyPercentInput
+    bool bullishRangePass = not filterChopSignalsInput or (not na(lastSwingHigh) and not na(rangeAtrValue) and lastSwingHigh - ob.top >= rangeAtrValue * minPivotRangeAtrInput)
+    bool zoneSignal = barstate.isconfirmed and inSession and bullishRangePass and (bullishStructureAllowed or fullZoneReclaim) and (fullZoneReclaim or not avoidFreshExtremeSignalsInput or not bullishAtFreshHigh) and zoneInReactionWindow and not ob.used and ((touched and rejected) or fullZoneReclaim) and close > open and bodyPercent >= minBodyPercentInput
     if zoneAge >= 0 and zoneAge <= maxReactionBarsInput
-        box.set_right(zoneBox, bar_index + 1)
+        ob.bx.set_right(bar_index + 1)
     if zoneSignal
+        ob.used := true
+        // The newest block that fires sets the trade levels
+        if not bullishSignal
+            bullStop := math.min(low, ob.bottom) - stopBuffer
+            bullTp1 := ob.extreme > close ? ob.extreme : na
         bullishSignal := true
-        array.set(bullUsedFlags, bullZoneIndex, true)
+    ob.extreme := math.max(ob.extreme, high)
     if zoneMitigated
-        box.delete(zoneBox)
-        array.remove(bullTops, bullZoneIndex)
-        array.remove(bullBottoms, bullZoneIndex)
-        array.remove(bullBornBars, bullZoneIndex)
-        array.remove(bullUsedFlags, bullZoneIndex)
-        array.remove(bullBoxes, bullZoneIndex)
-    bullZoneIndex -= 1
+        // Stop tracking, but keep the drawing faded as context for the signals it produced
+        ob.bx.set_bgcolor(color.new(BULL_COLOR, 95))
+        ob.bx.set_border_color(color.new(BULL_COLOR, 70))
+        ob.bx.set_border_style(line.style_dotted)
+        bullBlocks.remove(bullIndex)
+    bullIndex -= 1
 
-int bearZoneIndex = array.size(bearTops) - 1
-while bearZoneIndex >= 0
-    float zoneTop = array.get(bearTops, bearZoneIndex)
-    float zoneBottom = array.get(bearBottoms, bearZoneIndex)
-    int bornBar = array.get(bearBornBars, bearZoneIndex)
-    int zoneAge = bar_index - bornBar
-    box zoneBox = array.get(bearBoxes, bearZoneIndex)
-    bool zoneMitigated = barstate.isconfirmed and zoneAge > 0 and close > zoneTop
-    bool fullZoneReclaim = high > zoneTop and close < zoneBottom
-    bool wickRejection = high > zoneTop and open < zoneTop and close < zoneTop
+int bearIndex = bearBlocks.size() - 1
+while bearIndex >= 0
+    OrderBlock ob = bearBlocks.get(bearIndex)
+    int zoneAge = bar_index - ob.bornBar
+    float zoneMid = (ob.top + ob.bottom) / 2
+    bool zoneMitigated = barstate.isconfirmed and zoneAge > 0 and close > ob.top
+    bool fullZoneReclaim = high > ob.top and close < ob.bottom
+    bool touched = switch touchModeInput
+        "Touch"    => high >= ob.bottom
+        "Midpoint" => high >= zoneMid
+        =>            high > ob.top
+    bool rejected = touchModeInput == "Sweep" ? open < ob.top and close < ob.top : close < ob.bottom
     bool zoneInReactionWindow = zoneAge > 0 and zoneAge <= maxReactionBarsInput
-    bool bearishRangePass = not filterChopSignalsInput or (not na(lastSwingLow) and not na(rangeAtrValue) and zoneBottom - lastSwingLow >= rangeAtrValue * minPivotRangeAtrInput)
-    bool zoneSignal = barstate.isconfirmed and bearishRangePass and (bearishStructureAllowed or fullZoneReclaim) and (fullZoneReclaim or not avoidFreshExtremeSignalsInput or not bearishAtFreshLow) and zoneInReactionWindow and not array.get(bearUsedFlags, bearZoneIndex) and (wickRejection or fullZoneReclaim) and close < open and bodyPercent >= minBodyPercentInput
+    bool bearishRangePass = not filterChopSignalsInput or (not na(lastSwingLow) and not na(rangeAtrValue) and ob.bottom - lastSwingLow >= rangeAtrValue * minPivotRangeAtrInput)
+    bool zoneSignal = barstate.isconfirmed and inSession and bearishRangePass and (bearishStructureAllowed or fullZoneReclaim) and (fullZoneReclaim or not avoidFreshExtremeSignalsInput or not bearishAtFreshLow) and zoneInReactionWindow and not ob.used and ((touched and rejected) or fullZoneReclaim) and close < open and bodyPercent >= minBodyPercentInput
     if zoneAge >= 0 and zoneAge <= maxReactionBarsInput
-        box.set_right(zoneBox, bar_index + 1)
+        ob.bx.set_right(bar_index + 1)
     if zoneSignal
+        ob.used := true
+        if not bearishSignal
+            bearStop := math.max(high, ob.top) + stopBuffer
+            bearTp1 := ob.extreme < close ? ob.extreme : na
         bearishSignal := true
-        array.set(bearUsedFlags, bearZoneIndex, true)
+    ob.extreme := math.min(ob.extreme, low)
     if zoneMitigated
-        box.delete(zoneBox)
-        array.remove(bearTops, bearZoneIndex)
-        array.remove(bearBottoms, bearZoneIndex)
-        array.remove(bearBornBars, bearZoneIndex)
-        array.remove(bearUsedFlags, bearZoneIndex)
-        array.remove(bearBoxes, bearZoneIndex)
-    bearZoneIndex -= 1
+        ob.bx.set_bgcolor(color.new(BEAR_COLOR, 95))
+        ob.bx.set_border_color(color.new(BEAR_COLOR, 70))
+        ob.bx.set_border_style(line.style_dotted)
+        bearBlocks.remove(bearIndex)
+    bearIndex -= 1
 
-// --- Visual signals and alerts ---
-plotshape(bullishSignal, title="Bullish order block rejection", style=shape.labelup, location=location.belowbar, color=color.new(BULL_COLOR, 5), text="OB", textcolor=color.white, size=size.tiny)
-plotshape(bearishSignal, title="Bearish order block rejection", style=shape.labeldown, location=location.abovebar, color=color.new(BEAR_COLOR, 5), text="OB", textcolor=color.white, size=size.tiny)
+// --- Visual signals, risk projection and alerts ---
+var array<line>  riskLines  = array.new<line>()
+var array<label> riskLabels = array.new<label>()
+
+f_levelText(float price) =>
+    na(price) ? "n/a" : str.tostring(price, format.mintick)
+
+// Draws the signal tag and replaces the previous stop/target projection; returns the alert message
+f_signal(int dir, float stop, float tp1) =>
+    bool  isLong = dir == 1
+    color c      = isLong ? BULL_COLOR : BEAR_COLOR
+    float risk   = math.abs(close - stop)
+    float tp2    = close + dir * risk * rrInput
+    string details = "Entry " + f_levelText(close) + " | Stop " + f_levelText(stop) + " | TP1 (leg extreme) " + f_levelText(tp1)
+         + " | TP2 (" + str.tostring(rrInput) + "R) " + f_levelText(tp2)
+         + " | Risk " + str.tostring(risk, "#.##") + " pts ($" + str.tostring(risk * syminfo.pointvalue, "#,##0.##") + " per contract)"
+    label.new(bar_index, isLong ? low : high, "OB", style=isLong ? label.style_label_up : label.style_label_down, color=color.new(c, 5), textcolor=color.white, size=size.tiny,
+         tooltip=(isLong ? "Bullish" : "Bearish") + " order block rejection\n" + str.replace_all(details, " | ", "\n"))
+    if showRiskInput
+        for ln in riskLines
+            ln.delete()
+        for lb in riskLabels
+            lb.delete()
+        riskLines.clear()
+        riskLabels.clear()
+        int x2 = bar_index + riskBarsInput
+        riskLines.push(line.new(bar_index, close, x2, close, color=color.new(color.gray, 30), style=line.style_dotted))
+        riskLines.push(line.new(bar_index, stop, x2, stop, color=BEAR_COLOR, width=2))
+        riskLabels.push(label.new(x2, stop, "Stop " + f_levelText(stop), style=label.style_label_left, color=color.new(BEAR_COLOR, 20), textcolor=color.white, size=size.tiny))
+        riskLines.push(line.new(bar_index, tp2, x2, tp2, color=BULL_COLOR, width=2))
+        riskLabels.push(label.new(x2, tp2, "TP2 " + f_levelText(tp2), style=label.style_label_left, color=color.new(BULL_COLOR, 20), textcolor=color.white, size=size.tiny))
+        if not na(tp1)
+            riskLines.push(line.new(bar_index, tp1, x2, tp1, color=color.new(BULL_COLOR, 40), style=line.style_dashed))
+            riskLabels.push(label.new(x2, tp1, "TP1 " + f_levelText(tp1), style=label.style_label_left, color=color.new(BULL_COLOR, 50), textcolor=color.white, size=size.tiny))
+    (isLong ? "Bullish" : "Bearish") + " order block rejection on " + syminfo.ticker + " " + timeframe.period + " | " + details
+
+if bullishSignal
+    alert(f_signal(1, bullStop, bullTp1), alert.freq_once_per_bar_close)
+if bearishSignal
+    alert(f_signal(-1, bearStop, bearTp1), alert.freq_once_per_bar_close)
 
 alertcondition(bullishSignal, title="Bullish order block rejection", message="Bullish order block rejection on {{ticker}} {{interval}}")
 alertcondition(bearishSignal, title="Bearish order block rejection", message="Bearish order block rejection on {{ticker}} {{interval}}")
