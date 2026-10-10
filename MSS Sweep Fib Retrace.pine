@@ -1,23 +1,73 @@
 //@version=6
-indicator("MSS Sweep Fib Retrace", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+// MSS Sweep Fib Retrace — revised.
+// Changes from the original: selectable trend filter (with the EMA by default; the original only allowed setups
+// against it), long and short setups tracked independently with expiry so a stale setup no longer blocks new ones,
+// liquidity already taken is not counted as a sweep, displacement measured by an ATR candle or a fair value gap,
+// leg extended until entry, structural stop beyond the sweep extreme, leg-extreme and R targets, one trade at a time
+// closed with its result, bar-close evaluation, session filter for entries, statistics and alerts.
+indicator("MSS Sweep Fib Retrace", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500, max_bars_back = 500)
+
+const string TZ = "America/New_York"
+
+// --- Types ---
+type Setup
+    int   dir
+    int   stage = 0       // 0 idle, 1 swept (waiting for the MSS), 2 armed (waiting for the retracement)
+    float sweptLevel
+    int   sweptBar
+    float sweepExt        // extreme of the sweep: invalidation of the setup
+    int   sweepBar
+    float mssLevel
+    int   mssBar
+    int   armedBar
+    float legExt          // extreme of the displacement leg: first target
+    int   legExtBar
+    bool  legFvg = false
+    line  legLine
+    line  fibLine
+    label fibLabel
+
+type Trade
+    int   dir
+    float entry
+    float stop
+    float risk
+    float tp1
+    float tp2
+    int   entryBar
+    bool  tp1Hit = false
+    box   slBox
+    box   tpBox
+    line  tp1Line
 
 // --- Inputs ---
-leftBars  = input.int(5, "Pivot Left Bars", group="Pivot Settings")
-rightBars = input.int(5, "Pivot Right Bars", group="Pivot Settings")
-momentumBars = input.int(3, "Required Momentum Candles for MSS", tooltip="Number of consecutive bullish/bearish candles needed before/during MSS", group="Setup Logic")
+leftBars  = input.int(5, "Pivot Left Bars", minval = 1, maxval = 50, group = "Pivot Settings")
+rightBars = input.int(5, "Pivot Right Bars", minval = 1, maxval = 50, group = "Pivot Settings", tooltip = "Liquidity pivots are confirmed this many bars after they print.")
 
-// Trend Filter
-useMacroTrend = input.bool(true, "Use Overall Macro Trend Filter", group="Trend Filter", tooltip="Filters setups based on the overall trend (EMA).")
-emaPeriod = input.int(200, "Macro Trend EMA Period", group="Trend Filter")
+trendMode = input.string("With EMA", "Trend filter", options = ["With EMA", "Against EMA", "Off"], group = "Trend Filter", tooltip = "With EMA: longs only above the EMA and shorts only below it; the sweep is a pullback inside the larger trend.\nAgainst EMA: the original behaviour, reversals only (longs below the EMA, shorts above it).\nOff: both directions.")
+emaPeriod = input.int(200, "Macro Trend EMA Period", minval = 2, group = "Trend Filter")
 
-// Trade Management
-atrPeriod = input.int(14, "ATR Period", group="Trade Management")
-slMult = input.float(1.5, "Stop Loss ATR Multiplier", group="Trade Management")
-tpMult = input.float(2.0, "Take Profit ATR Multiplier", group="Trade Management")
+dispMode     = input.string("ATR candle or FVG", "Displacement", options = ["ATR candle or FVG", "Consecutive candles", "Off"], group = "Setup Logic", tooltip = "How the break of structure must look to arm the setup.\nATR candle or FVG: the leg from the sweep left a fair value gap, or the breaking candle spans at least the ATR multiple below with a body of half its range or more.\nConsecutive candles: the original rule.\nA close through the level without displacement does not cancel the setup; it keeps waiting until the limit below.")
+dispAtr      = input.float(1.0, "Displacement candle (ATR)", minval = 0.25, maxval = 5, step = 0.25, group = "Setup Logic")
+momentumBars = input.int(3, "Consecutive candles", minval = 1, maxval = 10, group = "Setup Logic", tooltip = "Consecutive candles mode only: candles in the direction of the break ending on the breaking candle.")
+mssBars      = input.int(20, "Max bars sweep → MSS", minval = 2, maxval = 200, group = "Setup Logic", tooltip = "The setup is dropped if structure does not break within this many bars of the sweep.")
+entryBars    = input.int(20, "Max bars MSS → entry", minval = 2, maxval = 200, group = "Setup Logic", tooltip = "The armed setup is dropped if price does not retrace to the entry level within this many bars.")
+entryRetrace = input.float(0.5, "Entry retracement", minval = 0.3, maxval = 0.9, step = 0.05, group = "Setup Logic", tooltip = "Share of the leg from the sweep extreme to the leg extreme. 0.5 = the original 50%. 0.62–0.79 = OTE: fewer fills, better price, first target above 1R.")
 
-showVisuals = input.bool(true, "Show Drawings & Labels", group="Visuals")
+useSession   = input.bool(true, "Entries only in session", inline = "sess", group = "Session", tooltip = "Intraday charts only. Sweeps and breaks are tracked around the clock; entries fill only inside this New York session.")
+sessionInput = input.session("0930-1545", "", inline = "sess", group = "Session")
 
-// --- Macro Trend Calculation ---
+stopMode   = input.string("Sweep extreme", "Stop", options = ["Sweep extreme", "ATR"], group = "Trade Management", tooltip = "Sweep extreme: beyond the wick that took the liquidity, the level that invalidates the setup.\nATR: the original fixed distance from the entry.")
+stopTicks  = input.int(4, "Stop buffer (ticks)", minval = 0, maxval = 200, group = "Trade Management", tooltip = "Sweep extreme mode: ticks added beyond the sweep wick. MNQ/MES tick = 0.25.")
+atrPeriod  = input.int(14, "ATR Period", minval = 1, group = "Trade Management")
+slMult     = input.float(1.5, "Stop Loss ATR Multiplier", minval = 0.1, step = 0.1, group = "Trade Management", tooltip = "ATR stop mode only.")
+rrInput    = input.float(2.0, "Final target (R)", minval = 0.5, maxval = 20, step = 0.5, group = "Trade Management", tooltip = "TP1 is the leg extreme; the trade closes at this multiple of the risk or at the stop.")
+beAfterTp1 = input.bool(true, "Stop to breakeven at TP1", group = "Trade Management")
+
+showVisuals = input.bool(true, "Show Drawings & Labels", group = "Visuals")
+showStats   = input.bool(true, "Show statistics", group = "Visuals", tooltip = "Results of the indicator's own trades over the loaded history, evaluated at bar close. When the stop and a target fall inside the same bar the stop is assumed first, and targets are not checked on the entry bar.")
+
+// --- Macro Trend and ATR ---
 macroEma = ta.ema(close, emaPeriod)
 isMacroDowntrend = close < macroEma
 isMacroUptrend = close > macroEma
@@ -49,189 +99,265 @@ if not na(pl)
 bool isLocalDowntrend = not na(prevPhPrice) and not na(lastPhPrice) and lastPhPrice < prevPhPrice
 bool isLocalUptrend   = not na(prevPlPrice) and not na(lastPlPrice) and lastPlPrice > prevPlPrice
 
-// --- State Variables ---
-// 0: Neutral, 1: Bearish Swept, 2: Bullish Swept
-var int state = 0 
-
-var float sweepHighPrice = na
-var float sweepLowPrice  = na
-var int   sweepBar = na
-
-var float sweptLevel = na
-var int   sweptBar = na
-
-var float legHigh = na
-var float legLow  = na
-var int   legEndBar = na
-
-var float mssLevel = na
-var int   mssBar = na
-var int   mssConfirmBar = na 
-
-// Trade Tracking
-var int   tradeState = 0
-var float entryPrice = na
-var float slPrice    = na
-var float tpPrice    = na
-var box   slBox      = na
-var box   tpBox      = na
-
 // Momentum checks
 bullishCandle = close > open
 bearishCandle = close < open
-
 consecutiveBullish = ta.barssince(not bullishCandle)
 consecutiveBearish = ta.barssince(not bearishCandle)
 
-// --- Logic ---
+bool  inSession  = not useSession or not timeframe.isintraday or not na(time(timeframe.period, sessionInput, TZ))
+float stopBuffer = stopTicks * syminfo.mintick
 
-// 1. Detect Sweeps in Trend
-longTrendCondition = useMacroTrend ? isMacroDowntrend : true
-if isLocalDowntrend and longTrendCondition and not na(lastPlPrice) and low < lastPlPrice and close > lastPlPrice and state == 0
-    state := 2
-    sweepLowPrice := low
-    sweepBar := bar_index
-    sweptLevel := lastPlPrice
-    sweptBar := lastPlBar
-    mssLevel := lastPhPrice
-    mssBar := lastPhBar
-    legLow := low
-    legHigh := high
-    legEndBar := bar_index
+// --- Functions ---
+f_trendOk(int d) =>
+    trendMode == "Off" ? true : trendMode == "With EMA" ? (d == 1 ? isMacroUptrend : isMacroDowntrend) : (d == 1 ? isMacroDowntrend : isMacroUptrend)
 
-shortTrendCondition = useMacroTrend ? isMacroUptrend : true
-if isLocalUptrend and shortTrendCondition and not na(lastPhPrice) and high > lastPhPrice and close < lastPhPrice and state == 0
-    state := 1
-    sweepHighPrice := high
-    sweepBar := bar_index
-    sweptLevel := lastPhPrice
-    sweptBar := lastPhBar
-    mssLevel := lastPlPrice
-    mssBar := lastPlBar
-    legHigh := high
-    legLow := low
-    legEndBar := bar_index
+// A pivot whose level was already traded through after it formed holds no resting liquidity
+f_liquidityTaken(int d, float level, int levelBar) =>
+    bool taken = false
+    int  n = math.min(bar_index - levelBar - 1, 300)
+    if n >= 1
+        for i = 1 to n
+            if d == 1 ? low[i] < level : high[i] > level
+                taken := true
+                break
+    taken
 
-// Update extremes while looking for MSS (Wick to Wick)
-if state == 1
-    if low <= legLow
-        legLow := low
-        legEndBar := bar_index
-    if high > sweepHighPrice
-        state := 0 
+// Entry level: the retracement share of the leg, measured from the leg extreme back toward the sweep extreme
+f_fib(Setup s) =>
+    s.legExt + (s.sweepExt - s.legExt) * entryRetrace
 
-if state == 2
-    if high >= legHigh
-        legHigh := high
-        legEndBar := bar_index
-    if low < sweepLowPrice
-        state := 0 
+f_px(float p) =>
+    na(p) ? "n/a" : str.tostring(p, format.mintick)
 
-// 2. Detect MSS with Momentum
-if state == 1 and not na(mssLevel) and close < mssLevel
-    if consecutiveBearish >= momentumBars
-        state := -1 
-        mssConfirmBar := bar_index 
+f_drawArmed(Setup s) =>
+    int   d = s.dir
+    color c = d == 1 ? color.green : color.red
+    float fib = f_fib(s)
+    line.new(s.sweptBar, s.sweptLevel, s.sweepBar, s.sweptLevel, color = color.new(c, 50), style = line.style_dotted, width = 2)
+    box.new(s.sweepBar - 1, math.max(s.sweptLevel, s.sweepExt), s.sweepBar + 1, math.min(s.sweptLevel, s.sweepExt), border_color = color.new(c, 50), bgcolor = color.new(c, 90))
+    line.new(s.sweepBar, s.sweepExt, bar_index, s.sweepExt, color = color.new(c, 30), style = line.style_dashed)
+    label.new(s.sweepBar, s.sweepExt, "Sweep", style = d == 1 ? label.style_label_up : label.style_label_down, color = color.new(color.black, 100), textcolor = c, size = size.small)
+    line.new(s.mssBar, s.mssLevel, bar_index, s.mssLevel, color = c, width = 2)
+    label.new(math.round((s.mssBar + bar_index) / 2), s.mssLevel, "MSS", style = label.style_none, textcolor = c, size = size.small)
+    s.legLine  := line.new(s.sweepBar, s.sweepExt, s.legExtBar, s.legExt, color = color.new(color.gray, 50), width = 1)
+    s.fibLine  := line.new(s.sweepBar, fib, bar_index + 10, fib, color = color.gray, style = line.style_dotted)
+    s.fibLabel := label.new(bar_index + 10, fib, str.tostring(entryRetrace * 100, "#.#") + "% Retracement", style = label.style_label_left, color = color.new(color.gray, 100), textcolor = color.gray, size = size.small)
+
+// Keeps the leg and the entry level on the latest leg extreme while the setup waits
+f_updateArmed(Setup s) =>
+    if not na(s.fibLine)
+        float fib = f_fib(s)
+        line.set_xy2(s.legLine, s.legExtBar, s.legExt)
+        line.set_xy1(s.fibLine, s.sweepBar, fib)
+        line.set_xy2(s.fibLine, bar_index + 10, fib)
+        label.set_xy(s.fibLabel, bar_index + 10, fib)
+
+// Ends the entry-level drawing: at the fill, or faded when the setup expires or is invalidated
+f_finishArmed(Setup s, bool filled) =>
+    if not na(s.fibLine)
+        line.set_x2(s.fibLine, bar_index)
+        label.set_x(s.fibLabel, bar_index)
+        if not filled
+            line.set_color(s.fibLine, color.new(color.gray, 70))
+            label.set_textcolor(s.fibLabel, color.new(color.gray, 60))
+            label.set_text(s.fibLabel, "Setup dropped")
+    s.legLine  := line(na)
+    s.fibLine  := line(na)
+    s.fibLabel := label(na)
+
+// Runs one direction for one confirmed bar. Returns [armed, entry trade or na].
+f_process(Setup s, bool tradeOpen) =>
+    int   d    = s.dir
+    float far  = d == 1 ? low : high      // side of the sweep
+    float near = d == 1 ? high : low      // side of the leg
+    bool  armEv    = false
+    Trade newTrade = na
+    if s.stage == 0
+        // 1. Sweep: a wick through untouched liquidity at the last pivot that closes back, against local structure
+        float liq       = d == 1 ? lastPlPrice : lastPhPrice
+        int   liqBar    = d == 1 ? lastPlBar : lastPhBar
+        float structLvl = d == 1 ? lastPhPrice : lastPlPrice
+        int   structBar = d == 1 ? lastPhBar : lastPlBar
+        bool  counter   = d == 1 ? isLocalDowntrend : isLocalUptrend
+        if counter and f_trendOk(d) and not na(liq) and not na(structLvl) and d * (liq - far) > 0 and d * (close - liq) > 0 and d * (structLvl - close) > 0 and not f_liquidityTaken(d, liq, liqBar)
+            s.stage      := 1
+            s.sweptLevel := liq
+            s.sweptBar   := liqBar
+            s.sweepExt   := far
+            s.sweepBar   := bar_index
+            s.mssLevel   := structLvl
+            s.mssBar     := structBar
+            s.legExt     := near
+            s.legExtBar  := bar_index
+            s.legFvg     := false
+    else if s.stage == 1
+        // 2. Waiting for the MSS: dropped on a new extreme beyond the sweep or when it takes too long
+        if d * (s.sweepExt - far) > 0 or bar_index - s.sweepBar > mssBars
+            s.stage := 0
+        else
+            if d * (near - s.legExt) >= 0
+                s.legExt    := near
+                s.legExtBar := bar_index
+            if bar_index - 2 >= s.sweepBar and (d == 1 ? low > high[2] : high < low[2])
+                s.legFvg := true
+            if d * (close - s.mssLevel) > 0
+                float rng  = high - low
+                bool  disp = switch dispMode
+                    "ATR candle or FVG"   => s.legFvg or (rng >= dispAtr * atr and d * (close - open) >= 0.5 * rng)
+                    "Consecutive candles" => (d == 1 ? consecutiveBullish : consecutiveBearish) >= momentumBars
+                    =>                       true
+                if disp
+                    s.stage    := 2
+                    s.armedBar := bar_index
+                    armEv      := true
+                    if showVisuals
+                        f_drawArmed(s)
+    else if s.stage == 2
+        // 3. Armed: fill at the retracement level, or drop on invalidation / expiry, else follow the leg
+        float fib     = f_fib(s)
+        bool  touched = d == 1 ? low <= fib : high >= fib
+        if touched and inSession and not tradeOpen
+            float entry = d == 1 ? math.min(open, fib) : math.max(open, fib)
+            float stop  = stopMode == "Sweep extreme" ? s.sweepExt - d * stopBuffer : entry - d * atr * slMult
+            float risk  = d * (entry - stop)
+            if risk > 0
+                newTrade := Trade.new(d, entry, stop, risk, s.legExt, entry + d * risk * rrInput, bar_index)
+            s.stage := 0
+            f_finishArmed(s, risk > 0)
+        else if d * (s.sweepExt - far) > 0 or bar_index - s.armedBar > entryBars
+            s.stage := 0
+            f_finishArmed(s, false)
+        else
+            if d * (near - s.legExt) > 0
+                s.legExt    := near
+                s.legExtBar := bar_index
+            f_updateArmed(s)
+    [armEv, newTrade]
+
+// Evaluates the open trade on a confirmed bar. Returns the result in R when it closes, na otherwise.
+f_manage(Trade t) =>
+    int   d       = t.dir
+    bool  isEntry = bar_index == t.entryBar
+    float r       = na
+    bool  slHit   = d == 1 ? low <= t.stop : high >= t.stop
+    bool  tp2Hit  = not isEntry and (d == 1 ? high >= t.tp2 : low <= t.tp2)
+    bool  tp1Now  = not isEntry and not t.tp1Hit and (d == 1 ? high >= t.tp1 : low <= t.tp1)
+    if slHit
+        r := d * (t.stop - t.entry) / t.risk
+    else if tp2Hit
+        r := d * (t.tp2 - t.entry) / t.risk
+    else if tp1Now
+        t.tp1Hit := true
+        if beAfterTp1
+            t.stop := t.entry
         if showVisuals
-            line.new(sweptBar, sweptLevel, sweepBar, sweptLevel, color=color.new(color.red, 50), style=line.style_dotted, width=2)
-            box.new(sweepBar - 1, sweepHighPrice, sweepBar + 1, sweptLevel, border_color=color.new(color.red, 50), bgcolor=color.new(color.red, 90))
-            line.new(sweepBar, sweepHighPrice, bar_index, sweepHighPrice, color=color.new(color.red, 30), style=line.style_dashed)
-            label.new(sweepBar, sweepHighPrice, "Sweep", style=label.style_label_down, color=color.new(color.black, 100), textcolor=color.red, size=size.small)
-            line.new(mssBar, mssLevel, bar_index, mssLevel, color=color.new(color.red, 0), width=2)
-            label.new(math.round((mssBar + bar_index) / 2), mssLevel, "MSS", style=label.style_none, textcolor=color.red, size=size.small)
-            line.new(sweepBar, sweepHighPrice, legEndBar, legLow, color=color.new(color.gray, 50), width=1)
-            fib50 = sweepHighPrice - (sweepHighPrice - legLow) * 0.5
-            line.new(sweepBar, fib50, bar_index + 10, fib50, color=color.gray, style=line.style_dotted)
-            label.new(bar_index + 10, fib50, "50% Retracement", style=label.style_label_left, color=color.new(color.gray, 100), textcolor=color.gray, size=size.small)
-    else
-        state := 0 
+            label.new(bar_index, d == 1 ? high : low, "TP1", style = d == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.green, 70), textcolor = color.white, size = size.tiny)
+    if showVisuals and not na(t.slBox)
+        int right = na(r) ? bar_index + 5 : bar_index
+        box.set_right(t.slBox, right)
+        box.set_right(t.tpBox, right)
+        line.set_x2(t.tp1Line, right)
+    r
 
-if state == 2 and not na(mssLevel) and close > mssLevel
-    if consecutiveBullish >= momentumBars
-        state := -2 
-        mssConfirmBar := bar_index 
+// --- Engine (bar close only) ---
+var Setup longSetup  = Setup.new(1)
+var Setup shortSetup = Setup.new(-1)
+var Trade trade      = na
+
+var int   nTrades = 0
+var int   nWins   = 0
+var int   nBe     = 0
+var int   nLosses = 0
+var float netR    = 0.0
+
+bool longArmed  = false
+bool shortArmed = false
+bool longEntry  = false
+bool shortEntry = false
+
+f_close(Trade t, float r) =>
+    if showVisuals
+        string txt = (r > 0 ? "+" : "") + str.tostring(r, "#.##") + "R"
+        label.new(bar_index, t.dir == 1 ? (r < 0 ? low : high) : (r < 0 ? high : low), txt, style = (t.dir == 1) == (r < 0) ? label.style_label_up : label.style_label_down, color = color.new(r > 0 ? color.green : r < 0 ? color.red : color.gray, 30), textcolor = color.white, size = size.tiny)
+    alert((t.dir == 1 ? "Long" : "Short") + " closed on " + syminfo.ticker + " " + timeframe.period + ": " + (r > 0 ? "+" : "") + str.tostring(r, "#.##") + "R", alert.freq_once_per_bar_close)
+
+if barstate.isconfirmed
+    if not na(trade)
+        float r = f_manage(trade)
+        if not na(r)
+            f_close(trade, r)
+            nTrades += 1
+            netR    += r
+            if r > 0
+                nWins += 1
+            else if r < 0
+                nLosses += 1
+            else
+                nBe += 1
+            trade := na
+
+    [lArm, lTrade] = f_process(longSetup, not na(trade))
+    [sArm, sTrade] = f_process(shortSetup, not na(trade) or not na(lTrade))
+    longArmed  := lArm
+    shortArmed := sArm
+    Trade nt = not na(lTrade) ? lTrade : sTrade
+
+    if lArm or sArm
+        Setup a = lArm ? longSetup : shortSetup
+        alert("MSS " + (a.dir == 1 ? "long" : "short") + " armed on " + syminfo.ticker + " " + timeframe.period + " | entry " + f_px(f_fib(a))
+             + " (moves with the leg) | invalidation " + f_px(a.sweepExt) + " | TP1 " + f_px(a.legExt), alert.freq_once_per_bar_close)
+
+    if not na(nt)
+        trade := nt
+        longEntry  := nt.dir == 1
+        shortEntry := nt.dir == -1
+        string details = "Entry " + f_px(nt.entry) + " | Stop " + f_px(nt.stop) + " | TP1 (leg) " + f_px(nt.tp1) + " | TP2 (" + str.tostring(rrInput) + "R) " + f_px(nt.tp2)
+             + " | Risk " + str.tostring(nt.risk, "#.##") + " pts ($" + str.tostring(nt.risk * syminfo.pointvalue, "#,##0.##") + " per contract)"
         if showVisuals
-            line.new(sweptBar, sweptLevel, sweepBar, sweptLevel, color=color.new(color.green, 50), style=line.style_dotted, width=2)
-            box.new(sweepBar - 1, sweptLevel, sweepBar + 1, sweepLowPrice, border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 90))
-            line.new(sweepBar, sweepLowPrice, bar_index, sweepLowPrice, color=color.new(color.green, 30), style=line.style_dashed)
-            label.new(sweepBar, sweepLowPrice, "Sweep", style=label.style_label_up, color=color.new(color.black, 100), textcolor=color.green, size=size.small)
-            line.new(mssBar, mssLevel, bar_index, mssLevel, color=color.new(color.green, 0), width=2)
-            label.new(math.round((mssBar + bar_index) / 2), mssLevel, "MSS", style=label.style_none, textcolor=color.green, size=size.small)
-            line.new(sweepBar, sweepLowPrice, legEndBar, legHigh, color=color.new(color.gray, 50), width=1)
-            fib50 = sweepLowPrice + (legHigh - sweepLowPrice) * 0.5
-            line.new(sweepBar, fib50, bar_index + 10, fib50, color=color.gray, style=line.style_dotted)
-            label.new(bar_index + 10, fib50, "50% Retracement", style=label.style_label_left, color=color.new(color.gray, 100), textcolor=color.gray, size=size.small)
-    else
-        state := 0 
+            int d = nt.dir
+            label.new(bar_index, d == 1 ? low : high, d == 1 ? "Long" : "Short", style = d == 1 ? label.style_label_up : label.style_label_down, color = d == 1 ? color.green : color.red, textcolor = color.white, size = size.small, tooltip = str.replace_all(details, " | ", "\n"))
+            nt.slBox   := box.new(bar_index, math.max(nt.entry, nt.stop), bar_index + 5, math.min(nt.entry, nt.stop), border_color = color.new(color.red, 50), bgcolor = color.new(color.red, 85))
+            nt.tpBox   := box.new(bar_index, math.max(nt.entry, nt.tp2), bar_index + 5, math.min(nt.entry, nt.tp2), border_color = color.new(color.green, 50), bgcolor = color.new(color.green, 85))
+            nt.tp1Line := line.new(bar_index, nt.tp1, bar_index + 5, nt.tp1, color = color.new(color.green, 30), style = line.style_dashed)
+        alert((nt.dir == 1 ? "Long" : "Short") + " filled on " + syminfo.ticker + " " + timeframe.period + " | " + details, alert.freq_once_per_bar_close)
+        // The entry bar itself can already reach the stop
+        float r = f_manage(trade)
+        if not na(r)
+            f_close(trade, r)
+            nTrades += 1
+            netR    += r
+            nLosses += r < 0 ? 1 : 0
+            nBe     += r == 0 ? 1 : 0
+            trade := na
 
-// 3. Detect 50% Retracement Entry & Plot Trade Boxes
-if state == -1 and bar_index > mssConfirmBar
-    fib50 = sweepHighPrice - (sweepHighPrice - legLow) * 0.5
-    if high >= fib50
-        state := 0 
-        if showVisuals
-            label.new(bar_index, high, "Short", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
-        
-        // Initiate Short Trade
-        tradeState := -1
-        entryPrice := fib50
-        slPrice := entryPrice + atr * slMult
-        tpPrice := entryPrice - atr * tpMult
-        if showVisuals
-            slBox := box.new(bar_index, slPrice, bar_index + 5, entryPrice, border_color=color.new(color.red, 50), bgcolor=color.new(color.red, 85))
-            tpBox := box.new(bar_index, entryPrice, bar_index + 5, tpPrice, border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 85))
-
-if state == -2 and bar_index > mssConfirmBar
-    fib50 = sweepLowPrice + (legHigh - sweepLowPrice) * 0.5
-    if low <= fib50
-        state := 0 
-        if showVisuals
-            label.new(bar_index, low, "Long", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
-            
-        // Initiate Long Trade
-        tradeState := 1
-        entryPrice := fib50
-        slPrice := entryPrice - atr * slMult
-        tpPrice := entryPrice + atr * tpMult
-        if showVisuals
-            slBox := box.new(bar_index, entryPrice, bar_index + 5, slPrice, border_color=color.new(color.red, 50), bgcolor=color.new(color.red, 85))
-            tpBox := box.new(bar_index, tpPrice, bar_index + 5, entryPrice, border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 85))
-
-// Reset state if extreme is broken before entry
-if state == -1 and high > sweepHighPrice
-    state := 0
-if state == -2 and low < sweepLowPrice
-    state := 0
-
-// 4. Trade Management (Extend SL/TP Boxes or Stop on Hit)
-if tradeState == 1 // Active Long
-    bool hitSl = low <= slPrice
-    bool hitTp = high >= tpPrice
-    
-    if hitSl or hitTp
-        tradeState := 0 // Close trade
-        if showVisuals and not na(slBox)
-            box.set_right(slBox, bar_index)
-            box.set_right(tpBox, bar_index)
-    else
-        if showVisuals and not na(slBox)
-            box.set_right(slBox, bar_index + 5)
-            box.set_right(tpBox, bar_index + 5)
-
-if tradeState == -1 // Active Short
-    bool hitSl = high >= slPrice
-    bool hitTp = low <= tpPrice
-    
-    if hitSl or hitTp
-        tradeState := 0 // Close trade
-        if showVisuals and not na(slBox)
-            box.set_right(slBox, bar_index)
-            box.set_right(tpBox, bar_index)
-    else
-        if showVisuals and not na(slBox)
-            box.set_right(slBox, bar_index + 5)
-            box.set_right(tpBox, bar_index + 5)
-
-// EMA Plot with dynamic coloring
+// --- Visuals ---
 emaColor = isMacroUptrend ? color.green : color.red
-plot(useMacroTrend ? macroEma : na, "Macro Trend EMA", color=color.new(emaColor, 50), linewidth=2)
+plot(trendMode != "Off" ? macroEma : na, "Macro Trend EMA", color = color.new(emaColor, 50), linewidth = 2)
+
+var table stats = na
+f_stage(Setup s) =>
+    s.stage == 0 ? "Idle" : s.stage == 1 ? "Swept, waiting for MSS" : "Armed, entry " + f_px(f_fib(s))
+
+if showStats and barstate.islast
+    if na(stats)
+        stats := table.new(position.bottom_right, 2, 6, bgcolor = color.new(#131722, 10), frame_color = color.new(color.gray, 60), frame_width = 1, border_width = 0)
+    table.cell(stats, 0, 0, "MSS Sweep Fib", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(stats, 1, 0, syminfo.ticker + " " + timeframe.period, text_color = color.white, text_size = size.small, text_halign = text.align_right)
+    table.cell(stats, 0, 1, "Long setup", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(stats, 1, 1, f_stage(longSetup), text_color = longSetup.stage == 2 ? color.green : color.white, text_size = size.small, text_halign = text.align_right)
+    table.cell(stats, 0, 2, "Short setup", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(stats, 1, 2, f_stage(shortSetup), text_color = shortSetup.stage == 2 ? color.red : color.white, text_size = size.small, text_halign = text.align_right)
+    table.cell(stats, 0, 3, "Open trade", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(stats, 1, 3, na(trade) ? "-" : (trade.dir == 1 ? "Long " : "Short ") + f_px(trade.entry) + " · stop " + f_px(trade.stop), text_color = color.white, text_size = size.small, text_halign = text.align_right)
+    table.cell(stats, 0, 4, "Trades", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(stats, 1, 4, str.tostring(nTrades) + " (W " + str.tostring(nWins) + " · BE " + str.tostring(nBe) + " · L " + str.tostring(nLosses) + ")", text_color = color.white, text_size = size.small, text_halign = text.align_right)
+    table.cell(stats, 0, 5, "Net / win rate", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(stats, 1, 5, (netR >= 0 ? "+" : "") + str.tostring(netR, "#.##") + "R · " + (nTrades > 0 ? str.tostring(100.0 * nWins / nTrades, "#") + "%" : "-"), text_color = netR >= 0 ? color.green : color.red, text_size = size.small, text_halign = text.align_right)
+
+// --- Alerts ---
+alertcondition(longArmed,  "MSS Long Armed",  "{{ticker}} {{interval}} — bullish MSS after a sweep: waiting for the retracement entry")
+alertcondition(shortArmed, "MSS Short Armed", "{{ticker}} {{interval}} — bearish MSS after a sweep: waiting for the retracement entry")
+alertcondition(longEntry,  "Long Entry",  "{{ticker}} {{interval}} — long filled at the retracement level")
+alertcondition(shortEntry, "Short Entry", "{{ticker}} {{interval}} — short filled at the retracement level")
+// For prices (entry, stop, targets, risk in $) create the alert on "Any alert() function call".
