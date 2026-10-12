@@ -1,8 +1,10 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/ MPL-2.0
 // Modified: order blocks anchored to the origin swing of the CHoCH leg with an optional displacement (FVG) check,
 // configurable zone interaction (touch / midpoint / sweep), overlap tested against active blocks only, mitigated
-// blocks kept on the chart faded, CHoCH confirmed on bar close, session filter, stop and targets per signal and
-// detailed alert() messages.
+// blocks kept on the chart faded, CHoCH confirmed on bar close, session filter, stop and targets per signal,
+// detailed alert() messages and trades taken from the signals with their results.
+// High-probability filter (EMA trend slope + leg displacement in ATR) and TP1 partial / break-even trade management,
+// researched on MNQ 3m and checked on MNQ 5m / 15m and MES 3m.
 //@version=6
 indicator("Short-Term Order Block Rejections", shorttitle="ST OB Rejections", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
@@ -19,6 +21,23 @@ type OrderBlock
     float extreme       // best price reached by the break leg since the CHoCH: first target of a signal
     bool  used = false
     box   bx
+    float disp          // break leg from its origin to the CHoCH close, in ATR
+
+type Trade
+    int   dir           // 1 = long, -1 = short
+    float entry
+    float stop
+    float target
+    int   entryBar
+    line  lnEntry
+    line  lnStop
+    line  lnTarget
+    float risk          // initial risk in points (the stop can move to break-even)
+    float tp1
+    line  lnTp1
+    bool  tp1Hit = false
+    float bank   = 0.0  // R already booked by the TP1 partial
+    float rem    = 1.0  // fraction of the position still open
 
 // --- Inputs ---
 int pivotLengthInput = input.int(3, "Structure pivot bars", minval=1, maxval=20, tooltip="Bars on each side required to confirm a swing high or low for market structure.")
@@ -27,32 +46,76 @@ int maxLegBarsInput = input.int(100, "Maximum CHoCH leg length", minval=10, maxv
 bool requireDisplacementInput = input.bool(true, "Require displacement (FVG in the leg)", tooltip="Creates a block only when the leg from its origin to the CHoCH left at least one fair value gap in the direction of the break: the impulsive move that makes an order block valid.")
 int maxReactionBarsInput = input.int(8, "Maximum reaction window", minval=1, maxval=100, tooltip="Signals are allowed only this many bars after a CHoCH order block forms. Blocks remain drawn afterward as historical context. On 1-minute charts 15–30 gives retracements time to arrive.")
 string touchModeInput = input.string("Touch", "Zone interaction", options=["Touch", "Midpoint", "Sweep"], tooltip="Touch: the wick enters the block and the candle closes back out of it.\nMidpoint: the wick reaches the block's 50% and the candle closes back out of it.\nSweep (original): the wick runs through the whole block and the candle closes back inside or beyond it.\nA candle that engulfs the whole block from the far side always qualifies.")
-float minBodyPercentInput = input.float(60.0, "Minimum signal body (% of candle range)", minval=1.0, maxval=100.0, step=1.0, tooltip="The signal candle body must use at least this percentage of its full high-low range.")
+float minBodyPercentInput = input.float(0.0, "Minimum signal body (% of candle range)", minval=0.0, maxval=100.0, step=1.0, tooltip="The signal candle body must use at least this percentage of its full high-low range. 0 = off: on MNQ and BTCUSD (3-15m) the 60% filter removed most signals and the remaining ones did worse.")
 int maxBlocksPerSideInput = input.int(100, "Tracked blocks per direction", minval=1, maxval=200, tooltip="Maximum number of unmitigated bullish and bearish blocks tracked for mitigation. The oldest stops being tracked when this limit is reached; its drawing stays.")
 
 bool showChochInput = input.bool(true, "Show CHoCH levels", group="Market Structure", tooltip="Draws a dashed line from the broken confirmed swing level and marks each change of character.")
 bool filterSignalsByTrendInput = input.bool(true, "Only signal with current structure", group="Market Structure", tooltip="Allows bullish rejection signals only after bullish CHoCH and bearish rejection signals only after bearish CHoCH.")
 bool requireSwingRangeInput = input.bool(true, "Require block inside broken swing range", group="Market Structure", tooltip="Rejects bullish source candles fully above the broken swing high and bearish source candles fully below the broken swing low.")
 bool avoidFreshExtremeSignalsInput = input.bool(true, "Avoid signals on fresh swing extremes", group="Market Structure", tooltip="Suppresses short signals making a fresh local low and long signals making a fresh local high, avoiding entries at the end of an extension.")
-bool filterChopSignalsInput = input.bool(true, "Require significant pivot-to-block range", group="Range Filter", tooltip="Allows signals only when the latest confirmed swing pivot is sufficiently far from the order block, filtering narrow sideways structures.")
+bool filterChopSignalsInput = input.bool(false, "Require significant pivot-to-block range", group="Range Filter", tooltip="Allows signals only when the latest confirmed swing pivot is sufficiently far from the order block, filtering narrow sideways structures.")
 int rangeAtrLengthInput = input.int(14, "Range ATR length", minval=1, maxval=100, group="Range Filter", tooltip="ATR period used to normalize pivot-to-block distance across symbols and timeframes.")
 float minPivotRangeAtrInput = input.float(2.0, "Minimum pivot-to-block distance (ATR)", minval=0.1, maxval=10.0, step=0.1, group="Range Filter", tooltip="The latest confirmed pivot must be at least this many ATRs away from the order block before a rejection signal is allowed. Increase it to filter more chop.")
 
-bool useSessionInput = input.bool(true, "Signals only in session", inline="sess", group="Session", tooltip="Intraday charts only. Blocks keep forming around the clock; rejection signals print only inside this New York session.")
+bool useSessionInput = input.bool(true, "Signals only in session", inline="sess", group="Session", tooltip="Intraday charts only. Blocks keep forming around the clock; rejection signals print only inside this New York session. CHoCH + block trades are not filtered.")
 string sessionInput = input.session("0930-1600", "", inline="sess", group="Session")
 
 bool removeOverlappingInput = input.bool(true, "Suppress overlapping blocks", group="Cleanup", tooltip="Avoids adding a block when it substantially overlaps an active block (still inside its reaction window) of either direction.")
 float overlapThresholdInput = input.float(25.0, "Overlap threshold (%)", minval=1.0, maxval=100.0, step=1.0, group="Cleanup", tooltip="A new block is skipped when its overlap with an active block covers at least this percentage of the smaller zone.")
 
-bool showRiskInput = input.bool(true, "Project stop and targets of the latest signal", group="Risk")
+bool showRiskInput = input.bool(false, "Project stop and targets of the latest signal", group="Risk", tooltip="Fixed-length projection of the latest signal. The trades below draw their own levels until they close.")
 int stopBufferTicksInput = input.int(2, "Stop buffer (ticks)", minval=0, maxval=100, group="Risk", tooltip="Stop goes this many ticks beyond the signal candle's wick or the block's far edge, whichever is further.")
-float rrInput = input.float(2.0, "Second target (R)", minval=0.5, maxval=20.0, step=0.5, group="Risk", tooltip="First target: the extreme the break leg reached after the CHoCH. Second target: this multiple of the risk.")
+float rrInput = input.float(2.0, "Target (R)", minval=0.5, maxval=20.0, step=0.5, group="Risk", tooltip="Trade target and second projected target, as a multiple of the risk. First projected target: the extreme the break leg reached after the CHoCH.")
 int riskBarsInput = input.int(20, "Projection length (bars)", minval=5, maxval=200, group="Risk")
+
+bool showTradesInput = input.bool(true, "Trade the signals", group="Trades", tooltip="Shows BUY / SELL signals, manages each trade and counts the results. Exits are checked from the candle after the entry; when stop and target are both inside one candle the stop counts.")
+string tradeEntryInput = input.string("CHoCH + block", "Trade entry", options=["CHoCH + block", "Block rejection"], group="Trades", tooltip="CHoCH + block: every CHoCH that creates an order block opens a trade in the new structure direction at the CHoCH close (bullish = BUY, bearish = SELL), stop beyond the block. With 'Exit on a new CHoCH + block' the next CHoCH that creates a block closes the open trade at its close; a CHoCH without a block leaves the trade running.\nBlock rejection: enters at the close of an OB rejection candle with its stop; one trade at a time, signals while a trade is open are only marked.")
+string targetModeInput = input.string("R multiple", "Trade target", options=["R multiple", "Leg extreme (TP1)"], group="Trades", tooltip="R multiple: the Target (R) above. Leg extreme (block rejection only): the extreme the break leg reached after the CHoCH, falling back to the R multiple when the signal has none.")
+int maxTradeBarsInput = input.int(0, "Max bars in trade", minval=0, group="Trades", tooltip="Closes the trade at the candle close after this many bars. 0 = no time exit.")
+float tp1RInput = input.float(0.5, "TP1 (R)", minval=0.1, maxval=10.0, step=0.1, group="Trades", tooltip="First target, as a multiple of the risk. Used only when it is closer than the trade target.")
+int tp1PctInput = input.int(50, "TP1 partial (%)", minval=0, maxval=100, group="Trades", tooltip="Share of the position closed at TP1. 100 = the whole trade exits at TP1. 0 = no partial.")
+bool beAfterTp1Input = input.bool(true, "Stop to break-even after TP1", group="Trades", tooltip="Once TP1 is reached the stop of the remaining position moves to the entry. With a TP1 partial every trade that reaches TP1 closes positive.")
+bool exitOnChochInput = input.bool(false, "Exit on a new CHoCH + block", group="Trades", tooltip="CHoCH + block mode: a new CHoCH that creates a block closes the open trade at its close (the original behavior), and a new trade opens when it passes the filters. Off: the trade runs to its stop, break-even or target. On MNQ 3m the early exits cut more winners than losers.")
+bool tradeSessionInput = input.bool(false, "Trades only in session", group="Trades", tooltip="Opens trades only inside the Session input (New York time). Off: trades around the clock. On MNQ 3m most filtered signals form outside 09:30-16:00.")
+bool showStatsInput = input.bool(true, "Show trade statistics", group="Trades")
+
+string GRP_HP = "High-Probability Filter"
+bool  hpTrendInput     = input.bool(true, "EMA trend filter", group=GRP_HP, tooltip="Trades only in the direction both EMAs are rising (longs) or falling (shorts): the fast EMA against its value N bars ago and the slow EMA against its value M bars ago. CHoCHs against the established trend were the main source of losses.")
+int   hpFastLenInput   = input.int(50, "Fast EMA", minval=2, inline="hpf", group=GRP_HP)
+int   hpFastSlopeInput = input.int(10, "slope bars", minval=1, inline="hpf", group=GRP_HP)
+int   hpSlowLenInput   = input.int(200, "Slow EMA", minval=2, inline="hps", group=GRP_HP)
+int   hpSlowSlopeInput = input.int(20, "slope bars", minval=1, inline="hps", group=GRP_HP)
+bool  hpDispInput      = input.bool(true, "Minimum leg displacement", inline="hpd", group=GRP_HP, tooltip="Trades only blocks whose break leg ran at least this many ATR(14) from its origin (lowest low / highest high) to the CHoCH close: the impulse behind the change of character.")
+float hpMinDispInput   = input.float(2.5, "ATR", minval=0.0, maxval=20.0, step=0.1, inline="hpd", group=GRP_HP)
+bool  hpShowEmaInput   = input.bool(false, "Show trend EMAs", group=GRP_HP)
 
 color bullBlockColorInput = input.color(color.new(BULL_COLOR, 84), "Bullish block fill", group="Style", tooltip="Fill color for bullish order blocks.")
 color bearBlockColorInput = input.color(color.new(BEAR_COLOR, 84), "Bearish block fill", group="Style", tooltip="Fill color for bearish order blocks.")
 color bullBorderColorInput = input.color(BULL_COLOR, "Bullish block border", group="Style", tooltip="Border color for bullish order blocks.")
 color bearBorderColorInput = input.color(BEAR_COLOR, "Bearish block border", group="Style", tooltip="Border color for bearish order blocks.")
+
+string GRP_VWAP = "VWAP"
+bool   showVwapInput      = input.bool(true, "Show VWAP", group=GRP_VWAP)
+float  vwapSourceInput    = input.source(hlc3, "Source", group=GRP_VWAP)
+string vwapAnchorInput    = input.string("New York", "Reset at", options=["New York", "London", "Tokyo", "Sydney", "CME Globex (18:00 NY)", "Day", "Week", "Month", "Custom session"], group=GRP_VWAP, tooltip="Sessions: the VWAP and its bands restart on the first candle of the session (the candle holding the open, or the first one that opens inside the session) and keep running until the next one opens.\nNew York 09:30-16:00 NY · London 08:00-16:30 London · Tokyo 09:00-15:30 Tokyo · Sydney 10:00-16:00 Sydney · CME Globex 18:00-17:00 NY.\nDay / Week / Month: restart with each new period of the symbol's exchange.\nCustom session: the session and timezone below.\nNon-intraday charts restart each day when a session is selected; when every candle restarts it (Day on a daily chart) the VWAP is hidden. Needs volume data on the symbol.")
+string vwapCustomSession  = input.session("0930-1600", "Custom session", inline="vcs", group=GRP_VWAP)
+string vwapCustomTz       = input.string("America/New_York", "", options=["America/New_York", "America/Chicago", "America/Los_Angeles", "America/Sao_Paulo", "Europe/London", "Europe/Berlin", "Asia/Tokyo", "Asia/Hong_Kong", "Asia/Singapore", "Australia/Sydney", "UTC"], inline="vcs", group=GRP_VWAP)
+bool   vwapSessionOnly    = input.bool(false, "Show only during the session", group=GRP_VWAP, tooltip="Hides the VWAP outside the selected session. Ignored for Day / Week / Month.")
+color  vwapColorInput     = input.color(#2962ff, "VWAP", inline="vwapline", group=GRP_VWAP)
+int    vwapWidthInput     = input.int(2, "Width", minval=1, maxval=8, inline="vwapline", group=GRP_VWAP)
+string vwapBandModeInput  = input.string("Standard deviation", "Bands", options=["Standard deviation", "Percentage"], group=GRP_VWAP, tooltip="Standard deviation: VWAP ± multiplier × the volume-weighted standard deviation since the reset. Percentage: VWAP ± multiplier % of the VWAP.")
+bool   vwapBand1Input     = input.bool(true, "Band 1", inline="vb1", group=GRP_VWAP)
+float  vwapMult1Input     = input.float(1.0, "×", minval=0.0, step=0.5, inline="vb1", group=GRP_VWAP)
+color  vwapBand1Color     = input.color(color.new(#089981, 0), "", inline="vb1", group=GRP_VWAP)
+bool   vwapBand2Input     = input.bool(true, "Band 2", inline="vb2", group=GRP_VWAP)
+float  vwapMult2Input     = input.float(2.0, "×", minval=0.0, step=0.5, inline="vb2", group=GRP_VWAP)
+color  vwapBand2Color     = input.color(color.new(#808000, 0), "", inline="vb2", group=GRP_VWAP)
+bool   vwapBand3Input     = input.bool(false, "Band 3", inline="vb3", group=GRP_VWAP)
+float  vwapMult3Input     = input.float(3.0, "×", minval=0.0, step=0.5, inline="vb3", group=GRP_VWAP)
+color  vwapBand3Color     = input.color(color.new(#00897b, 0), "", inline="vb3", group=GRP_VWAP)
+int    vwapBandWidthInput = input.int(1, "Band width", minval=1, maxval=8, group=GRP_VWAP)
+bool   vwapFillInput      = input.bool(true, "Fill bands", group=GRP_VWAP)
+int    vwapFillTranspInput = input.int(92, "Fill transparency", minval=0, maxval=100, group=GRP_VWAP)
 
 // --- Functions ---
 // True when the zone overlaps, by at least the threshold of the smaller zone, a block still inside its reaction window
@@ -68,7 +131,7 @@ f_overlapsActive(float newTop, float newBottom, array<OrderBlock> blocks, float 
     isDuplicate
 
 // Locates the order block of a CHoCH leg. dir = 1 for a bullish break of the swing high at swingBar, -1 for a bearish one.
-// Returns [found, top, bottom, offset, displacement].
+// Returns [found, top, bottom, offset, displacement, originPrice].
 f_findBlock(int dir, int swingBar) =>
     int legBars = math.max(math.min(bar_index - swingBar, maxLegBarsInput), 1)
     // Origin of the leg: the lowest low (highest high) since the broken swing
@@ -95,7 +158,7 @@ f_findBlock(int dir, int swingBar) =>
             if dir == 1 ? low[j] > high[j + 2] : high[j] < low[j + 2]
                 displacement := true
                 break
-    [found, top, bottom, offset, displacement]
+    [found, top, bottom, offset, displacement, dir == 1 ? low[originOffset] : high[originOffset]]
 
 // --- Confirmed swing structure ---
 float confirmedPivotHigh = ta.pivothigh(high, pivotLengthInput, pivotLengthInput)
@@ -154,30 +217,57 @@ if showChochInput and bearishChoch
 var array<OrderBlock> bullBlocks = array.new<OrderBlock>()
 var array<OrderBlock> bearBlocks = array.new<OrderBlock>()
 
+// --- High-probability filter: EMA trend slope and leg displacement ---
+float hpAtr     = ta.atr(14)
+float hpEmaFast = ta.ema(close, hpFastLenInput)
+float hpEmaSlow = ta.ema(close, hpSlowLenInput)
+bool  hpTrendLong  = not hpTrendInput or (hpEmaFast > hpEmaFast[hpFastSlopeInput] and hpEmaSlow > hpEmaSlow[hpSlowSlopeInput])
+bool  hpTrendShort = not hpTrendInput or (hpEmaFast < hpEmaFast[hpFastSlopeInput] and hpEmaSlow < hpEmaSlow[hpSlowSlopeInput])
+plot(hpShowEmaInput ? hpEmaFast : na, "Trend EMA fast", color=color.new(color.orange, 20))
+plot(hpShowEmaInput ? hpEmaSlow : na, "Trend EMA slow", color=color.new(color.purple, 20), linewidth=2)
+
 // --- CHoCH-only order block creation ---
+float stopBuffer = stopBufferTicksInput * syminfo.mintick
+
+// A CHoCH backed by a new order block: trade signal in the new structure direction, stop beyond the block
+bool  chochBuy      = false
+bool  chochSell     = false
+float chochBuyStop  = na
+float chochSellStop = na
+float chochBuyDisp  = na
+float chochSellDisp = na
+
 if bullishChoch
-    [found, top, bottom, offset, displacement] = f_findBlock(1, lastSwingHighBar)
+    [found, top, bottom, offset, displacement, originPx] = f_findBlock(1, lastSwingHighBar)
+    float legDisp = (close - originPx) / hpAtr
     bool withinSwing = not requireSwingRangeInput or top < lastSwingHigh
     bool impulsive = not requireDisplacementInput or displacement
     if found and withinSwing and impulsive
         bool duplicate = removeOverlappingInput and (f_overlapsActive(top, bottom, bullBlocks, overlapThresholdInput) or f_overlapsActive(top, bottom, bearBlocks, overlapThresholdInput))
         if not duplicate
             box bx = box.new(left=bar_index - offset, top=top, right=bar_index + 1, bottom=bottom, xloc=xloc.bar_index, bgcolor=bullBlockColorInput, border_color=bullBorderColorInput)
-            bullBlocks.push(OrderBlock.new(top, bottom, bar_index, high, false, bx))
+            bullBlocks.push(OrderBlock.new(top, bottom, bar_index, high, false, bx, legDisp))
             if bullBlocks.size() > maxBlocksPerSideInput
                 bullBlocks.shift()
+            chochBuy     := true
+            chochBuyStop := bottom - stopBuffer
+            chochBuyDisp := legDisp
 
 if bearishChoch
-    [found, top, bottom, offset, displacement] = f_findBlock(-1, lastSwingLowBar)
+    [found, top, bottom, offset, displacement, originPx] = f_findBlock(-1, lastSwingLowBar)
+    float legDisp = (originPx - close) / hpAtr
     bool withinSwing = not requireSwingRangeInput or bottom > lastSwingLow
     bool impulsive = not requireDisplacementInput or displacement
     if found and withinSwing and impulsive
         bool duplicate = removeOverlappingInput and (f_overlapsActive(top, bottom, bearBlocks, overlapThresholdInput) or f_overlapsActive(top, bottom, bullBlocks, overlapThresholdInput))
         if not duplicate
             box bx = box.new(left=bar_index - offset, top=top, right=bar_index + 1, bottom=bottom, xloc=xloc.bar_index, bgcolor=bearBlockColorInput, border_color=bearBorderColorInput)
-            bearBlocks.push(OrderBlock.new(top, bottom, bar_index, low, false, bx))
+            bearBlocks.push(OrderBlock.new(top, bottom, bar_index, low, false, bx, legDisp))
             if bearBlocks.size() > maxBlocksPerSideInput
                 bearBlocks.shift()
+            chochSell     := true
+            chochSellStop := top + stopBuffer
+            chochSellDisp := legDisp
 
 // --- Rejection signals, box extension and mitigation ---
 float candleRange = math.max(high - low, syminfo.mintick)
@@ -188,15 +278,17 @@ float priorLookbackLow = ta.lowest(low[1], swingExtremeLookback)
 float priorLookbackHigh = ta.highest(high[1], swingExtremeLookback)
 bool bearishAtFreshLow = low < priorLookbackLow
 bool bullishAtFreshHigh = high > priorLookbackHigh
-bool inSession = not useSessionInput or not timeframe.isintraday or not na(time(timeframe.period, sessionInput, TZ))
-float stopBuffer = stopBufferTicksInput * syminfo.mintick
+bool sessionTime = not timeframe.isintraday or not na(time(timeframe.period, sessionInput, TZ))
+bool inSession = not useSessionInput or sessionTime
 
 bool  bullishSignal = false
 float bullStop = na
 float bullTp1 = na
+float bullDisp = na
 bool  bearishSignal = false
 float bearStop = na
 float bearTp1 = na
+float bearDisp = na
 
 int bullIndex = bullBlocks.size() - 1
 while bullIndex >= 0
@@ -221,6 +313,7 @@ while bullIndex >= 0
         if not bullishSignal
             bullStop := math.min(low, ob.bottom) - stopBuffer
             bullTp1 := ob.extreme > close ? ob.extreme : na
+            bullDisp := ob.disp
         bullishSignal := true
     ob.extreme := math.max(ob.extreme, high)
     if zoneMitigated
@@ -253,6 +346,7 @@ while bearIndex >= 0
         if not bearishSignal
             bearStop := math.max(high, ob.top) + stopBuffer
             bearTp1 := ob.extreme < close ? ob.extreme : na
+            bearDisp := ob.disp
         bearishSignal := true
     ob.extreme := math.min(ob.extreme, low)
     if zoneMitigated
@@ -303,5 +397,232 @@ if bullishSignal
 if bearishSignal
     alert(f_signal(-1, bearStop, bearTp1), alert.freq_once_per_bar_close)
 
+// --- Trades taken from the signals ---
+var Trade trd = na
+var int   tradesN   = 0
+var int   tradesWon = 0
+var float tradesR   = 0.0
+var int   buyCount  = 0
+var int   sellCount = 0
+var int   exitsTp   = 0
+var int   exitsBe   = 0
+var int   exitsSl   = 0
+
+bool tradeLong  = false
+bool tradeShort = false
+bool tradeExit  = false
+bool tradeTp1   = false
+
+// Closes what is left of the open trade at the given price, books the result (TP1 partial included) and labels it
+f_closeTrade(Trade t, float exitPx, string tag) =>
+    float exitR = t.bank + t.rem * (exitPx - t.entry) * t.dir / t.risk
+    string res  = tag + " " + str.tostring(exitR, "+#.##;-#.##") + "R"
+    label.new(bar_index, exitPx, res, style=label.style_label_left, color=color.new(color.gray, 100), textcolor=exitR > 0 ? BULL_COLOR : BEAR_COLOR, size=size.small)
+    alert((t.dir == 1 ? "Long" : "Short") + " trade closed on " + syminfo.ticker + " " + timeframe.period + " | " + res + " @ " + f_levelText(exitPx), alert.freq_once_per_bar_close)
+    exitR
+
+if showTradesInput
+    if not na(trd)
+        trd.lnEntry.set_x2(bar_index)
+        trd.lnStop.set_x2(bar_index)
+        trd.lnTarget.set_x2(bar_index)
+        if not na(trd.lnTp1)
+            trd.lnTp1.set_x2(bar_index)
+
+    if barstate.isconfirmed
+        bool chochMode = tradeEntryInput == "CHoCH + block"
+        bool sigLong   = chochMode ? chochBuy : bullishSignal
+        bool sigShort  = chochMode ? chochSell : bearishSignal
+        float exitR    = na
+        string exitTag = ""
+
+        // Stop / TP1 / target / time exit, from the candle after the entry. The stop is checked first, with the
+        // level it had at the candle open, so a candle that reaches both counts as a stop.
+        if not na(trd) and bar_index > trd.entryBar
+            if trd.dir == 1 ? low <= trd.stop : high >= trd.stop
+                exitTag := trd.tp1Hit ? "BE" : "SL"
+                exitR   := f_closeTrade(trd, trd.stop, exitTag)
+                trd     := na
+            else
+                if not na(trd.tp1) and not trd.tp1Hit and (trd.dir == 1 ? high >= trd.tp1 : low <= trd.tp1)
+                    float part = tp1PctInput / 100.0
+                    trd.tp1Hit := true
+                    trd.bank   += part * (trd.tp1 - trd.entry) * trd.dir / trd.risk
+                    trd.rem    -= part
+                    tradeTp1   := true
+                    if beAfterTp1Input
+                        trd.stop := trd.entry
+                        trd.lnStop.set_y1(trd.entry)
+                        trd.lnStop.set_y2(trd.entry)
+                    label.new(bar_index, trd.tp1, "TP1", style=label.style_label_left, color=color.new(color.gray, 100), textcolor=BULL_COLOR, size=size.tiny)
+                    alert((trd.dir == 1 ? "Long" : "Short") + " trade TP1 on " + syminfo.ticker + " " + timeframe.period + " @ " + f_levelText(trd.tp1) + (part > 0 ? " | " + str.tostring(tp1PctInput) + "% closed" : "") + (beAfterTp1Input ? " | stop to break-even " + f_levelText(trd.entry) : ""), alert.freq_once_per_bar_close)
+                bool hitTarget = trd.dir == 1 ? high >= trd.target : low <= trd.target
+                bool timedOut  = maxTradeBarsInput > 0 and bar_index - trd.entryBar >= maxTradeBarsInput
+                if trd.rem <= 0
+                    exitTag := "TP1"
+                    exitR   := f_closeTrade(trd, trd.tp1, exitTag)
+                    trd     := na
+                else if hitTarget or timedOut
+                    exitTag := hitTarget ? "TP" : "Time"
+                    exitR   := f_closeTrade(trd, hitTarget ? trd.target : close, exitTag)
+                    trd     := na
+
+        // CHoCH mode: optionally a new CHoCH signal closes the open trade at its close
+        if chochMode and exitOnChochInput and not na(trd) and sigLong != sigShort
+            exitTag := "CHoCH"
+            exitR   := f_closeTrade(trd, close, exitTag)
+            trd     := na
+
+        if not na(exitR)
+            tradesN   += 1
+            tradesWon += exitR > 0 ? 1 : 0
+            tradesR   += exitR
+            exitsTp   += exitTag == "TP" or exitTag == "TP1" ? 1 : 0
+            exitsBe   += exitTag == "BE" ? 1 : 0
+            exitsSl   += exitTag == "SL" ? 1 : 0
+            tradeExit := true
+
+        // Entry at the signal close while flat, when the signal passes the high-probability filter
+        if na(trd) and sigLong != sigShort
+            int   dir  = sigLong ? 1 : -1
+            float stop = chochMode ? (dir == 1 ? chochBuyStop : chochSellStop) : (dir == 1 ? bullStop : bearStop)
+            float tp1  = dir == 1 ? bullTp1 : bearTp1
+            float disp = chochMode ? (dir == 1 ? chochBuyDisp : chochSellDisp) : (dir == 1 ? bullDisp : bearDisp)
+            float risk = (close - stop) * dir
+            bool  filterOk = (dir == 1 ? hpTrendLong : hpTrendShort) and (not hpDispInput or disp >= hpMinDispInput) and (not tradeSessionInput or sessionTime)
+            if risk > 0 and filterOk
+                float target = not chochMode and targetModeInput == "Leg extreme (TP1)" and not na(tp1) ? tp1 : close + dir * rrInput * risk
+                float tp1Px  = close + dir * tp1RInput * risk
+                bool  useTp1 = (target - tp1Px) * dir > 0 and (tp1PctInput > 0 or beAfterTp1Input)
+                color c = dir == 1 ? BULL_COLOR : BEAR_COLOR
+                trd := Trade.new(dir, close, stop, target, bar_index,
+                     line.new(bar_index, close, bar_index, close, color=color.gray),
+                     line.new(bar_index, stop, bar_index, stop, color=BEAR_COLOR),
+                     line.new(bar_index, target, bar_index, target, color=BULL_COLOR),
+                     risk, useTp1 ? tp1Px : na,
+                     useTp1 ? line.new(bar_index, tp1Px, bar_index, tp1Px, color=color.new(BULL_COLOR, 40), style=line.style_dashed) : na)
+                tradeLong  := dir == 1
+                tradeShort := dir == -1
+                buyCount   += dir == 1 ? 1 : 0
+                sellCount  += dir == -1 ? 1 : 0
+                label.new(bar_index, dir == 1 ? low : high, dir == 1 ? "BUY" : "SELL", yloc=dir == 1 ? yloc.belowbar : yloc.abovebar, style=dir == 1 ? label.style_label_up : label.style_label_down, color=c, textcolor=color.white, size=size.small,
+                     tooltip="Entry " + f_levelText(close) + "\nStop " + f_levelText(stop) + (useTp1 ? "\nTP1 " + f_levelText(tp1Px) : "") + "\nTarget " + f_levelText(target) + "\nLeg displacement " + str.tostring(disp, "#.#") + " ATR")
+                alert((dir == 1 ? "BUY " : "SELL ") + syminfo.ticker + " " + timeframe.period + (chochMode ? " (CHoCH + order block)" : " (order block rejection)") + " @ " + f_levelText(close) + " | Stop " + f_levelText(stop) + (useTp1 ? " | TP1 " + f_levelText(tp1Px) : "") + " | Target " + f_levelText(target)
+                     + " | Risk " + str.tostring(risk, "#.##") + " pts ($" + str.tostring(risk * syminfo.pointvalue, "#,##0.##") + " per contract)", alert.freq_once_per_bar_close)
+
+// Dashboard: signal counter and trade results
+if showTradesInput and showStatsInput and barstate.islast
+    var table stats = table.new(position.bottom_right, 3, 7, bgcolor=color.new(#161616, 0), frame_color=#2E2E2E, frame_width=1)
+    var bool statsMerged = false
+    if not statsMerged
+        stats.merge_cells(0, 0, 2, 0)
+        statsMerged := true
+    color hdr = #808080
+    color val = #DBDBDB
+    bool hpOn = hpTrendInput or hpDispInput
+    stats.cell(0, 0, "Signals · " + tradeEntryInput + (hpOn ? " · HP filter" : ""), text_color=val, text_size=size.small)
+    stats.cell(0, 1, "BUY", text_color=hdr, text_size=size.small)
+    stats.cell(1, 1, "SELL", text_color=hdr, text_size=size.small)
+    stats.cell(2, 1, "Total", text_color=hdr, text_size=size.small)
+    stats.cell(0, 2, str.tostring(buyCount), text_color=BULL_COLOR, text_size=size.small)
+    stats.cell(1, 2, str.tostring(sellCount), text_color=BEAR_COLOR, text_size=size.small)
+    stats.cell(2, 2, str.tostring(buyCount + sellCount), text_color=val, text_size=size.small)
+    stats.cell(0, 3, "Closed", text_color=hdr, text_size=size.small)
+    stats.cell(1, 3, "Win %", text_color=hdr, text_size=size.small)
+    stats.cell(2, 3, "Net R", text_color=hdr, text_size=size.small)
+    stats.cell(0, 4, str.tostring(tradesN) + (na(trd) ? "" : trd.dir == 1 ? " + LONG" : " + SHORT"), text_color=val, text_size=size.small)
+    stats.cell(1, 4, tradesN > 0 ? str.tostring(100.0 * tradesWon / tradesN, "#.#") + "%" : "—", text_color=val, text_size=size.small)
+    stats.cell(2, 4, str.tostring(tradesR, "+#.#;-#.#"), text_color=tradesR >= 0 ? BULL_COLOR : BEAR_COLOR, text_size=size.small)
+    stats.cell(0, 5, "TP", text_color=hdr, text_size=size.small)
+    stats.cell(1, 5, "BE", text_color=hdr, text_size=size.small)
+    stats.cell(2, 5, "SL", text_color=hdr, text_size=size.small)
+    stats.cell(0, 6, str.tostring(exitsTp), text_color=BULL_COLOR, text_size=size.small)
+    stats.cell(1, 6, str.tostring(exitsBe), text_color=val, text_size=size.small)
+    stats.cell(2, 6, str.tostring(exitsSl), text_color=BEAR_COLOR, text_size=size.small)
+
+// --- VWAP anchored to the selected session or period ---
+string vwapSession = switch vwapAnchorInput
+    "New York"              => "0930-1600"
+    "London"                => "0800-1630"
+    "Tokyo"                 => "0900-1530"
+    "Sydney"                => "1000-1600"
+    "CME Globex (18:00 NY)" => "1800-1700"
+    =>                         vwapCustomSession
+string vwapTz = switch vwapAnchorInput
+    "New York"              => "America/New_York"
+    "London"                => "Europe/London"
+    "Tokyo"                 => "Asia/Tokyo"
+    "Sydney"                => "Australia/Sydney"
+    "CME Globex (18:00 NY)" => "America/New_York"
+    =>                         vwapCustomTz
+bool  vwapPeriodAnchor = vwapAnchorInput == "Day" or vwapAnchorInput == "Week" or vwapAnchorInput == "Month"
+bool  vwapSessionTime  = not na(time(timeframe.period, vwapSession, vwapTz))
+bool  vwapInSession    = timeframe.isintraday and not vwapPeriodAnchor and vwapSessionTime
+
+// Session open as minutes of the day in the session timezone
+int vwapOpenMinute = int(str.tonumber(str.substring(vwapSession, 0, 2))) * 60 + int(str.tonumber(str.substring(vwapSession, 2, 4)))
+f_vwapLocalMinute(int t) =>
+    hour(t, vwapTz) * 60 + minute(t, vwapTz)
+
+// True when the session open falls between the previous bar's close and this bar's close. Needed besides the
+// session transition: symbols that trade the whole session window (CME futures on the Globex session, a 24h custom
+// session, stocks without extended hours) have no out-of-session bar before the open.
+int  vwapPrevClose   = time_close[1]
+bool vwapOpenCrossed = false
+if timeframe.isintraday and not vwapPeriodAnchor and not na(time_close) and not na(vwapPrevClose)
+    if time_close - vwapPrevClose >= 86400000
+        vwapOpenCrossed := true
+    else
+        int a = f_vwapLocalMinute(vwapPrevClose)
+        int b = f_vwapLocalMinute(time_close)
+        vwapOpenCrossed := a <= b ? vwapOpenMinute >= a and vwapOpenMinute < b : vwapOpenMinute >= a or vwapOpenMinute < b
+
+bool  vwapReset = switch
+    vwapAnchorInput == "Day"   => timeframe.change("D")
+    vwapAnchorInput == "Week"  => timeframe.change("W")
+    vwapAnchorInput == "Month" => timeframe.change("M")
+    timeframe.isintraday       => vwapInSession and (not vwapInSession[1] or vwapOpenCrossed)
+    =>                            timeframe.change("D")
+[vwapValue, vwapUpper1, vwapLower1] = ta.vwap(vwapSourceInput, vwapReset, 1.0)
+float vwapStdev = vwapUpper1 - vwapValue
+bool  vwapVisible = showVwapInput and (not vwapSessionOnly or not timeframe.isintraday or vwapPeriodAnchor or vwapInSession)
+
+// Band offset for a multiplier: standard deviations or a percentage of the VWAP
+f_vwapOffset(float mult) =>
+    vwapBandModeInput == "Percentage" ? vwapValue * mult / 100.0 : vwapStdev * mult
+
+f_vwapLevel(bool show, float level) =>
+    vwapVisible and show ? level : na
+
+float vwapOff1 = f_vwapOffset(vwapMult1Input)
+float vwapOff2 = f_vwapOffset(vwapMult2Input)
+float vwapOff3 = f_vwapOffset(vwapMult3Input)
+// Inner edge of bands 2 and 3: the next enabled band inward, or the VWAP, so their fill survives an inner band switched off
+float vwapIn2 = vwapBand1Input ? vwapOff1 : 0.0
+float vwapIn3 = vwapBand2Input ? vwapOff2 : vwapIn2
+
+// No connecting segment across a reset
+color vwapLineColor = vwapReset ? na : vwapColorInput
+pVwap = plot(vwapVisible ? vwapValue : na, "VWAP", color=vwapLineColor, linewidth=vwapWidthInput)
+pU1 = plot(f_vwapLevel(vwapBand1Input, vwapValue + vwapOff1), "VWAP upper 1", color=vwapReset ? na : vwapBand1Color, linewidth=vwapBandWidthInput)
+pL1 = plot(f_vwapLevel(vwapBand1Input, vwapValue - vwapOff1), "VWAP lower 1", color=vwapReset ? na : vwapBand1Color, linewidth=vwapBandWidthInput)
+pU2 = plot(f_vwapLevel(vwapBand2Input, vwapValue + vwapOff2), "VWAP upper 2", color=vwapReset ? na : vwapBand2Color, linewidth=vwapBandWidthInput)
+pL2 = plot(f_vwapLevel(vwapBand2Input, vwapValue - vwapOff2), "VWAP lower 2", color=vwapReset ? na : vwapBand2Color, linewidth=vwapBandWidthInput)
+pU3 = plot(f_vwapLevel(vwapBand3Input, vwapValue + vwapOff3), "VWAP upper 3", color=vwapReset ? na : vwapBand3Color, linewidth=vwapBandWidthInput)
+pL3 = plot(f_vwapLevel(vwapBand3Input, vwapValue - vwapOff3), "VWAP lower 3", color=vwapReset ? na : vwapBand3Color, linewidth=vwapBandWidthInput)
+pIn2U = plot(f_vwapLevel(vwapBand2Input, vwapValue + vwapIn2), "VWAP band 2 inner (upper)", display=display.none, editable=false)
+pIn2L = plot(f_vwapLevel(vwapBand2Input, vwapValue - vwapIn2), "VWAP band 2 inner (lower)", display=display.none, editable=false)
+pIn3U = plot(f_vwapLevel(vwapBand3Input, vwapValue + vwapIn3), "VWAP band 3 inner (upper)", display=display.none, editable=false)
+pIn3L = plot(f_vwapLevel(vwapBand3Input, vwapValue - vwapIn3), "VWAP band 3 inner (lower)", display=display.none, editable=false)
+fill(pU1, pL1, color=vwapFillInput and not vwapReset ? color.new(vwapBand1Color, vwapFillTranspInput) : na, title="VWAP band 1 fill")
+fill(pU2, pIn2U, color=vwapFillInput and not vwapReset ? color.new(vwapBand2Color, vwapFillTranspInput) : na, title="VWAP band 2 fill (upper)")
+fill(pIn2L, pL2, color=vwapFillInput and not vwapReset ? color.new(vwapBand2Color, vwapFillTranspInput) : na, title="VWAP band 2 fill (lower)")
+fill(pU3, pIn3U, color=vwapFillInput and not vwapReset ? color.new(vwapBand3Color, vwapFillTranspInput) : na, title="VWAP band 3 fill (upper)")
+fill(pIn3L, pL3, color=vwapFillInput and not vwapReset ? color.new(vwapBand3Color, vwapFillTranspInput) : na, title="VWAP band 3 fill (lower)")
+
 alertcondition(bullishSignal, title="Bullish order block rejection", message="Bullish order block rejection on {{ticker}} {{interval}}")
 alertcondition(bearishSignal, title="Bearish order block rejection", message="Bearish order block rejection on {{ticker}} {{interval}}")
+alertcondition(tradeLong, title="OB trade: BUY", message="Order block trade: BUY on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(tradeShort, title="OB trade: SELL", message="Order block trade: SELL on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(tradeTp1, title="OB trade: TP1", message="Order block trade reached TP1 on {{ticker}} {{interval}}")
+alertcondition(tradeExit, title="OB trade closed", message="Order block trade closed on {{ticker}} {{interval}}")
