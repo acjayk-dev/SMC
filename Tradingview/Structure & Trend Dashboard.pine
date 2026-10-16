@@ -23,6 +23,18 @@ type FVG
     float top
     float bot
 
+type Trade
+    int   dir           // 1 = long, -1 = short
+    int   state         // 1 = waiting for the retest, 2 = open
+    float entry
+    float stop
+    float target
+    int   armed_bar
+    int   entry_bar
+    line  ln_entry
+    line  ln_stop
+    line  ln_target
+
 //---------------------------------------------------------------------------------------------------------------------}
 // Inputs
 //---------------------------------------------------------------------------------------------------------------------{
@@ -36,6 +48,18 @@ grp_bias    = "HTF Bias"
 bias_tf1    = input.timeframe("60", "Bias Timeframes", group = grp_bias, inline = "bias")
 bias_tf2    = input.timeframe("240", "", group = grp_bias, inline = "bias", tooltip = "BOS/CHoCH in the direction of both bias timeframes are labeled larger and get their own alerts; breaks against both are faded. A bias timeframe not higher than the chart is ignored.")
 hide_counter= input.bool(false, "Hide Counter-Trend Break Labels", group = grp_bias, tooltip = "Hides the labels of breaks against both bias timeframes. Their lines, candle colors and BOS/CHoCH alerts are unchanged.")
+
+grp_trade   = "Entry Signals"
+show_trades = input.bool(true, "Show Entry Signals", group = grp_trade, tooltip = "A trade is set up after a BOS/CHoCH that passes the filter. One trade at a time: while one is open, new breaks are ignored; a newer break replaces a setup still waiting for its retest.")
+entry_filter= input.string("Not counter-trend", "Break Filter", options = ["HTF aligned", "Not counter-trend", "All breaks"], group = grp_trade, tooltip = "HTF aligned: both bias timeframes agree with the break. Not counter-trend: excludes breaks against both. Needs at least one bias timeframe higher than the chart, otherwise every break is 'mixed'.")
+entry_mode  = input.string("Retest", "Entry", options = ["Retest", "Break close"], group = grp_trade, tooltip = "Retest: limit order back at the broken level, valid for the bars below. Break close: market entry at the close of the break bar.")
+retest_bars = input.int(20, "Retest Window (bars)", minval = 1, group = grp_trade)
+trade_rr    = input.float(3.0, "Target (R)", minval = 0.5, step = 0.5, group = grp_trade)
+stop_buf    = input.float(0.0, "Stop Buffer (ATR)", minval = 0, step = 0.05, group = grp_trade, tooltip = "The stop goes beyond the last opposite swing of the structure timeframe, plus this buffer.")
+max_bars    = input.int(120, "Max Bars in Trade", minval = 0, group = grp_trade, tooltip = "Closes the trade at the bar close after this many bars. 0 = no time exit.")
+use_session = input.bool(false, "Set Up Trades Only In", group = grp_trade, inline = "ses")
+trade_sess  = input.session("0300-1800", "", group = grp_trade, inline = "ses")
+sess_tz     = input.string("America/New_York", "Session Timezone", group = grp_trade, tooltip = "Breaks outside the session do not arm new setups; setups and trades already running are managed normally. 0300-1800 New York skips the futures Asia session.")
 
 grp_liq     = "Liquidity Sweeps"
 show_liq    = input.bool(true, "Show Liquidity Sweeps", group = grp_liq)
@@ -90,6 +114,12 @@ var line liq_ph_line_glow = na
 var line liq_ph_line = na
 var line liq_pl_line_glow = na
 var line liq_pl_line = na
+
+// Entry signal variables
+var Trade trd = na
+var int   trades_n   = 0
+var int   trades_won = 0
+var float trades_r   = 0.0
 
 //---------------------------------------------------------------------------------------------------------------------}
 // Functions
@@ -188,6 +218,12 @@ f_bias_class(int dir) =>
     bool against_all = any_bias and (not use_bias_1 or bias_1 == -dir) and (not use_bias_2 or bias_2 == -dir)
     with_all ? 1 : against_all ? -1 : 0
 
+f_entry_ok(int bias) =>
+    switch entry_filter
+        "HTF aligned"       => bias == 1
+        "Not counter-trend" => bias != -1
+        => true
+
 f_break_label(int x, float y, bool is_bos, int bias, color col, string style) =>
     if not (hide_counter and bias == -1)
         label.new(x, y, is_bos ? "BOS" : "CHoCH", xloc.bar_time, textcolor = bias == -1 ? color.new(col, 65) : col, style = style, color = #00000000, size = bias == 1 ? size.small : size.tiny)
@@ -202,6 +238,10 @@ bool bear_bos   = false
 bool bear_choch = false
 bool bull_aligned = false
 bool bear_aligned = false
+int bull_bias     = 0
+int bear_bias     = 0
+float bull_level  = na
+float bear_level  = na
 bool sweep_high = false
 bool sweep_low  = false
 
@@ -228,14 +268,15 @@ if barstate.isconfirmed
         bool is_bos = chart_trend != -1
         bull_bos := is_bos
         bull_choch := not is_bos
-        int bias = f_bias_class(1)
-        bull_aligned := bias == 1
+        bull_bias := f_bias_class(1)
+        bull_aligned := bull_bias == 1
+        bull_level := active_ph
         chart_trend := 1
         if show_smc
             line.set_x2(ph_line, time)
             line.set_color(ph_line, BULL)
             line.set_style(ph_line, line.style_solid)
-            f_break_label(math.round(math.avg(line.get_x1(ph_line), time)), active_ph, is_bos, bias, BULL, label.style_label_down)
+            f_break_label(math.round(math.avg(line.get_x1(ph_line), time)), active_ph, is_bos, bull_bias, BULL, label.style_label_down)
 
         active_ph := na
         ph_line := na
@@ -244,14 +285,15 @@ if barstate.isconfirmed
         bool is_bos = chart_trend != 1
         bear_bos := is_bos
         bear_choch := not is_bos
-        int bias = f_bias_class(-1)
-        bear_aligned := bias == 1
+        bear_bias := f_bias_class(-1)
+        bear_aligned := bear_bias == 1
+        bear_level := active_pl
         chart_trend := -1
         if show_smc
             line.set_x2(pl_line, time)
             line.set_color(pl_line, BEAR)
             line.set_style(pl_line, line.style_solid)
-            f_break_label(math.round(math.avg(line.get_x1(pl_line), time)), active_pl, is_bos, bias, BEAR, label.style_label_up)
+            f_break_label(math.round(math.avg(line.get_x1(pl_line), time)), active_pl, is_bos, bear_bias, BEAR, label.style_label_up)
 
         active_pl := na
         pl_line := na
@@ -346,12 +388,96 @@ if show_fvg
         while array.size(fvg_arr) > fvg_limit
             array.shift(fvg_arr)
 
+// Entry Signals
+bool armed_long  = false
+bool armed_short = false
+bool entry_long  = false
+bool entry_short = false
+bool trade_exit  = false
+bool in_session  = not use_session or not na(time(timeframe.period, trade_sess, sess_tz))
+
+if show_trades
+    if not na(trd)
+        trd.ln_entry.set_x2(time)
+        trd.ln_stop.set_x2(time)
+        trd.ln_target.set_x2(time)
+
+    if barstate.isconfirmed
+        // 1. Open trade: exits are checked from the bar after the fill; the stop wins when both levels are hit
+        if not na(trd) and trd.state == 2 and bar_index > trd.entry_bar
+            bool hit_stop   = trd.dir == 1 ? low <= trd.stop : high >= trd.stop
+            bool hit_target = trd.dir == 1 ? high >= trd.target : low <= trd.target
+            bool timed_out  = max_bars > 0 and bar_index - trd.entry_bar >= max_bars
+            if hit_stop or hit_target or timed_out
+                float risk    = (trd.entry - trd.stop) * trd.dir
+                float exit_r  = hit_stop ? -1.0 : hit_target ? trade_rr : trd.dir * (close - trd.entry) / risk
+                float exit_px = hit_stop ? trd.stop : hit_target ? trd.target : close
+                trades_n   += 1
+                trades_won += exit_r > 0 ? 1 : 0
+                trades_r   += exit_r
+                trade_exit := true
+                string res = (hit_stop ? "SL " : hit_target ? "TP " : "Time ") + str.tostring(exit_r, "+#.##;-#.##") + "R"
+                label.new(time, exit_px, res, xloc.bar_time, textcolor = exit_r > 0 ? BULL : BEAR, style = label.style_label_left, color = #00000000, size = size.small)
+                alert(str.format("{0} {1}: {2} trade closed, {3} @ {4}", syminfo.ticker, timeframe.period, trd.dir == 1 ? "long" : "short", res, str.tostring(exit_px, format.mintick)), alert.freq_once_per_bar_close)
+                trd := na
+
+        // 2. Setup waiting for the retest of the broken level
+        if not na(trd) and trd.state == 1
+            bool expired = bar_index - trd.armed_bar > retest_bars
+            bool stopped = trd.dir == 1 ? low <= trd.stop : high >= trd.stop
+            bool touched = trd.dir == 1 ? low <= trd.entry : high >= trd.entry
+            if expired or stopped
+                trd.ln_entry.delete()
+                trd.ln_stop.delete()
+                trd.ln_target.delete()
+                trd := na
+            else if touched
+                trd.state     := 2
+                trd.entry_bar := bar_index
+                entry_long    := trd.dir == 1
+                entry_short   := trd.dir == -1
+
+        // 3. New break that passes the filters (ignored while a trade is open)
+        if in_session and (na(trd) or trd.state == 1)
+            int   dir   = not na(bear_level) and f_entry_ok(bear_bias) ? -1 : not na(bull_level) and f_entry_ok(bull_bias) ? 1 : 0
+            float level = dir == 1 ? bull_level : bear_level
+            float swing = dir == 1 ? h_pl : h_ph
+            float stop  = swing - dir * stop_buf * nz(atr)
+            float entry = entry_mode == "Retest" ? level : close
+            if dir != 0 and (entry - stop) * dir > 0
+                if not na(trd)
+                    trd.ln_entry.delete()
+                    trd.ln_stop.delete()
+                    trd.ln_target.delete()
+                int   state  = entry_mode == "Retest" ? 1 : 2
+                float target = entry + dir * trade_rr * (entry - stop) * dir
+                string st    = state == 1 ? line.style_dotted : line.style_solid
+                trd := Trade.new(dir, state, entry, stop, target, bar_index, state == 2 ? bar_index : na,
+                     line.new(time, entry, time, entry, xloc.bar_time, color = color.gray, style = st),
+                     line.new(time, stop, time, stop, xloc.bar_time, color = BEAR, style = st),
+                     line.new(time, target, time, target, xloc.bar_time, color = BULL, style = st))
+                if state == 1
+                    armed_long  := dir == 1
+                    armed_short := dir == -1
+                    alert(str.format("{0} {1}: {2} setup, limit {3} | SL {4} | TP {5} | valid {6} bars", syminfo.ticker, timeframe.period, dir == 1 ? "BUY" : "SELL", str.tostring(entry, format.mintick), str.tostring(stop, format.mintick), str.tostring(target, format.mintick), retest_bars), alert.freq_once_per_bar_close)
+                else
+                    entry_long  := dir == 1
+                    entry_short := dir == -1
+
+        // Fill: solid lines, entry label and alert
+        if (entry_long or entry_short) and not na(trd)
+            trd.ln_entry.set_style(line.style_solid)
+            trd.ln_stop.set_style(line.style_solid)
+            trd.ln_target.set_style(line.style_solid)
+            label.new(time, trd.entry, trd.dir == 1 ? "BUY" : "SELL", xloc.bar_time, color = trd.dir == 1 ? BULL : BEAR, textcolor = color.white, style = trd.dir == 1 ? label.style_label_up : label.style_label_down, size = size.small)
+            alert(str.format("{0} {1}: {2} @ {3} | SL {4} | TP {5} ({6}R)", syminfo.ticker, timeframe.period, trd.dir == 1 ? "BUY" : "SELL", str.tostring(trd.entry, format.mintick), str.tostring(trd.stop, format.mintick), str.tostring(trd.target, format.mintick), trade_rr), alert.freq_once_per_bar_close)
+
 barcolor(show_candles and chart_trend != 0 ? (chart_trend == 1 ? BULL : BEAR) : na)
 
 //---------------------------------------------------------------------------------------------------------------------}
 // Dashboard Render
 //---------------------------------------------------------------------------------------------------------------------{
-var table t_able = dashboardInput ? table.new(parsedDashboardPosition, 3, 11, bgcolor = BACKGROUND, border_width = 0, frame_color = BORDERS, frame_width = 1, force_overlay = false) : na
+var table t_able = dashboardInput ? table.new(parsedDashboardPosition, 3, 14, bgcolor = BACKGROUND, border_width = 0, frame_color = BORDERS, frame_width = 1, force_overlay = false) : na
 
 if dashboardInput and barstate.islast
     t_able.merge_cells(0, 0, 2, 0)
@@ -372,6 +498,15 @@ if dashboardInput and barstate.islast
     divider(t_able, 9, 2)
     trend_row(t_able, 10, 'M15', trend_M15, 'M1', trend_M1)
 
+    if show_trades
+        divider(t_able, 11, 2)
+        cell(t_able, 0, 12, 'Trades', text_col = HEADERS)
+        cell(t_able, 1, 12, 'Win %', text_col = HEADERS)
+        cell(t_able, 2, 12, 'Net R', text_col = HEADERS)
+        cell(t_able, 0, 13, str.tostring(trades_n), text_col = DATA)
+        cell(t_able, 1, 13, trades_n > 0 ? str.tostring(100.0 * trades_won / trades_n, '#.#') + '%' : '—', text_col = DATA)
+        cell(t_able, 2, 13, str.tostring(trades_r, '+#.#;-#.#'), text_col = trades_r >= 0 ? BULL : BEAR)
+
 //---------------------------------------------------------------------------------------------------------------------}
 // Alerts
 //---------------------------------------------------------------------------------------------------------------------{
@@ -381,6 +516,11 @@ alertcondition(bear_bos,   "Bearish BOS",   "Structure: bearish BOS on {{ticker}
 alertcondition(bear_choch, "Bearish CHoCH", "Structure: bearish CHoCH on {{ticker}} {{interval}} @ {{close}}")
 alertcondition(bull_aligned, "Bullish Break (HTF aligned)", "Structure: bullish BOS/CHoCH with the HTF bias on {{ticker}} {{interval}} @ {{close}}")
 alertcondition(bear_aligned, "Bearish Break (HTF aligned)", "Structure: bearish BOS/CHoCH with the HTF bias on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(armed_long,  "Long Setup (limit)",  "Entry: long setup armed, limit at the broken level on {{ticker}} {{interval}}")
+alertcondition(armed_short, "Short Setup (limit)", "Entry: short setup armed, limit at the broken level on {{ticker}} {{interval}}")
+alertcondition(entry_long,  "Long Entry",  "Entry: BUY filled on {{ticker}} {{interval}}")
+alertcondition(entry_short, "Short Entry", "Entry: SELL filled on {{ticker}} {{interval}}")
+alertcondition(trade_exit,  "Trade Closed", "Entry: trade closed on {{ticker}} {{interval}}")
 alertcondition(sweep_high, "Buy-side Sweep",  "Liquidity: buy-side sweep (high swept) on {{ticker}} {{interval}}")
 alertcondition(sweep_low,  "Sell-side Sweep", "Liquidity: sell-side sweep (low swept) on {{ticker}} {{interval}}")
 
