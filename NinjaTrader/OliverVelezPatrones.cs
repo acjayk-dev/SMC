@@ -51,9 +51,9 @@ public enum OvTipoMedia { SMA, EMA, WMA, HMA, SMMA, TMA, TEMA, DEMA, VWMA, ZLEMA
 // Order Block o Fair Value Gap de "Oliver Velez Patrones"
 public class OvSmcZona
 {
-	public int Idx, Creada, Fin = -1, Dir, Nivel;   // vela de origen, vela de creación, vela de cierre (-1 = activa), 1 / -1, 0 swing / 1 interna
+	public int Idx, Creada, Fin = -1, Dir, Nivel, Grado;   // vela de origen, vela de creación, vela de cierre (-1 = activa), 1 / -1, 0 swing / 1 interna, FVG: 1 B / 2 A
 	public double Alto, Bajo;
-	public bool Estrella, Mitigada, Invalida;
+	public bool Estrella, Mitigada, Invalida, Gap;   // Gap: FVG que cruza el cierre de sesión
 }
 
 // Línea de estructura (BOS / CHoCH) o de liquidez (EQH / EQL) de "Oliver Velez Patrones"
@@ -247,8 +247,14 @@ namespace NinjaTrader.NinjaScript.Indicators
 				ObBusqueda     = 5;
 				OpacidadOb     = 22;
 				VerFvg         = true;
-				FvgMinAtr      = 0.25;
-				OpacidadFvg    = 15;
+				FvgMinAtr      = 0.75;
+				FvgAAtr        = 1.5;
+				OpacidadFvg    = 12;
+				OpacidadFvgA   = 30;
+				FvgFusionar    = true;
+				FvgExpiraVelas = 90;
+				FvgExpiraSesion = true;
+				VerGapSesion   = true;
 				VerEq          = true;
 				EqTolAtr       = 0.1;
 				UbicSmc        = true;
@@ -258,7 +264,9 @@ namespace NinjaTrader.NinjaScript.Indicators
 				ColorObBaj     = MakeBrush(0xB2, 0x28, 0x33);   // granate
 				ColorFvgAlc    = MakeBrush(0x00, 0xC8, 0x53);   // verde
 				ColorFvgBaj    = MakeBrush(0xFF, 0x52, 0x52);   // rojo claro
-				ColorEq        = MakeBrush(0x9C, 0x27, 0xB0);   // púrpura
+				ColorGapAlc    = MakeBrush(0x00, 0xB0, 0xFF);   // celeste
+				ColorGapBaj    = MakeBrush(0xFF, 0x91, 0x00);   // naranja
+				ColorEq       = MakeBrush(0x9C, 0x27, 0xB0);   // púrpura
 				MonstruoCuerpoMin = 0.6;
 
 				AddPlot(new Stroke(MakeBrush(0xFF, 0xA7, 0x26), 2), PlotStyle.Line, "Media 1");
@@ -841,7 +849,10 @@ namespace NinjaTrader.NinjaScript.Indicators
 		//   o hasta ObBusqueda velas antes). Solo es válido si el tramo dejó al menos un FVG (desplazamiento). ★ = el origen barrió
 		//   la liquidez de un pivote interno anterior que no había sido tomado. Caja = rango completo; se mitiga al tocar su 50 %
 		//   (mean threshold) y se invalida si una vela cierra al otro lado.
-		// - FVG: hueco de 3 velas >= FvgMinAtr x ATR; la caja se recorta mientras se llena y desaparece al llenarse 100 %.
+		// - FVG: hueco de 3 velas >= FvgMinAtr x ATR (B) o >= FvgAAtr x ATR (A); GAP si cruza el cierre de sesión. Los apilados
+		//   (un FVG por vela, mismo lado) se fusionan. Se atenúa al tocar su 50 % (CE), se invalida si una vela cierra al otro lado
+		//   y expira tras FvgExpiraVelas o al cierre de sesión. ★ = después hubo una ruptura de estructura a su favor. En el
+		//   estudio de MNQ 2 min (un año), solo los FVG >= 1,5 ATR reaccionaron mejor que un nivel cualquiera.
 		// - EQH / EQL: dos pivotes internos a <= EqTolAtr x ATR sin que el primero se haya barrido; vigente hasta que se barre.
 		private void ActualizarSmc()
 		{
@@ -855,32 +866,48 @@ namespace NinjaTrader.NinjaScript.Indicators
 				if (z.Dir == 1 ? Close[0] < z.Bajo : Close[0] > z.Alto) { z.Invalida = true; z.Fin = CurrentBar; }
 				else if (z.Dir == 1 ? Low[0] <= mid : High[0] >= mid) { z.Mitigada = true; z.Fin = CurrentBar; }
 			}
+			if (FvgExpiraSesion && Bars.IsFirstBarOfSessionByIndex(CurrentBar))
+				foreach (OvSmcZona z in fvgs)
+					if (z.Fin < 0) z.Fin = CurrentBar - 1;
 			foreach (OvSmcZona z in fvgs)
 			{
 				if (z.Fin >= 0 || z.Creada >= CurrentBar)
 					continue;
-				if (z.Dir == 1)
-				{
-					if (Low[0] <= z.Bajo) { z.Invalida = true; z.Fin = CurrentBar; }
-					else if (Low[0] < z.Alto) z.Alto = Low[0];
-				}
+				double mid = (z.Alto + z.Bajo) / 2;
+				if (z.Dir == 1 ? Close[0] < z.Bajo : Close[0] > z.Alto) { z.Invalida = true; z.Fin = CurrentBar; }
 				else
 				{
-					if (High[0] >= z.Alto) { z.Invalida = true; z.Fin = CurrentBar; }
-					else if (High[0] > z.Bajo) z.Bajo = High[0];
+					if (z.Dir == 1 ? Low[0] <= mid : High[0] >= mid) z.Mitigada = true;
+					if (FvgExpiraVelas > 0 && CurrentBar - z.Creada >= FvgExpiraVelas) z.Fin = CurrentBar;
 				}
 			}
 			foreach (OvSmcLinea l in eqs)
 				if (l.Idx2 < 0 && (l.Dir == 1 ? High[0] > l.Precio : Low[0] < l.Precio))
 					l.Idx2 = CurrentBar;
 
-			// FVG nuevo (velas 2 y 0 sin solaparse)
+			// FVG nuevo (velas 2 y 0 sin solaparse); si el FVG anterior del mismo lado nació en la vela previa, se fusionan
 			if (CurrentBar >= 2 && a > 0)
 			{
-				if (Low[0] > High[2] && Low[0] - High[2] >= FvgMinAtr * a)
-					fvgs.Add(new OvSmcZona { Idx = CurrentBar - 2, Creada = CurrentBar, Dir = 1, Alto = Low[0], Bajo = High[2] });
-				else if (High[0] < Low[2] && Low[2] - High[0] >= FvgMinAtr * a)
-					fvgs.Add(new OvSmcZona { Idx = CurrentBar - 2, Creada = CurrentBar, Dir = -1, Alto = Low[2], Bajo = High[0] });
+				int d = Low[0] > High[2] && Low[0] - High[2] >= FvgMinAtr * a ? 1 : High[0] < Low[2] && Low[2] - High[0] >= FvgMinAtr * a ? -1 : 0;
+				if (d != 0)
+				{
+					double alto = d == 1 ? Low[0] : Low[2], bajo = d == 1 ? High[2] : High[0];
+					int grado = alto - bajo >= FvgAAtr * a ? 2 : 1;
+					bool gap = Bars.IsFirstBarOfSessionByIndex(CurrentBar) || Bars.IsFirstBarOfSessionByIndex(CurrentBar - 1);
+					OvSmcZona prev = null;
+					for (int i = fvgs.Count - 1; i >= 0; i--)
+						if (fvgs[i].Dir == d) { prev = fvgs[i]; break; }
+					if (FvgFusionar && prev != null && prev.Fin < 0 && !prev.Mitigada && prev.Creada == CurrentBar - 1)
+					{
+						prev.Alto   = Math.Max(prev.Alto, alto);
+						prev.Bajo   = Math.Min(prev.Bajo, bajo);
+						prev.Creada = CurrentBar;
+						prev.Grado  = Math.Max(prev.Grado, grado);   // por el hueco individual: la fusión no mejora la reacción
+						prev.Gap   |= gap;
+					}
+					else
+						fvgs.Add(new OvSmcZona { Idx = CurrentBar - 2, Creada = CurrentBar, Dir = d, Alto = alto, Bajo = bajo, Grado = grado, Gap = gap });
+				}
 			}
 
 			// Pivotes y rupturas por nivel
@@ -960,6 +987,8 @@ namespace NinjaTrader.NinjaScript.Indicators
 		private void Ruptura(int nv, int dir, bool choch, int pivIdx, double precio)
 		{
 			rupturas.Add(new OvSmcLinea { Idx1 = pivIdx, Idx2 = CurrentBar, Dir = dir, Nivel = nv, Precio = precio, Texto = choch ? "CHoCH" : "BOS" });
+			foreach (OvSmcZona z in fvgs)
+				if (z.Dir == dir && z.Fin < 0 && !z.Mitigada) z.Estrella = true;
 
 			// Origen del tramo: el extremo opuesto entre el pivote roto y la vela actual
 			int m = -1;
@@ -1248,7 +1277,8 @@ namespace NinjaTrader.NinjaScript.Indicators
 							Par("REG Compra de regalo", ColorRegaloAlc), Par("REG Venta de regalo", ColorRegaloBaj),
 							Par("BOS / CHoCH alcista (i = interno)", ColorEstAlc), Par("BOS / CHoCH bajista (i = interno)", ColorEstBaj),
 							Par("OB alcista (★ barrió liquidez)", ColorObAlc), Par("OB bajista (★ barrió liquidez)", ColorObBaj),
-							Par("FVG alcista", ColorFvgAlc), Par("FVG bajista", ColorFvgBaj), Par("EQH / EQL liquidez", ColorEq)
+							Par("FVG / FVG A alcista (★ ruptura)", ColorFvgAlc), Par("FVG / FVG A bajista (★ ruptura)", ColorFvgBaj),
+							Par("GAP de sesión alcista", ColorGapAlc), Par("GAP de sesión bajista", ColorGapBaj), Par("EQH / EQL liquidez", ColorEq)
 						};
 						// Esquina inferior izquierda, por encima del copyright, sobre el fondo del gráfico para que se lea siempre
 						float x0 = ChartPanel.X + 8, y0 = ChartPanel.Y + ChartPanel.H - 30 - ley.Length * lineH;
@@ -1283,21 +1313,30 @@ namespace NinjaTrader.NinjaScript.Indicators
 			using (SharpDX.Direct2D1.StrokeStyle punto = new SharpDX.Direct2D1.StrokeStyle(NinjaTrader.Core.Globals.D2DFactory, new SharpDX.Direct2D1.StrokeStyleProperties { DashStyle = SharpDX.Direct2D1.DashStyle.Dot }))
 			{
 				float alto = TamanoSigla + 3f;
-				// Fair Value Gaps activos
+				// Fair Value Gaps: B tenue, A y GAP resaltados con borde, línea punteada en el 50 % (CE); atenuados tras tocar el CE
 				if (VerFvg)
 					foreach (OvSmcZona z in fvgs)
 					{
 						if (z.Invalida || (z.Fin >= 0 ? z.Fin : CurrentBar) < desde || z.Idx > hasta)
 							continue;
+						bool gap = z.Gap && VerGapSesion, fuerte = gap || z.Grado == 2;
+						Brush c = gap ? (z.Dir == 1 ? ColorGapAlc : ColorGapBaj) : (z.Dir == 1 ? ColorFvgAlc : ColorFvgBaj);
 						float x0 = cc.GetXByBarIndex(ChartBars, z.Idx), x1 = z.Fin >= 0 ? cc.GetXByBarIndex(ChartBars, z.Fin) : xUlt;
-						float y0 = cs.GetYByValue(z.Alto), y1 = cs.GetYByValue(z.Bajo);
-						using (SharpDX.Direct2D1.Brush b = (z.Dir == 1 ? ColorFvgAlc : ColorFvgBaj).ToDxBrush(RenderTarget))
+						float y0 = cs.GetYByValue(z.Alto), y1 = cs.GetYByValue(z.Bajo), ym = cs.GetYByValue((z.Alto + z.Bajo) / 2);
+						float atenua = z.Mitigada ? 0.35f : 1f;
+						SharpDX.RectangleF r = new SharpDX.RectangleF(x0, y0, Math.Max(x1 - x0, 1f), Math.Max(y1 - y0, 1f));
+						using (SharpDX.Direct2D1.Brush b = c.ToDxBrush(RenderTarget))
 						{
-							b.Opacity = OpacidadFvg / 100f;
-							RenderTarget.FillRectangle(new SharpDX.RectangleF(x0, y0, Math.Max(x1 - x0, 1f), Math.Max(y1 - y0, 1f)), b);
+							b.Opacity = (fuerte ? OpacidadFvgA : OpacidadFvg) / 100f * atenua;
+							RenderTarget.FillRectangle(r, b);
+							b.Opacity = (fuerte ? 0.8f : 0.4f) * atenua;
+							if (fuerte)
+								RenderTarget.DrawRectangle(r, b, 1f);
+							RenderTarget.DrawLine(new SharpDX.Vector2(x0, ym), new SharpDX.Vector2(x1, ym), b, 1f, punto);
 						}
 						fmt.TextAlignment = SharpDX.DirectWrite.TextAlignment.Trailing;
-						Texto(Par("FVG", z.Dir == 1 ? ColorFvgAlc : ColorFvgBaj), x1 - 44, (y0 + y1) / 2 - alto / 2, 40, alto, fmt, dx);
+						string txt = (gap ? "GAP" : z.Grado == 2 ? "FVG A" : "FVG") + (z.Estrella ? "★" : "");
+						Texto(Par(txt, c), x1 - 64, (y0 + y1) / 2 - alto / 2, 60, alto, fmt, dx);
 					}
 
 				// Order Blocks
@@ -1485,42 +1524,69 @@ namespace NinjaTrader.NinjaScript.Indicators
 		public bool VerFvg { get; set; }
 
 		[Range(0.0, 5.0)]
-		[Display(Name = "FVG: tamaño mínimo (ATR 14)", Order = 11, GroupName = "8. CHoCH / OB / FVG")]
+		[Display(Name = "FVG: tamaño mínimo (ATR 14)", Description = "FVG de calidad B, dibujado tenue. Con 0,25 ATR el FVG de 2 min reaccionó igual que un nivel cualquiera.", Order = 11, GroupName = "8. CHoCH / OB / FVG")]
 		public double FvgMinAtr { get; set; }
 
+		[Range(0.0, 10.0)]
+		[Display(Name = "FVG A: tamaño mínimo (ATR 14)", Description = "FVG resaltado. En MNQ 2 min, los FVG >= 1,5 ATR fueron los únicos que reaccionaron mejor que un nivel cualquiera.", Order = 12, GroupName = "8. CHoCH / OB / FVG")]
+		public double FvgAAtr { get; set; }
+
 		[Range(0, 100)]
-		[Display(Name = "Opacidad de los FVG (%)", Order = 12, GroupName = "8. CHoCH / OB / FVG")]
+		[Display(Name = "Opacidad de los FVG (%)", Order = 13, GroupName = "8. CHoCH / OB / FVG")]
 		public int OpacidadFvg { get; set; }
 
-		[Display(Name = "Liquidez EQH / EQL", Description = "Máximos / mínimos internos iguales: stops acumulados, vigentes hasta que se barren.", Order = 13, GroupName = "8. CHoCH / OB / FVG")]
+		[Range(0, 100)]
+		[Display(Name = "Opacidad de los FVG A y GAP (%)", Order = 14, GroupName = "8. CHoCH / OB / FVG")]
+		public int OpacidadFvgA { get; set; }
+
+		[Display(Name = "FVG: fusionar apilados", Description = "FVG consecutivos del mismo lado (uno por vela) forman una sola caja.", Order = 15, GroupName = "8. CHoCH / OB / FVG")]
+		public bool FvgFusionar { get; set; }
+
+		[Range(0, 1000)]
+		[Display(Name = "FVG: expira tras N velas (0 = nunca)", Order = 16, GroupName = "8. CHoCH / OB / FVG")]
+		public int FvgExpiraVelas { get; set; }
+
+		[Display(Name = "FVG: expira al cierre de sesión", Order = 17, GroupName = "8. CHoCH / OB / FVG")]
+		public bool FvgExpiraSesion { get; set; }
+
+		[Display(Name = "GAP de sesión aparte", Description = "FVG formado por el cierre de sesión (17:00-18:00 NY): etiqueta GAP y color propio.", Order = 18, GroupName = "8. CHoCH / OB / FVG")]
+		public bool VerGapSesion { get; set; }
+
+		[Display(Name = "Liquidez EQH / EQL", Description = "Máximos / mínimos internos iguales: stops acumulados, vigentes hasta que se barren.", Order = 19, GroupName = "8. CHoCH / OB / FVG")]
 		public bool VerEq { get; set; }
 
 		[Range(0.0, 2.0)]
-		[Display(Name = "EQH / EQL: tolerancia (ATR 14)", Order = 14, GroupName = "8. CHoCH / OB / FVG")]
+		[Display(Name = "EQH / EQL: tolerancia (ATR 14)", Order = 20, GroupName = "8. CHoCH / OB / FVG")]
 		public double EqTolAtr { get; set; }
 
-		[Display(Name = "Ubicación: OB y FVG activos", Description = "Un OB o FVG activo del lado del trade cuenta como ítem de ubicación (sección 5) para las señales de reversa, el 180 y la calidad ★.", Order = 15, GroupName = "8. CHoCH / OB / FVG")]
+		[Display(Name = "Ubicación: OB y FVG activos", Description = "Un OB o FVG activo del lado del trade cuenta como ítem de ubicación (sección 5) para las señales de reversa, el 180 y la calidad ★.", Order = 21, GroupName = "8. CHoCH / OB / FVG")]
 		public bool UbicSmc { get; set; }
 
-		[XmlIgnore] [Display(Name = "Estructura alcista", Order = 16, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorEstAlc { get; set; }
+		[XmlIgnore] [Display(Name = "Estructura alcista", Order = 22, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorEstAlc { get; set; }
 		[Browsable(false)] public string ColorEstAlcS { get { return Serialize.BrushToString(ColorEstAlc); } set { ColorEstAlc = Serialize.StringToBrush(value); } }
 
-		[XmlIgnore] [Display(Name = "Estructura bajista", Order = 17, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorEstBaj { get; set; }
+		[XmlIgnore] [Display(Name = "Estructura bajista", Order = 23, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorEstBaj { get; set; }
 		[Browsable(false)] public string ColorEstBajS { get { return Serialize.BrushToString(ColorEstBaj); } set { ColorEstBaj = Serialize.StringToBrush(value); } }
 
-		[XmlIgnore] [Display(Name = "OB alcista", Order = 18, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorObAlc { get; set; }
+		[XmlIgnore] [Display(Name = "OB alcista", Order = 24, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorObAlc { get; set; }
 		[Browsable(false)] public string ColorObAlcS { get { return Serialize.BrushToString(ColorObAlc); } set { ColorObAlc = Serialize.StringToBrush(value); } }
 
-		[XmlIgnore] [Display(Name = "OB bajista", Order = 19, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorObBaj { get; set; }
+		[XmlIgnore] [Display(Name = "OB bajista", Order = 25, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorObBaj { get; set; }
 		[Browsable(false)] public string ColorObBajS { get { return Serialize.BrushToString(ColorObBaj); } set { ColorObBaj = Serialize.StringToBrush(value); } }
 
-		[XmlIgnore] [Display(Name = "FVG alcista", Order = 20, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorFvgAlc { get; set; }
+		[XmlIgnore] [Display(Name = "FVG alcista", Order = 26, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorFvgAlc { get; set; }
 		[Browsable(false)] public string ColorFvgAlcS { get { return Serialize.BrushToString(ColorFvgAlc); } set { ColorFvgAlc = Serialize.StringToBrush(value); } }
 
-		[XmlIgnore] [Display(Name = "FVG bajista", Order = 21, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorFvgBaj { get; set; }
+		[XmlIgnore] [Display(Name = "FVG bajista", Order = 27, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorFvgBaj { get; set; }
 		[Browsable(false)] public string ColorFvgBajS { get { return Serialize.BrushToString(ColorFvgBaj); } set { ColorFvgBaj = Serialize.StringToBrush(value); } }
 
-		[XmlIgnore] [Display(Name = "EQH / EQL", Order = 22, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorEq { get; set; }
+		[XmlIgnore] [Display(Name = "GAP de sesión alcista", Order = 28, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorGapAlc { get; set; }
+		[Browsable(false)] public string ColorGapAlcS { get { return Serialize.BrushToString(ColorGapAlc); } set { ColorGapAlc = Serialize.StringToBrush(value); } }
+
+		[XmlIgnore] [Display(Name = "GAP de sesión bajista", Order = 29, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorGapBaj { get; set; }
+		[Browsable(false)] public string ColorGapBajS { get { return Serialize.BrushToString(ColorGapBaj); } set { ColorGapBaj = Serialize.StringToBrush(value); } }
+
+		[XmlIgnore] [Display(Name = "EQH / EQL", Order = 30, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorEq { get; set; }
 		[Browsable(false)] public string ColorEqS { get { return Serialize.BrushToString(ColorEq); } set { ColorEq = Serialize.StringToBrush(value); } }
 
 		// --- 7. VWAP Order Flow (simulado) ---
