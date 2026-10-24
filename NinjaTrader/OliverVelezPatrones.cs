@@ -52,6 +52,7 @@ public enum OvTipoMedia { SMA, EMA, WMA, HMA, SMMA, TMA, TEMA, DEMA, VWMA, ZLEMA
 public class OvSmcZona
 {
 	public int Idx, Creada, Fin = -1, Dir, Nivel, Grado;   // vela de origen, vela de creación, vela de cierre (-1 = activa), 1 / -1, 0 swing / 1 interna, FVG: 1 B / 2 A
+	public int Nace;   // FVG: vela que creó el primer hueco (Creada avanza al fusionar apilados)
 	public double Alto, Bajo;
 	public bool Estrella, Mitigada, Invalida, Gap;   // Gap: FVG que cruza el cierre de sesión
 }
@@ -267,6 +268,13 @@ namespace NinjaTrader.NinjaScript.Indicators
 				ColorGapAlc    = MakeBrush(0x00, 0xB0, 0xFF);   // celeste
 				ColorGapBaj    = MakeBrush(0xFF, 0x91, 0x00);   // naranja
 				ColorEq       = MakeBrush(0x9C, 0x27, 0xB0);   // púrpura
+				VerFvgSenal    = true;
+				FvgSenalB = FvgSenalA = FvgSenalGap = true;
+				FvgSenalEstrella = false;
+				FvgStopTicks   = 2;
+				FvgStopVelas   = 20;
+				ColorFvgCompra = MakeBrush(0x00, 0xE6, 0x76);   // verde
+				ColorFvgVenta  = MakeBrush(0xFF, 0x17, 0x44);   // rojo
 				MonstruoCuerpoMin = 0.6;
 
 				AddPlot(new Stroke(MakeBrush(0xFF, 0xA7, 0x26), 2), PlotStyle.Line, "Media 1");
@@ -852,7 +860,8 @@ namespace NinjaTrader.NinjaScript.Indicators
 		// - FVG: hueco de 3 velas >= FvgMinAtr x ATR (B) o >= FvgAAtr x ATR (A); GAP si cruza el cierre de sesión. Los apilados
 		//   (un FVG por vela, mismo lado) se fusionan. Se atenúa al tocar su 50 % (CE), se invalida si una vela cierra al otro lado
 		//   y expira tras FvgExpiraVelas o al cierre de sesión. ★ = después hubo una ruptura de estructura a su favor. En el
-		//   estudio de MNQ 2 min (un año), solo los FVG >= 1,5 ATR reaccionaron mejor que un nivel cualquiera.
+		//   estudio de MNQ 2 min (un año), solo los FVG >= 1,5 ATR reaccionaron mejor que un nivel cualquiera. Opcional, por tipo
+		//   (B, A, GAP, solo con ★): flecha en la vela que crea el primer hueco y línea sólida del stop FvgStopTicks más allá del bloque durante FvgStopVelas.
 		// - EQH / EQL: dos pivotes internos a <= EqTolAtr x ATR sin que el primero se haya barrido; vigente hasta que se barre.
 		private void ActualizarSmc()
 		{
@@ -906,7 +915,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 						prev.Gap   |= gap;
 					}
 					else
-						fvgs.Add(new OvSmcZona { Idx = CurrentBar - 2, Creada = CurrentBar, Dir = d, Alto = alto, Bajo = bajo, Grado = grado, Gap = gap });
+						fvgs.Add(new OvSmcZona { Idx = CurrentBar - 2, Creada = CurrentBar, Nace = CurrentBar, Dir = d, Alto = alto, Bajo = bajo, Grado = grado, Gap = gap });
 				}
 			}
 
@@ -1203,12 +1212,21 @@ namespace NinjaTrader.NinjaScript.Indicators
 							}
 						}
 
+					// Flecha de cada FVG / GAP en la vela que creó su primer hueco: ▼ en uno rojo (venta), ▲ en uno verde (compra)
+					Dictionary<int, int> flechasFvg = new Dictionary<int, int>();
+					if (VerFvgSenal)
+						foreach (OvSmcZona z in fvgs)
+							if (SenalFvg(z))
+								flechasFvg[z.Nace] = z.Dir;
+
 					List<KeyValuePair<string, Brush>> abajo = new List<KeyValuePair<string, Brush>>(), arriba = new List<KeyValuePair<string, Brush>>();
 					for (int idx = Math.Max(ChartBars.FromIndex, 0); idx <= ChartBars.ToIndex && idx <= CurrentBar; idx++)
 					{
 						int f = VerSiglas ? patrones.GetValueAt(idx) : 0;
 						int st = setups.GetValueAt(idx);
-						if (f == 0 && st == 0)
+						int fv;
+						flechasFvg.TryGetValue(idx, out fv);
+						if (f == 0 && st == 0 && fv == 0)
 							continue;
 						abajo.Clear(); arriba.Clear();
 						if (f != 0)
@@ -1239,6 +1257,11 @@ namespace NinjaTrader.NinjaScript.Indicators
 								Texto(Par(sigla, c), x - w / 2, y0 - 2 * lineH, w, lineH, fmt, dx);
 							}
 						}
+						// Flecha del FVG más allá de las siglas y del setup del mismo lado
+						if (fv == 1)
+							Texto(Par("▲", ColorFvgCompra), x - w / 2, yLow + gap + (abajo.Count + (st > 0 ? 2 : 0)) * lineH, w, lineH, fmt, dx);
+						else if (fv == -1)
+							Texto(Par("▼", ColorFvgVenta), x - w / 2, yHigh - gap - (arriba.Count + (st < 0 ? 2 : 0) + 1) * lineH, w, lineH, fmt, dx);
 					}
 					// Etiquetas del VWAP y sus bandas a la derecha de la última vela visible con valor
 					if (VerVwap && VwapEtiquetas)
@@ -1339,6 +1362,19 @@ namespace NinjaTrader.NinjaScript.Indicators
 						Texto(Par(txt, c), x1 - 64, (y0 + y1) / 2 - alto / 2, 60, alto, fmt, dx);
 					}
 
+				// Stop de cada FVG / GAP (también de los invalidados): línea sólida FvgStopTicks más allá del bloque (encima de uno
+				// rojo, debajo de uno verde) durante FvgStopVelas velas desde la flecha; con la caja completa si se fusionó
+				if (VerFvgSenal)
+					foreach (OvSmcZona z in fvgs)
+					{
+						int fin = Math.Min(z.Nace + FvgStopVelas, CurrentBar);
+						if (fin < desde || z.Nace > hasta || !SenalFvg(z))
+							continue;
+						double stop = z.Dir == 1 ? z.Bajo - FvgStopTicks * TickSize : z.Alto + FvgStopTicks * TickSize;
+						float x0 = cc.GetXByBarIndex(ChartBars, z.Nace), x1 = cc.GetXByBarIndex(ChartBars, fin), y = cs.GetYByValue(stop);
+						RenderTarget.DrawLine(new SharpDX.Vector2(x0, y), new SharpDX.Vector2(Math.Max(x1, x0 + 1f), y), DxBrush(z.Dir == 1 ? ColorFvgCompra : ColorFvgVenta, dx), 2f);
+					}
+
 				// Order Blocks
 				foreach (OvSmcZona z in obs)
 				{
@@ -1390,6 +1426,13 @@ namespace NinjaTrader.NinjaScript.Indicators
 						Texto(Par(l.Texto, ColorEq), x0, l.Dir == 1 ? y - alto : y, 50, alto, fmt, dx);
 					}
 			}
+		}
+
+		// Tipos de FVG con flecha y stop: GAP (si se muestra aparte), FVG A o FVG B, y opcionalmente solo con ★
+		private bool SenalFvg(OvSmcZona z)
+		{
+			bool tipo = z.Gap && VerGapSesion ? FvgSenalGap : z.Grado == 2 ? FvgSenalA : FvgSenalB;
+			return tipo && (!FvgSenalEstrella || z.Estrella);
 		}
 
 		private SharpDX.Direct2D1.Brush DxBrush(Brush c, Dictionary<Brush, SharpDX.Direct2D1.Brush> dx)
@@ -1487,6 +1530,14 @@ namespace NinjaTrader.NinjaScript.Indicators
 		[Range(0.1, 1.0)]
 		[Display(Name = "BMG: cuerpo mínimo de la sesión anterior (fracción del rango)", Order = 13, GroupName = "2. Patrones")]
 		public double MonstruoCuerpoMin { get; set; }
+
+		// FVG y GAP calculados (activos y cerrados), para estrategias que operan las mismas zonas que se dibujan
+		[Browsable(false)]
+		[XmlIgnore]
+		public List<OvSmcZona> FvgZonas
+		{
+			get { Update(); return fvgs; }
+		}
 
 		// --- 8. Estructura institucional (SMC) ---
 		[Display(Name = "Estructura swing (BOS / CHoCH)", Description = "Líneas sólidas desde el pivote swing roto hasta la vela que cierra más allá.", Order = 1, GroupName = "8. CHoCH / OB / FVG")]
@@ -1588,6 +1639,35 @@ namespace NinjaTrader.NinjaScript.Indicators
 
 		[XmlIgnore] [Display(Name = "EQH / EQL", Order = 30, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorEq { get; set; }
 		[Browsable(false)] public string ColorEqS { get { return Serialize.BrushToString(ColorEq); } set { ColorEq = Serialize.StringToBrush(value); } }
+
+		[Display(Name = "FVG: flecha y stop", Description = "Flecha en la vela que crea cada FVG / GAP (▼ roja en uno bajista, ▲ verde en uno alcista) y línea sólida del stop más allá del bloque. Quedan aunque el bloque se invalide.", Order = 31, GroupName = "8. CHoCH / OB / FVG")]
+		public bool VerFvgSenal { get; set; }
+
+		[Display(Name = "FVG: flecha y stop en FVG B", Description = "FVG >= tamaño mínimo y menor que el de FVG A.", Order = 32, GroupName = "8. CHoCH / OB / FVG")]
+		public bool FvgSenalB { get; set; }
+
+		[Display(Name = "FVG: flecha y stop en FVG A", Description = "FVG >= tamaño mínimo de FVG A.", Order = 33, GroupName = "8. CHoCH / OB / FVG")]
+		public bool FvgSenalA { get; set; }
+
+		[Display(Name = "FVG: flecha y stop en GAP", Description = "FVG del cierre de sesión, si \"GAP de sesión aparte\" está activo; si no, cuenta como FVG A o B.", Order = 34, GroupName = "8. CHoCH / OB / FVG")]
+		public bool FvgSenalGap { get; set; }
+
+		[Display(Name = "FVG: flecha y stop solo con ★", Description = "Solo en los tipos marcados que tienen una ruptura de estructura a su favor; la flecha aparece cuando llega la ruptura.", Order = 35, GroupName = "8. CHoCH / OB / FVG")]
+		public bool FvgSenalEstrella { get; set; }
+
+		[Range(0, int.MaxValue)]
+		[Display(Name = "FVG: stop, ticks más allá del bloque", Description = "Encima de un bloque rojo, debajo de uno verde.", Order = 36, GroupName = "8. CHoCH / OB / FVG")]
+		public int FvgStopTicks { get; set; }
+
+		[Range(1, int.MaxValue)]
+		[Display(Name = "FVG: largo de la línea del stop (velas)", Order = 37, GroupName = "8. CHoCH / OB / FVG")]
+		public int FvgStopVelas { get; set; }
+
+		[XmlIgnore] [Display(Name = "FVG: flecha y stop de compra", Order = 38, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorFvgCompra { get; set; }
+		[Browsable(false)] public string ColorFvgCompraS { get { return Serialize.BrushToString(ColorFvgCompra); } set { ColorFvgCompra = Serialize.StringToBrush(value); } }
+
+		[XmlIgnore] [Display(Name = "FVG: flecha y stop de venta", Order = 39, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorFvgVenta { get; set; }
+		[Browsable(false)] public string ColorFvgVentaS { get { return Serialize.BrushToString(ColorFvgVenta); } set { ColorFvgVenta = Serialize.StringToBrush(value); } }
 
 		// --- 7. VWAP Order Flow (simulado) ---
 		[Display(Name = "Mostrar VWAP", Description = "VWAP y bandas σ ponderadas por volumen calculados con las velas del gráfico (motor AddOns\\VwapEngine.cs), sin licencia Order Flow+. Colores, grosor y estilo en los plots \"VWAP\" y \"VWAP ±1/±2/±3\".", Order = 1, GroupName = "7. VWAP")]
