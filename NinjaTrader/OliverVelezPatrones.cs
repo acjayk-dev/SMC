@@ -46,31 +46,14 @@ using NinjaTrader.NinjaScript.AddOns;
 
 public enum OvTipoMedia { SMA, EMA, WMA, HMA, SMMA, TMA, TEMA, DEMA, VWMA, ZLEMA, LinReg, KAMA, T3 }
 
-// Máximo o mínimo anterior (pivote) de "Oliver Velez Patrones"
 // Zona de Regalo de "Oliver Velez Patrones": rango de una Elephant hasta la entrada o la invalidación
-// Order Block o Fair Value Gap de "Oliver Velez Patrones"
-public class OvSmcZona
-{
-	public int Idx, Creada, Fin = -1, Dir, Nivel, Grado;   // vela de origen, vela de creación, vela de cierre (-1 = activa), 1 / -1, 0 swing / 1 interna, FVG: 1 B / 2 A
-	public int Nace;   // FVG: vela que creó el primer hueco (Creada avanza al fusionar apilados)
-	public double Alto, Bajo;
-	public bool Estrella, Mitigada, Invalida, Gap;   // Gap: FVG que cruza el cierre de sesión
-}
-
-// Línea de estructura (BOS / CHoCH) o de liquidez (EQH / EQL) de "Oliver Velez Patrones"
-public class OvSmcLinea
-{
-	public int Idx1, Idx2 = -1, Dir, Nivel;   // vela inicial, vela final (-1 = vigente)
-	public double Precio;
-	public string Texto;
-}
-
 public class OvZona
 {
 	public int Idx, Fin = -1, Dir;   // vela de la Elephant, vela de cierre de la zona (-1 = activa), 1 alcista / -1 bajista
 	public double Alto, Bajo;
 }
 
+// Máximo o mínimo anterior (pivote) de "Oliver Velez Patrones"
 public class OvPivote
 {
 	public int Idx, Fin = -1;   // vela del pivote y vela que lo rompe al cierre (-1 = vigente)
@@ -82,8 +65,8 @@ namespace NinjaTrader.NinjaScript.Indicators
 {
 	public class OliverVelezPatrones : Indicator
 	{
-		// Patrones por vela (bits)
-		private const int EbAlc = 1, EbBaj = 2, Toro180 = 4, Oso180 = 8, Bt = 16, Tt = 32, Gbr = 64, Rbr = 128,
+		// Patrones por vela (bits); públicos para las estrategias que leen PatronesVela
+		public const int EbAlc = 1, EbBaj = 2, Toro180 = 4, Oso180 = 8, Bt = 16, Tt = 32, Gbr = 64, Rbr = 128,
 			Rbi = 256, Gbi = 512, NrbPiso = 1024, NrbTecho = 2048, NbPiso = 4096, NbTecho = 8192,
 			BmgToro = 16384, BmgOso = 32768;
 
@@ -111,13 +94,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 		private VwapEngine vwapEng;
 		private DateTime vwapPrevEt;
 		private bool vwapCongelado, vwapBandasVistas;
-		// Estructura SMC: nivel 0 swing, 1 interna
-		private readonly double[] estAlto = new double[2], estBajo = new double[2];
-		private readonly int[] estAltoIdx = new int[2], estBajoIdx = new int[2], estTend = new int[2];
-		private readonly bool[] estAltoRoto = new bool[2], estBajoRoto = new bool[2];
-		private readonly List<OvSmcZona> obs = new List<OvSmcZona>(), fvgs = new List<OvSmcZona>();
-		private readonly List<OvSmcLinea> rupturas = new List<OvSmcLinea>(), eqs = new List<OvSmcLinea>();
-		private readonly List<OvPivote> pivInternos = new List<OvPivote>();
 
 		protected override void OnStateChange()
 		{
@@ -208,6 +184,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 				ColorBmgToro  = MakeBrush(0x00, 0x91, 0xEA);   // azul brillante
 				ColorBmgOso   = MakeBrush(0xC5, 0x11, 0x62);   // magenta oscuro
 				VerMonstruo       = true;
+				MonstruoCuerpoMin = 0.6;
 				VerVbs            = true;
 				VelasSetup        = 3;
 				VerRegalo         = true;
@@ -240,43 +217,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 				EscalaSoloVelas    = true;
 				UbicVwap           = true;
 
-				// 8. CHoCH / OB / FVG
-				VerEstSwing = VerEstInterna = true;
-				SwingLen       = 10;
-				InternaLen     = 3;
-				VerObSwing = VerObInterno = VerObMitigados = true;
-				ObBusqueda     = 5;
-				OpacidadOb     = 22;
-				VerFvg         = true;
-				FvgMinAtr      = 0.75;
-				FvgAAtr        = 1.5;
-				OpacidadFvg    = 12;
-				OpacidadFvgA   = 30;
-				FvgFusionar    = true;
-				FvgExpiraVelas = 90;
-				FvgExpiraSesion = true;
-				VerGapSesion   = true;
-				VerEq          = true;
-				EqTolAtr       = 0.1;
-				UbicSmc        = true;
-				ColorEstAlc    = MakeBrush(0x08, 0x99, 0x81);   // verde azulado
-				ColorEstBaj    = MakeBrush(0xF2, 0x36, 0x45);   // rojo
-				ColorObAlc     = MakeBrush(0x18, 0x48, 0xCC);   // azul
-				ColorObBaj     = MakeBrush(0xB2, 0x28, 0x33);   // granate
-				ColorFvgAlc    = MakeBrush(0x00, 0xC8, 0x53);   // verde
-				ColorFvgBaj    = MakeBrush(0xFF, 0x52, 0x52);   // rojo claro
-				ColorGapAlc    = MakeBrush(0x00, 0xB0, 0xFF);   // celeste
-				ColorGapBaj    = MakeBrush(0xFF, 0x91, 0x00);   // naranja
-				ColorEq       = MakeBrush(0x9C, 0x27, 0xB0);   // púrpura
-				VerFvgSenal    = true;
-				FvgSenalB = FvgSenalA = FvgSenalGap = true;
-				FvgSenalEstrella = false;
-				FvgStopTicks   = 2;
-				FvgStopVelas   = 20;
-				ColorFvgCompra = MakeBrush(0x00, 0xE6, 0x76);   // verde
-				ColorFvgVenta  = MakeBrush(0xFF, 0x17, 0x44);   // rojo
-				MonstruoCuerpoMin = 0.6;
-
 				AddPlot(new Stroke(MakeBrush(0xFF, 0xA7, 0x26), 2), PlotStyle.Line, "Media 1");
 				AddPlot(new Stroke(MakeBrush(0x29, 0x79, 0xFF), 2), PlotStyle.Line, "Media 2");
 				AddPlot(new Stroke(MakeBrush(0xC6, 0x28, 0x28), 3), PlotStyle.Line, "Media 3");
@@ -300,14 +240,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 				vwapEng = new VwapEngine();
 				vwapPrevEt = DateTime.MinValue;
 				vwapCongelado = vwapBandasVistas = false;
-				for (int nv = 0; nv < 2; nv++)
-				{
-					estAlto[nv] = estBajo[nv] = double.NaN;
-					estAltoIdx[nv] = estBajoIdx[nv] = -1;
-					estTend[nv] = 0;
-					estAltoRoto[nv] = estBajoRoto[nv] = true;
-				}
-				obs.Clear(); fvgs.Clear(); rupturas.Clear(); eqs.Clear(); pivInternos.Clear();
 				pivotes.Clear();
 				etPrev = DateTime.MinValue;
 				pdc = double.NaN;
@@ -368,7 +300,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 
 			ActualizarVwap();
 			ActualizarUbicaciones();
-			ActualizarSmc();
 
 			// --- Patrones, al cierre de la vela ---
 			patrones[0] = 0;
@@ -727,14 +658,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 				for (int p = 3; p <= 9; p++)
 					if (LineaVisible(p) && Values[p].IsValidDataPoint(0) && Cerca(Values[p][0], dir, d))
 						return true;
-			// Order Blocks y FVG activos del lado del trade (OB alcista / FVG alcista para señales de piso)
-			if (UbicSmc)
-			{
-				foreach (OvSmcZona z in obs)
-					if (z.Dir == dir && z.Fin < 0 && z.Creada < CurrentBar && EnZona(z, dir, d)) return true;
-				foreach (OvSmcZona z in fvgs)
-					if (z.Dir == dir && z.Fin < 0 && z.Creada < CurrentBar && EnZona(z, dir, d)) return true;
-			}
 			// Extensión: muy lejos de la 20mm
 			if (UbicExtension && Values[1].IsValidDataPoint(0) && (dir == 1 ? Values[1][0] - ubicExt : ubicExt - Values[1][0]) >= ExtensionAtr * atr[0])
 				return true;
@@ -841,221 +764,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 				return;
 			BarBrushes[barsAgo]           = b;
 			CandleOutlineBrushes[barsAgo] = b;
-		}
-
-		// La vela (o su extremo de señal) entra en la zona y no cierra del lado contrario
-		private bool EnZona(OvSmcZona z, int dir, double d)
-		{
-			return dir == 1 ? ubicExt <= z.Alto + d && Close[0] >= z.Bajo - d : ubicExt >= z.Bajo - d && Close[0] <= z.Alto + d;
-		}
-
-		// ===== Estructura institucional (SMC / ICT) =====
-		// - Pivotes: swing (SwingLen velas a cada lado) e interno (InternaLen); se confirman SwingLen / InternaLen velas después.
-		// - Ruptura: una vela CIERRA más allá del último pivote no roto (una mecha sola es barrido de liquidez). Es CHoCH si va
-		//   contra la tendencia de ese nivel (cambio de carácter) y BOS si va a favor (continuación).
-		// - Order Block: la última vela contraria en el origen del tramo que rompió (el mínimo del tramo para una ruptura alcista,
-		//   o hasta ObBusqueda velas antes). Solo es válido si el tramo dejó al menos un FVG (desplazamiento). ★ = el origen barrió
-		//   la liquidez de un pivote interno anterior que no había sido tomado. Caja = rango completo; se mitiga al tocar su 50 %
-		//   (mean threshold) y se invalida si una vela cierra al otro lado.
-		// - FVG: hueco de 3 velas >= FvgMinAtr x ATR (B) o >= FvgAAtr x ATR (A); GAP si cruza el cierre de sesión. Los apilados
-		//   (un FVG por vela, mismo lado) se fusionan. Se atenúa al tocar su 50 % (CE), se invalida si una vela cierra al otro lado
-		//   y expira tras FvgExpiraVelas o al cierre de sesión. ★ = después hubo una ruptura de estructura a su favor. En el
-		//   estudio de MNQ 2 min (un año), solo los FVG >= 1,5 ATR reaccionaron mejor que un nivel cualquiera. Opcional, por tipo
-		//   (B, A, GAP, solo con ★): flecha en la vela que crea el primer hueco y línea sólida del stop FvgStopTicks más allá del bloque durante FvgStopVelas.
-		// - EQH / EQL: dos pivotes internos a <= EqTolAtr x ATR sin que el primero se haya barrido; vigente hasta que se barre.
-		private void ActualizarSmc()
-		{
-			double a = atr[0];
-			// Zonas existentes: mitigación, invalidación y llenado (desde la vela siguiente a su creación)
-			foreach (OvSmcZona z in obs)
-			{
-				if (z.Fin >= 0 || z.Creada >= CurrentBar)
-					continue;
-				double mid = (z.Alto + z.Bajo) / 2;
-				if (z.Dir == 1 ? Close[0] < z.Bajo : Close[0] > z.Alto) { z.Invalida = true; z.Fin = CurrentBar; }
-				else if (z.Dir == 1 ? Low[0] <= mid : High[0] >= mid) { z.Mitigada = true; z.Fin = CurrentBar; }
-			}
-			if (FvgExpiraSesion && Bars.IsFirstBarOfSessionByIndex(CurrentBar))
-				foreach (OvSmcZona z in fvgs)
-					if (z.Fin < 0) z.Fin = CurrentBar - 1;
-			foreach (OvSmcZona z in fvgs)
-			{
-				if (z.Fin >= 0 || z.Creada >= CurrentBar)
-					continue;
-				double mid = (z.Alto + z.Bajo) / 2;
-				if (z.Dir == 1 ? Close[0] < z.Bajo : Close[0] > z.Alto) { z.Invalida = true; z.Fin = CurrentBar; }
-				else
-				{
-					if (z.Dir == 1 ? Low[0] <= mid : High[0] >= mid) z.Mitigada = true;
-					if (FvgExpiraVelas > 0 && CurrentBar - z.Creada >= FvgExpiraVelas) z.Fin = CurrentBar;
-				}
-			}
-			foreach (OvSmcLinea l in eqs)
-				if (l.Idx2 < 0 && (l.Dir == 1 ? High[0] > l.Precio : Low[0] < l.Precio))
-					l.Idx2 = CurrentBar;
-
-			// FVG nuevo (velas 2 y 0 sin solaparse); si el FVG anterior del mismo lado nació en la vela previa, se fusionan
-			if (CurrentBar >= 2 && a > 0)
-			{
-				int d = Low[0] > High[2] && Low[0] - High[2] >= FvgMinAtr * a ? 1 : High[0] < Low[2] && Low[2] - High[0] >= FvgMinAtr * a ? -1 : 0;
-				if (d != 0)
-				{
-					double alto = d == 1 ? Low[0] : Low[2], bajo = d == 1 ? High[2] : High[0];
-					int grado = alto - bajo >= FvgAAtr * a ? 2 : 1;
-					bool gap = Bars.IsFirstBarOfSessionByIndex(CurrentBar) || Bars.IsFirstBarOfSessionByIndex(CurrentBar - 1);
-					OvSmcZona prev = null;
-					for (int i = fvgs.Count - 1; i >= 0; i--)
-						if (fvgs[i].Dir == d) { prev = fvgs[i]; break; }
-					if (FvgFusionar && prev != null && prev.Fin < 0 && !prev.Mitigada && prev.Creada == CurrentBar - 1)
-					{
-						prev.Alto   = Math.Max(prev.Alto, alto);
-						prev.Bajo   = Math.Min(prev.Bajo, bajo);
-						prev.Creada = CurrentBar;
-						prev.Grado  = Math.Max(prev.Grado, grado);   // por el hueco individual: la fusión no mejora la reacción
-						prev.Gap   |= gap;
-					}
-					else
-						fvgs.Add(new OvSmcZona { Idx = CurrentBar - 2, Creada = CurrentBar, Nace = CurrentBar, Dir = d, Alto = alto, Bajo = bajo, Grado = grado, Gap = gap });
-				}
-			}
-
-			// Pivotes y rupturas por nivel
-			for (int nv = 0; nv < 2; nv++)
-			{
-				int len = nv == 0 ? SwingLen : InternaLen;
-				if (CurrentBar < 2 * len)
-					continue;
-				bool ph = true, pl = true;
-				for (int i = 0; i <= 2 * len; i++)
-				{
-					if (i == len) continue;
-					if (i < len ? High[i] >= High[len] : High[i] > High[len]) ph = false;
-					if (i < len ? Low[i] <= Low[len] : Low[i] < Low[len]) pl = false;
-				}
-				if (ph)
-				{
-					if (nv == 1) NuevoPivoteInterno(true, CurrentBar - len, High[len], a);
-					estAlto[nv] = High[len]; estAltoIdx[nv] = CurrentBar - len; estAltoRoto[nv] = false;
-				}
-				if (pl)
-				{
-					if (nv == 1) NuevoPivoteInterno(false, CurrentBar - len, Low[len], a);
-					estBajo[nv] = Low[len]; estBajoIdx[nv] = CurrentBar - len; estBajoRoto[nv] = false;
-				}
-				if (!estAltoRoto[nv] && Close[0] > estAlto[nv])
-				{
-					estAltoRoto[nv] = true;
-					bool choch = estTend[nv] == -1;
-					estTend[nv] = 1;
-					Ruptura(nv, 1, choch, estAltoIdx[nv], estAlto[nv]);
-				}
-				if (!estBajoRoto[nv] && Close[0] < estBajo[nv])
-				{
-					estBajoRoto[nv] = true;
-					bool choch = estTend[nv] == 1;
-					estTend[nv] = -1;
-					Ruptura(nv, -1, choch, estBajoIdx[nv], estBajo[nv]);
-				}
-			}
-
-			// Límite de memoria: se descartan los más viejos ya cerrados
-			Recortar(obs, 400); Recortar(fvgs, 400);
-			if (rupturas.Count > 600) rupturas.RemoveAt(0);
-			if (eqs.Count > 300) eqs.RemoveAt(0);
-		}
-
-		private static void Recortar(List<OvSmcZona> l, int max)
-		{
-			for (int i = 0; i < l.Count && l.Count > max; i++)
-				if (l[i].Fin >= 0) { l.RemoveAt(i); i--; }
-		}
-
-		private void NuevoPivoteInterno(bool alto, int idx, double precio, double a)
-		{
-			// EQH / EQL con el pivote interno anterior del mismo tipo, si no fue barrido entre ambos
-			for (int i = pivInternos.Count - 1; i >= 0; i--)
-			{
-				OvPivote prev = pivInternos[i];
-				if (prev.Alto != alto)
-					continue;
-				bool barrido = false;
-				for (int k = prev.Idx + 1; k < idx && !barrido; k++)
-				{
-					int ba = CurrentBar - k;
-					if (alto ? High[ba] > prev.Precio : Low[ba] < prev.Precio) barrido = true;
-				}
-				if (!barrido && Math.Abs(precio - prev.Precio) <= EqTolAtr * a)
-					eqs.Add(new OvSmcLinea { Idx1 = prev.Idx, Dir = alto ? 1 : -1, Precio = alto ? Math.Max(precio, prev.Precio) : Math.Min(precio, prev.Precio), Texto = alto ? "EQH" : "EQL" });
-				break;
-			}
-			pivInternos.Add(new OvPivote { Idx = idx, Precio = precio, Alto = alto });
-			if (pivInternos.Count > 400)
-				pivInternos.RemoveAt(0);
-		}
-
-		private void Ruptura(int nv, int dir, bool choch, int pivIdx, double precio)
-		{
-			rupturas.Add(new OvSmcLinea { Idx1 = pivIdx, Idx2 = CurrentBar, Dir = dir, Nivel = nv, Precio = precio, Texto = choch ? "CHoCH" : "BOS" });
-			foreach (OvSmcZona z in fvgs)
-				if (z.Dir == dir && z.Fin < 0 && !z.Mitigada) z.Estrella = true;
-
-			// Origen del tramo: el extremo opuesto entre el pivote roto y la vela actual
-			int m = -1;
-			double ext = dir == 1 ? double.MaxValue : double.MinValue;
-			for (int k = Math.Max(pivIdx, CurrentBar - 300); k <= CurrentBar; k++)
-			{
-				double v = dir == 1 ? Low[CurrentBar - k] : High[CurrentBar - k];
-				if (dir == 1 ? v < ext : v > ext) { ext = v; m = k; }
-			}
-			if (m < 0)
-				return;
-			// Order Block: la última vela contraria en el origen (o hasta ObBusqueda velas antes)
-			int ob = -1;
-			for (int k = m; k >= Math.Max(m - ObBusqueda, 0); k--)
-			{
-				int ba = CurrentBar - k;
-				if ((Close[ba] - Open[ba]) * dir < 0) { ob = k; break; }
-			}
-			if (ob < 0)
-				ob = m;
-			// Desplazamiento: el tramo desde el OB dejó al menos un FVG en la dirección de la ruptura
-			bool fvg = false;
-			for (int k = ob; k + 2 <= CurrentBar && !fvg; k++)
-			{
-				int b0 = CurrentBar - k, b2 = CurrentBar - k - 2;
-				if (dir == 1 ? Low[b2] > High[b0] : High[b2] < Low[b0]) fvg = true;
-			}
-			if (!fvg)
-				return;
-			// ★ Barrido de liquidez: el origen tomó un pivote interno anterior que no había sido tomado
-			bool barrido = false;
-			for (int i = pivInternos.Count - 1; i >= 0; i--)
-			{
-				OvPivote pv = pivInternos[i];
-				if (pv.Idx >= m - 1 || pv.Alto == (dir == 1))
-					continue;
-				if (pv.Idx < m - 80)
-					break;
-				if (dir == 1 ? ext < pv.Precio : ext > pv.Precio)
-				{
-					bool tomado = false;
-					for (int k = pv.Idx + 1; k < m && !tomado; k++)
-					{
-						int ba = CurrentBar - k;
-						if (dir == 1 ? Low[ba] < pv.Precio : High[ba] > pv.Precio) tomado = true;
-					}
-					if (!tomado) { barrido = true; break; }
-				}
-			}
-			int bo = CurrentBar - ob;
-			foreach (OvSmcZona z in obs)
-				if (z.Idx == ob && z.Dir == dir)
-				{
-					if (nv < z.Nivel) z.Nivel = nv;   // el mismo OB por ruptura swing e interna: queda como swing
-					z.Estrella |= barrido;
-					return;
-				}
-			obs.Add(new OvSmcZona { Idx = ob, Creada = CurrentBar, Dir = dir, Nivel = nv, Alto = High[bo], Bajo = Low[bo], Estrella = barrido });
 		}
 
 		private Brush ColorPrincipal(int f)
@@ -1194,8 +902,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 						}
 					}
 
-					RenderSmc(chartControl, chartScale, dx);
-
 					// Zonas de Regalo: el rango de la Elephant desde su vela hasta la entrada, la invalidación o la vela actual
 					if (VerRegalo)
 						foreach (OvZona z in zonas)
@@ -1212,21 +918,12 @@ namespace NinjaTrader.NinjaScript.Indicators
 							}
 						}
 
-					// Flecha de cada FVG / GAP en la vela que creó su primer hueco: ▼ en uno rojo (venta), ▲ en uno verde (compra)
-					Dictionary<int, int> flechasFvg = new Dictionary<int, int>();
-					if (VerFvgSenal)
-						foreach (OvSmcZona z in fvgs)
-							if (SenalFvg(z))
-								flechasFvg[z.Nace] = z.Dir;
-
 					List<KeyValuePair<string, Brush>> abajo = new List<KeyValuePair<string, Brush>>(), arriba = new List<KeyValuePair<string, Brush>>();
 					for (int idx = Math.Max(ChartBars.FromIndex, 0); idx <= ChartBars.ToIndex && idx <= CurrentBar; idx++)
 					{
 						int f = VerSiglas ? patrones.GetValueAt(idx) : 0;
 						int st = setups.GetValueAt(idx);
-						int fv;
-						flechasFvg.TryGetValue(idx, out fv);
-						if (f == 0 && st == 0 && fv == 0)
+						if (f == 0 && st == 0)
 							continue;
 						abajo.Clear(); arriba.Clear();
 						if (f != 0)
@@ -1257,11 +954,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 								Texto(Par(sigla, c), x - w / 2, y0 - 2 * lineH, w, lineH, fmt, dx);
 							}
 						}
-						// Flecha del FVG más allá de las siglas y del setup del mismo lado
-						if (fv == 1)
-							Texto(Par("▲", ColorFvgCompra), x - w / 2, yLow + gap + (abajo.Count + (st > 0 ? 2 : 0)) * lineH, w, lineH, fmt, dx);
-						else if (fv == -1)
-							Texto(Par("▼", ColorFvgVenta), x - w / 2, yHigh - gap - (arriba.Count + (st < 0 ? 2 : 0) + 1) * lineH, w, lineH, fmt, dx);
 					}
 					// Etiquetas del VWAP y sus bandas a la derecha de la última vela visible con valor
 					if (VerVwap && VwapEtiquetas)
@@ -1297,11 +989,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 							Par("NRB Rango estrecho piso", ColorNrbPiso), Par("NRB Rango estrecho techo", ColorNrbTecho),
 							Par("NB Cuerpo estrecho piso", ColorNbPiso), Par("NB Cuerpo estrecho techo", ColorNbTecho),
 							Par("▲VBS Setup 1 de compra (★ calidad)", ColorVbs), Par("▼VSS Setup 1 de venta (★ calidad)", ColorVss),
-							Par("REG Compra de regalo", ColorRegaloAlc), Par("REG Venta de regalo", ColorRegaloBaj),
-							Par("BOS / CHoCH alcista (i = interno)", ColorEstAlc), Par("BOS / CHoCH bajista (i = interno)", ColorEstBaj),
-							Par("OB alcista (★ barrió liquidez)", ColorObAlc), Par("OB bajista (★ barrió liquidez)", ColorObBaj),
-							Par("FVG / FVG A alcista (★ ruptura)", ColorFvgAlc), Par("FVG / FVG A bajista (★ ruptura)", ColorFvgBaj),
-							Par("GAP de sesión alcista", ColorGapAlc), Par("GAP de sesión bajista", ColorGapBaj), Par("EQH / EQL liquidez", ColorEq)
+							Par("REG Compra de regalo", ColorRegaloAlc), Par("REG Venta de regalo", ColorRegaloBaj)
 						};
 						// Esquina inferior izquierda, por encima del copyright, sobre el fondo del gráfico para que se lea siempre
 						float x0 = ChartPanel.X + 8, y0 = ChartPanel.Y + ChartPanel.H - 30 - ley.Length * lineH;
@@ -1324,115 +1012,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 						b.Dispose();
 				}
 			}
-		}
-
-		// FVG, Order Blocks, líneas de estructura y de liquidez de las velas visibles
-		private void RenderSmc(ChartControl cc, ChartScale cs, Dictionary<Brush, SharpDX.Direct2D1.Brush> dx)
-		{
-			int desde = Math.Max(ChartBars.FromIndex, 0), hasta = ChartBars.ToIndex;
-			float xUlt = cc.GetXByBarIndex(ChartBars, Math.Min(hasta, CurrentBar)) + 4;
-			using (SharpDX.DirectWrite.TextFormat fmt = new SharpDX.DirectWrite.TextFormat(NinjaTrader.Core.Globals.DirectWriteFactory, "Arial", SharpDX.DirectWrite.FontWeight.Bold, SharpDX.DirectWrite.FontStyle.Normal, Math.Max(TamanoSigla - 1, 6)))
-			using (SharpDX.Direct2D1.StrokeStyle guion = new SharpDX.Direct2D1.StrokeStyle(NinjaTrader.Core.Globals.D2DFactory, new SharpDX.Direct2D1.StrokeStyleProperties { DashStyle = SharpDX.Direct2D1.DashStyle.Dash }))
-			using (SharpDX.Direct2D1.StrokeStyle punto = new SharpDX.Direct2D1.StrokeStyle(NinjaTrader.Core.Globals.D2DFactory, new SharpDX.Direct2D1.StrokeStyleProperties { DashStyle = SharpDX.Direct2D1.DashStyle.Dot }))
-			{
-				float alto = TamanoSigla + 3f;
-				// Fair Value Gaps: B tenue, A y GAP resaltados con borde, línea punteada en el 50 % (CE); atenuados tras tocar el CE
-				if (VerFvg)
-					foreach (OvSmcZona z in fvgs)
-					{
-						if (z.Invalida || (z.Fin >= 0 ? z.Fin : CurrentBar) < desde || z.Idx > hasta)
-							continue;
-						bool gap = z.Gap && VerGapSesion, fuerte = gap || z.Grado == 2;
-						Brush c = gap ? (z.Dir == 1 ? ColorGapAlc : ColorGapBaj) : (z.Dir == 1 ? ColorFvgAlc : ColorFvgBaj);
-						float x0 = cc.GetXByBarIndex(ChartBars, z.Idx), x1 = z.Fin >= 0 ? cc.GetXByBarIndex(ChartBars, z.Fin) : xUlt;
-						float y0 = cs.GetYByValue(z.Alto), y1 = cs.GetYByValue(z.Bajo), ym = cs.GetYByValue((z.Alto + z.Bajo) / 2);
-						float atenua = z.Mitigada ? 0.35f : 1f;
-						SharpDX.RectangleF r = new SharpDX.RectangleF(x0, y0, Math.Max(x1 - x0, 1f), Math.Max(y1 - y0, 1f));
-						using (SharpDX.Direct2D1.Brush b = c.ToDxBrush(RenderTarget))
-						{
-							b.Opacity = (fuerte ? OpacidadFvgA : OpacidadFvg) / 100f * atenua;
-							RenderTarget.FillRectangle(r, b);
-							b.Opacity = (fuerte ? 0.8f : 0.4f) * atenua;
-							if (fuerte)
-								RenderTarget.DrawRectangle(r, b, 1f);
-							RenderTarget.DrawLine(new SharpDX.Vector2(x0, ym), new SharpDX.Vector2(x1, ym), b, 1f, punto);
-						}
-						fmt.TextAlignment = SharpDX.DirectWrite.TextAlignment.Trailing;
-						string txt = (gap ? "GAP" : z.Grado == 2 ? "FVG A" : "FVG") + (z.Estrella ? "★" : "");
-						Texto(Par(txt, c), x1 - 64, (y0 + y1) / 2 - alto / 2, 60, alto, fmt, dx);
-					}
-
-				// Stop de cada FVG / GAP (también de los invalidados): línea sólida FvgStopTicks más allá del bloque (encima de uno
-				// rojo, debajo de uno verde) durante FvgStopVelas velas desde la flecha; con la caja completa si se fusionó
-				if (VerFvgSenal)
-					foreach (OvSmcZona z in fvgs)
-					{
-						int fin = Math.Min(z.Nace + FvgStopVelas, CurrentBar);
-						if (fin < desde || z.Nace > hasta || !SenalFvg(z))
-							continue;
-						double stop = z.Dir == 1 ? z.Bajo - FvgStopTicks * TickSize : z.Alto + FvgStopTicks * TickSize;
-						float x0 = cc.GetXByBarIndex(ChartBars, z.Nace), x1 = cc.GetXByBarIndex(ChartBars, fin), y = cs.GetYByValue(stop);
-						RenderTarget.DrawLine(new SharpDX.Vector2(x0, y), new SharpDX.Vector2(Math.Max(x1, x0 + 1f), y), DxBrush(z.Dir == 1 ? ColorFvgCompra : ColorFvgVenta, dx), 2f);
-					}
-
-				// Order Blocks
-				foreach (OvSmcZona z in obs)
-				{
-					if (z.Invalida || (z.Nivel == 0 ? !VerObSwing : !VerObInterno) || (z.Mitigada && !VerObMitigados))
-						continue;
-					if ((z.Fin >= 0 ? z.Fin : CurrentBar) < desde || z.Idx > hasta)
-						continue;
-					Brush c = z.Dir == 1 ? ColorObAlc : ColorObBaj;
-					float x0 = cc.GetXByBarIndex(ChartBars, z.Idx), x1 = z.Fin >= 0 ? cc.GetXByBarIndex(ChartBars, z.Fin) : xUlt;
-					float y0 = cs.GetYByValue(z.Alto), y1 = cs.GetYByValue(z.Bajo), ym = cs.GetYByValue((z.Alto + z.Bajo) / 2);
-					float op = OpacidadOb / 100f * (z.Nivel == 0 ? 1f : 0.55f) * (z.Mitigada ? 0.35f : 1f);
-					SharpDX.RectangleF r = new SharpDX.RectangleF(x0, y0, Math.Max(x1 - x0, 1f), Math.Max(y1 - y0, 1f));
-					using (SharpDX.Direct2D1.Brush b = c.ToDxBrush(RenderTarget))
-					{
-						b.Opacity = op;
-						RenderTarget.FillRectangle(r, b);
-						b.Opacity = z.Mitigada ? 0.35f : (z.Nivel == 0 ? 0.9f : 0.5f);
-						RenderTarget.DrawRectangle(r, b, z.Nivel == 0 ? 1.5f : 1f, z.Nivel == 0 ? null : guion);
-						RenderTarget.DrawLine(new SharpDX.Vector2(x0, ym), new SharpDX.Vector2(x1, ym), b, 1f, guion);   // 50 % (mean threshold)
-					}
-					fmt.TextAlignment = SharpDX.DirectWrite.TextAlignment.Leading;
-					string t = (z.Nivel == 0 ? "OB" : "iOB") + (z.Estrella ? "★" : "");
-					Texto(Par(t, c), x0 + 2, z.Dir == 1 ? y1 - alto : y0, 60, alto, fmt, dx);
-				}
-
-				// BOS / CHoCH
-				foreach (OvSmcLinea l in rupturas)
-				{
-					if ((l.Nivel == 0 ? !VerEstSwing : !VerEstInterna) || l.Idx2 < desde || l.Idx1 > hasta)
-						continue;
-					Brush c = l.Dir == 1 ? ColorEstAlc : ColorEstBaj;
-					float x0 = cc.GetXByBarIndex(ChartBars, l.Idx1), x1 = cc.GetXByBarIndex(ChartBars, l.Idx2), y = cs.GetYByValue(l.Precio);
-					RenderTarget.DrawLine(new SharpDX.Vector2(x0, y), new SharpDX.Vector2(x1, y), DxBrush(c, dx), l.Nivel == 0 ? 1.5f : 1f, l.Nivel == 0 ? null : guion);
-					fmt.TextAlignment = SharpDX.DirectWrite.TextAlignment.Center;
-					string t = (l.Nivel == 0 ? "" : "i") + l.Texto;
-					Texto(Par(t, c), (x0 + x1) / 2 - 35, l.Dir == 1 ? y - alto : y, 70, alto, fmt, dx);
-				}
-
-				// EQH / EQL
-				if (VerEq)
-					foreach (OvSmcLinea l in eqs)
-					{
-						int fin = l.Idx2 >= 0 ? l.Idx2 : CurrentBar;
-						if (fin < desde || l.Idx1 > hasta)
-							continue;
-						float x0 = cc.GetXByBarIndex(ChartBars, l.Idx1), x1 = l.Idx2 >= 0 ? cc.GetXByBarIndex(ChartBars, l.Idx2) : xUlt, y = cs.GetYByValue(l.Precio);
-						RenderTarget.DrawLine(new SharpDX.Vector2(x0, y), new SharpDX.Vector2(x1, y), DxBrush(ColorEq, dx), 1f, punto);
-						fmt.TextAlignment = SharpDX.DirectWrite.TextAlignment.Leading;
-						Texto(Par(l.Texto, ColorEq), x0, l.Dir == 1 ? y - alto : y, 50, alto, fmt, dx);
-					}
-			}
-		}
-
-		// Tipos de FVG con flecha y stop: GAP (si se muestra aparte), FVG A o FVG B, y opcionalmente solo con ★
-		private bool SenalFvg(OvSmcZona z)
-		{
-			bool tipo = z.Gap && VerGapSesion ? FvgSenalGap : z.Grado == 2 ? FvgSenalA : FvgSenalB;
-			return tipo && (!FvgSenalEstrella || z.Estrella);
 		}
 
 		private SharpDX.Direct2D1.Brush DxBrush(Brush c, Dictionary<Brush, SharpDX.Direct2D1.Brush> dx)
@@ -1531,143 +1110,19 @@ namespace NinjaTrader.NinjaScript.Indicators
 		[Display(Name = "BMG: cuerpo mínimo de la sesión anterior (fracción del rango)", Order = 13, GroupName = "2. Patrones")]
 		public double MonstruoCuerpoMin { get; set; }
 
-		// FVG y GAP calculados (activos y cerrados), para estrategias que operan las mismas zonas que se dibujan
-		[Browsable(false)]
-		[XmlIgnore]
-		public List<OvSmcZona> FvgZonas
+		// Patrones (bits EbAlc, Toro180, Bt...) y setup (1 / 2 VBS, 3 / 4 REG; negativos en venta) de una vela, para estrategias
+		// que confirman con las señales de Velez. RBI / GBI se marcan en la vela ignorada cuando se dispara, velas después.
+		public int PatronesVela(int barsAgo)
 		{
-			get { Update(); return fvgs; }
+			Update();
+			return patrones[barsAgo];
 		}
 
-		// --- 8. Estructura institucional (SMC) ---
-		[Display(Name = "Estructura swing (BOS / CHoCH)", Description = "Líneas sólidas desde el pivote swing roto hasta la vela que cierra más allá.", Order = 1, GroupName = "8. CHoCH / OB / FVG")]
-		public bool VerEstSwing { get; set; }
-
-		[Display(Name = "Estructura interna (iBOS / iCHoCH)", Description = "Líneas punteadas de los pivotes internos.", Order = 2, GroupName = "8. CHoCH / OB / FVG")]
-		public bool VerEstInterna { get; set; }
-
-		[Range(2, 50)]
-		[Display(Name = "Pivote swing: velas a cada lado", Order = 3, GroupName = "8. CHoCH / OB / FVG")]
-		public int SwingLen { get; set; }
-
-		[Range(1, 20)]
-		[Display(Name = "Pivote interno: velas a cada lado", Order = 4, GroupName = "8. CHoCH / OB / FVG")]
-		public int InternaLen { get; set; }
-
-		[Display(Name = "Order Blocks swing", Description = "Última vela contraria en el origen del tramo que rompió la estructura swing, con desplazamiento (FVG). ★ = barrió liquidez.", Order = 5, GroupName = "8. CHoCH / OB / FVG")]
-		public bool VerObSwing { get; set; }
-
-		[Display(Name = "Order Blocks internos (iOB)", Order = 6, GroupName = "8. CHoCH / OB / FVG")]
-		public bool VerObInterno { get; set; }
-
-		[Display(Name = "Mostrar OB mitigados", Description = "Los OB tocados en su 50 % quedan atenuados hasta la vela de mitigación. Los invalidados (cierre al otro lado) desaparecen.", Order = 7, GroupName = "8. CHoCH / OB / FVG")]
-		public bool VerObMitigados { get; set; }
-
-		[Range(0, 20)]
-		[Display(Name = "OB: velas antes del origen", Description = "Búsqueda de la última vela contraria hacia atrás desde el extremo del tramo.", Order = 8, GroupName = "8. CHoCH / OB / FVG")]
-		public int ObBusqueda { get; set; }
-
-		[Range(0, 100)]
-		[Display(Name = "Opacidad de los OB (%)", Order = 9, GroupName = "8. CHoCH / OB / FVG")]
-		public int OpacidadOb { get; set; }
-
-		[Display(Name = "Fair Value Gaps", Order = 10, GroupName = "8. CHoCH / OB / FVG")]
-		public bool VerFvg { get; set; }
-
-		[Range(0.0, 5.0)]
-		[Display(Name = "FVG: tamaño mínimo (ATR 14)", Description = "FVG de calidad B, dibujado tenue. Con 0,25 ATR el FVG de 2 min reaccionó igual que un nivel cualquiera.", Order = 11, GroupName = "8. CHoCH / OB / FVG")]
-		public double FvgMinAtr { get; set; }
-
-		[Range(0.0, 10.0)]
-		[Display(Name = "FVG A: tamaño mínimo (ATR 14)", Description = "FVG resaltado. En MNQ 2 min, los FVG >= 1,5 ATR fueron los únicos que reaccionaron mejor que un nivel cualquiera.", Order = 12, GroupName = "8. CHoCH / OB / FVG")]
-		public double FvgAAtr { get; set; }
-
-		[Range(0, 100)]
-		[Display(Name = "Opacidad de los FVG (%)", Order = 13, GroupName = "8. CHoCH / OB / FVG")]
-		public int OpacidadFvg { get; set; }
-
-		[Range(0, 100)]
-		[Display(Name = "Opacidad de los FVG A y GAP (%)", Order = 14, GroupName = "8. CHoCH / OB / FVG")]
-		public int OpacidadFvgA { get; set; }
-
-		[Display(Name = "FVG: fusionar apilados", Description = "FVG consecutivos del mismo lado (uno por vela) forman una sola caja.", Order = 15, GroupName = "8. CHoCH / OB / FVG")]
-		public bool FvgFusionar { get; set; }
-
-		[Range(0, 1000)]
-		[Display(Name = "FVG: expira tras N velas (0 = nunca)", Order = 16, GroupName = "8. CHoCH / OB / FVG")]
-		public int FvgExpiraVelas { get; set; }
-
-		[Display(Name = "FVG: expira al cierre de sesión", Order = 17, GroupName = "8. CHoCH / OB / FVG")]
-		public bool FvgExpiraSesion { get; set; }
-
-		[Display(Name = "GAP de sesión aparte", Description = "FVG formado por el cierre de sesión (17:00-18:00 NY): etiqueta GAP y color propio.", Order = 18, GroupName = "8. CHoCH / OB / FVG")]
-		public bool VerGapSesion { get; set; }
-
-		[Display(Name = "Liquidez EQH / EQL", Description = "Máximos / mínimos internos iguales: stops acumulados, vigentes hasta que se barren.", Order = 19, GroupName = "8. CHoCH / OB / FVG")]
-		public bool VerEq { get; set; }
-
-		[Range(0.0, 2.0)]
-		[Display(Name = "EQH / EQL: tolerancia (ATR 14)", Order = 20, GroupName = "8. CHoCH / OB / FVG")]
-		public double EqTolAtr { get; set; }
-
-		[Display(Name = "Ubicación: OB y FVG activos", Description = "Un OB o FVG activo del lado del trade cuenta como ítem de ubicación (sección 5) para las señales de reversa, el 180 y la calidad ★.", Order = 21, GroupName = "8. CHoCH / OB / FVG")]
-		public bool UbicSmc { get; set; }
-
-		[XmlIgnore] [Display(Name = "Estructura alcista", Order = 22, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorEstAlc { get; set; }
-		[Browsable(false)] public string ColorEstAlcS { get { return Serialize.BrushToString(ColorEstAlc); } set { ColorEstAlc = Serialize.StringToBrush(value); } }
-
-		[XmlIgnore] [Display(Name = "Estructura bajista", Order = 23, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorEstBaj { get; set; }
-		[Browsable(false)] public string ColorEstBajS { get { return Serialize.BrushToString(ColorEstBaj); } set { ColorEstBaj = Serialize.StringToBrush(value); } }
-
-		[XmlIgnore] [Display(Name = "OB alcista", Order = 24, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorObAlc { get; set; }
-		[Browsable(false)] public string ColorObAlcS { get { return Serialize.BrushToString(ColorObAlc); } set { ColorObAlc = Serialize.StringToBrush(value); } }
-
-		[XmlIgnore] [Display(Name = "OB bajista", Order = 25, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorObBaj { get; set; }
-		[Browsable(false)] public string ColorObBajS { get { return Serialize.BrushToString(ColorObBaj); } set { ColorObBaj = Serialize.StringToBrush(value); } }
-
-		[XmlIgnore] [Display(Name = "FVG alcista", Order = 26, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorFvgAlc { get; set; }
-		[Browsable(false)] public string ColorFvgAlcS { get { return Serialize.BrushToString(ColorFvgAlc); } set { ColorFvgAlc = Serialize.StringToBrush(value); } }
-
-		[XmlIgnore] [Display(Name = "FVG bajista", Order = 27, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorFvgBaj { get; set; }
-		[Browsable(false)] public string ColorFvgBajS { get { return Serialize.BrushToString(ColorFvgBaj); } set { ColorFvgBaj = Serialize.StringToBrush(value); } }
-
-		[XmlIgnore] [Display(Name = "GAP de sesión alcista", Order = 28, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorGapAlc { get; set; }
-		[Browsable(false)] public string ColorGapAlcS { get { return Serialize.BrushToString(ColorGapAlc); } set { ColorGapAlc = Serialize.StringToBrush(value); } }
-
-		[XmlIgnore] [Display(Name = "GAP de sesión bajista", Order = 29, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorGapBaj { get; set; }
-		[Browsable(false)] public string ColorGapBajS { get { return Serialize.BrushToString(ColorGapBaj); } set { ColorGapBaj = Serialize.StringToBrush(value); } }
-
-		[XmlIgnore] [Display(Name = "EQH / EQL", Order = 30, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorEq { get; set; }
-		[Browsable(false)] public string ColorEqS { get { return Serialize.BrushToString(ColorEq); } set { ColorEq = Serialize.StringToBrush(value); } }
-
-		[Display(Name = "FVG: flecha y stop", Description = "Flecha en la vela que crea cada FVG / GAP (▼ roja en uno bajista, ▲ verde en uno alcista) y línea sólida del stop más allá del bloque. Quedan aunque el bloque se invalide.", Order = 31, GroupName = "8. CHoCH / OB / FVG")]
-		public bool VerFvgSenal { get; set; }
-
-		[Display(Name = "FVG: flecha y stop en FVG B", Description = "FVG >= tamaño mínimo y menor que el de FVG A.", Order = 32, GroupName = "8. CHoCH / OB / FVG")]
-		public bool FvgSenalB { get; set; }
-
-		[Display(Name = "FVG: flecha y stop en FVG A", Description = "FVG >= tamaño mínimo de FVG A.", Order = 33, GroupName = "8. CHoCH / OB / FVG")]
-		public bool FvgSenalA { get; set; }
-
-		[Display(Name = "FVG: flecha y stop en GAP", Description = "FVG del cierre de sesión, si \"GAP de sesión aparte\" está activo; si no, cuenta como FVG A o B.", Order = 34, GroupName = "8. CHoCH / OB / FVG")]
-		public bool FvgSenalGap { get; set; }
-
-		[Display(Name = "FVG: flecha y stop solo con ★", Description = "Solo en los tipos marcados que tienen una ruptura de estructura a su favor; la flecha aparece cuando llega la ruptura.", Order = 35, GroupName = "8. CHoCH / OB / FVG")]
-		public bool FvgSenalEstrella { get; set; }
-
-		[Range(0, int.MaxValue)]
-		[Display(Name = "FVG: stop, ticks más allá del bloque", Description = "Encima de un bloque rojo, debajo de uno verde.", Order = 36, GroupName = "8. CHoCH / OB / FVG")]
-		public int FvgStopTicks { get; set; }
-
-		[Range(1, int.MaxValue)]
-		[Display(Name = "FVG: largo de la línea del stop (velas)", Order = 37, GroupName = "8. CHoCH / OB / FVG")]
-		public int FvgStopVelas { get; set; }
-
-		[XmlIgnore] [Display(Name = "FVG: flecha y stop de compra", Order = 38, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorFvgCompra { get; set; }
-		[Browsable(false)] public string ColorFvgCompraS { get { return Serialize.BrushToString(ColorFvgCompra); } set { ColorFvgCompra = Serialize.StringToBrush(value); } }
-
-		[XmlIgnore] [Display(Name = "FVG: flecha y stop de venta", Order = 39, GroupName = "8. CHoCH / OB / FVG")] public Brush ColorFvgVenta { get; set; }
-		[Browsable(false)] public string ColorFvgVentaS { get { return Serialize.BrushToString(ColorFvgVenta); } set { ColorFvgVenta = Serialize.StringToBrush(value); } }
+		public int SetupVela(int barsAgo)
+		{
+			Update();
+			return setups[barsAgo];
+		}
 
 		// --- 7. VWAP Order Flow (simulado) ---
 		[Display(Name = "Mostrar VWAP", Description = "VWAP y bandas σ ponderadas por volumen calculados con las velas del gráfico (motor AddOns\\VwapEngine.cs), sin licencia Order Flow+. Colores, grosor y estilo en los plots \"VWAP\" y \"VWAP ±1/±2/±3\".", Order = 1, GroupName = "7. VWAP")]
