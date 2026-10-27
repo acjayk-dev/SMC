@@ -1,17 +1,13 @@
-// Oliver Velez – Patrones: medias móviles 8 / 20 / 200 y patrones de vela del manual de Oliver Velez (iFundTraders),
-// marcados al cierre de cada vela con el color del patrón y su sigla. Definiciones (cada número es configurable):
+// Oliver Velez – Patrones: medias móviles 8 / 20 / 200, VWAP y patrones de vela del manual de Oliver Velez (iFundTraders),
+// marcados al cierre de cada vela con el color del patrón y su sigla SOLO cuando otra metodología o la validación de 3
+// temporalidades los confirma. Definiciones base (cada número es configurable):
 //   - EB  Elephant (WRB, cap. 1): cuerpo >= 1,5 x el cuerpo medio de las 20 velas anteriores, cuerpo >= 60 % del rango y
 //         cierre en el tercio de su dirección.
 //   - +180 / -180 (cap. 17.1, versión clásica de 2 velas): vela amplia roja (verde) que cierra en su cuarto inferior
 //         (superior), seguida de una vela amplia verde (roja) que cierra en su cuarto superior (inferior) recuperando al
 //         menos 2/3 del rango de la primera. Amplia = rango >= 1 x el rango medio de 20 velas y cuerpo >= 50 % del rango.
-//         Como en los ejemplos del manual (págs. 274-286): después de una caída (rally) escalonada y en un ítem de ubicación.
-//   - Señales de reversa (cap. 11, págs. 189-204), solo después de una caída (rally) de al menos 3 velas, contada como en el
-//     manual: la primera es el techo (piso) y cada una de las siguientes hace máximo y mínimo más bajos (más altos); y, con
-//     el filtro de ubicación (cap. 12, págs. 205-224, reglas de compra y de corto #1-#4), solo cuando la vela está en o cerca
-//     (0,5 ATR) de un ítem de ubicación: la 20mm o la 8mm con pendiente a favor, la 200mm plana, un máximo o mínimo anterior
-//     (pivote de 5 velas a cada lado), el cierre del día anterior (PDC, 16:00 NY), el retroceso del 33-55 % del último
-//     tramo entre pivotes, o el precio a 3 ATR o más de la 20mm (extensión):
+//   - Señales de reversa (cap. 11, págs. 189-204), tras una vela que hace máximo y mínimo más bajos (piso) o más altos (techo)
+//     que la anterior:
 //       BT / TT   cola de piso / techo de al menos el 60 % del rango (las del manual miden 65-67 %).
 //       GBR / RBR vela verde (roja) tras una roja (verde) que recupera al menos el 75 % de su cuerpo (manual: 83-92 %).
 //       NRB       rango <= 50 % del rango medio de 20 velas (de piso tras caída, de techo tras rally).
@@ -23,12 +19,30 @@
 //   - +BMG / -BMG (cap. 18, págs. 300-319): la sesión RTH anterior (09:30-16:00 NY) fue una vela roja (verde) sólida, cuerpo
 //     >= 60 % del rango, y la sesión de hoy abre sobre su máximo (bajo su mínimo); se marca la primera vela RTH.
 //   - VBS / VSS, Setup 1 (cap. 10.1, págs. 128-145): retroceso de 3+ velas escalonadas o del color contrario con la 20mm a
-//     favor; flecha y sigla en la vela que opera sobre el máximo (bajo el mínimo) de la anterior; ★ = con señal de piso /
-//     techo, ubicación, hora de reversa o surge de volumen.
+//     favor; flecha y sigla en la vela que opera sobre el máximo (bajo el mínimo) de la anterior.
 //   - Regalo (cap. 10.2, págs. 146-154): el rango de cada Elephant es una zona; una vela que borra el 100 % de la vela
 //     contraria anterior dentro de la zona es la entrada (REG).
-// Si una vela cumple varios patrones toma el color del más fuerte (BMG > 180 > EB > BT/TT > GBR/RBR > RBI/GBI > NRB > NB) y se
-// escriben todas sus siglas: las alcistas debajo de la vela, las bajistas encima.
+// Confirmación (estudio "OV Patrones Estudio", MNQ 2 min 10/2025-10/2026 validado en MES): para cada patrón, el filtro que más
+// sube el % de señales que llegan a 1R antes que al stop (entrada Velez 1 tick tras la vela, stop en el otro extremo), con la
+// mejora mínima de MNQ 1.ª mitad, MNQ 2.ª mitad y MES y al menos 80 señales en cada una:
+//   EB       sin filtro: se dibujan todas (elección del usuario). El filtro medido (subasta fallida de Market Profile: la vela o la
+//            anterior barre el VAL (VAH) RTH de ayer y cierra dentro, y ATR alto) solo marca EbAlcPrem / EbBajPrem para las estrategias
+//   180      volumen menor que el de las 2 velas anteriores (VSA) y ATR alto
+//   BT / TT  tras un movimiento fuerte en contra (eficiencia de 20 velas <= -0,3, Brooks) y barrido de liquidez (ICT)
+//   GBR/RBR  20mm de 15 y 60 min con pendiente a favor (3 temporalidades) y barrido de liquidez (ICT)
+//   NRB      cierre en el 30 % a favor de la vela (Brooks) y barrido de liquidez (ICT)
+//   NB       cierre en el 30 % a favor de la vela (Brooks) y kill zone de Nueva York 09:30-11:30 (ICT)
+//   VBS/VSS  15 y 60 min con el cierre del lado de su 20mm y la 20mm a favor (3 temporalidades) y cierre en el 30 % a favor
+//   REG      3 velas de caída / rally (Velez) y volumen menor que el de las 2 velas anteriores (VSA)
+//   RBI/GBI, BMG  3 temporalidades como VBS (demasiado raros para medirlos: 17 y 11 al año)
+// Las señales de reversa (180, BT / TT, GBR / RBR, NRB, NB) también se muestran si la mecha toca el VWAP o una banda visible y la vela
+// cierra del lado de la reversa (petición del usuario; en el estudio con el VWAP semanal acertaron ~48 % a 1R, como sin filtro).
+// Barrido de liquidez: la vela o la anterior pasa un nivel y la vela cierra de vuelta: mínimo (máximo) RTH de ayer, overnight
+// (en RTH), Asia 18:00-02:00, Londres 02:00-05:00, Initial Balance 09:30-10:30, VAL (VAH) de ayer o el último pivote de 60 velas.
+// ATR alto: ATR(14) >= 1,2 x su media de 390 velas. Mejora del % a 1R: de +2 a +7 puntos; solo EB tuvo resultado neto positivo
+// tras comisión en MNQ (MES en equilibrio). Las señales no confirmadas no se dibujan.
+// Si una vela cumple varios patrones confirmados toma el color del más fuerte (BMG > 180 > EB > BT/TT > GBR/RBR > RBI/GBI > NRB
+// > NB) y se escriben todas sus siglas: las alcistas debajo de la vela, las bajistas encima.
 
 #region Using declarations
 using System;
@@ -51,6 +65,7 @@ public class OvZona
 {
 	public int Idx, Fin = -1, Dir;   // vela de la Elephant, vela de cierre de la zona (-1 = activa), 1 alcista / -1 bajista
 	public double Alto, Bajo;
+	public bool Confirmada;          // terminó en una entrada REG confirmada: solo esas zonas se dibujan
 }
 
 // Máximo o mínimo anterior (pivote) de "Oliver Velez Patrones"
@@ -68,9 +83,11 @@ namespace NinjaTrader.NinjaScript.Indicators
 		// Patrones por vela (bits); públicos para las estrategias que leen PatronesVela
 		public const int EbAlc = 1, EbBaj = 2, Toro180 = 4, Oso180 = 8, Bt = 16, Tt = 32, Gbr = 64, Rbr = 128,
 			Rbi = 256, Gbi = 512, NrbPiso = 1024, NrbTecho = 2048, NbPiso = 4096, NbTecho = 8192,
-			BmgToro = 16384, BmgOso = 32768;
+			BmgToro = 16384, BmgOso = 32768, EbAlcPrem = 65536, EbBajPrem = 131072, SetupConf = 1 << 20;
+		// EbAlcPrem / EbBajPrem = EB que pasa el filtro (subasta fallida + ATR alto), en PatronesVela; ConfirmadosVela devuelve los bits de los
+		// patrones confirmados de la vela (y SetupConf si su setup VBS / VSS / REG está confirmado)
 
-		private Series<int> patrones;
+		private Series<int> patrones, confirmados;
 		private readonly ISeries<double>[] medias = new ISeries<double>[3];
 		private readonly Series<double>[] smma = new Series<double>[3];
 		private ATR atr;
@@ -94,12 +111,21 @@ namespace NinjaTrader.NinjaScript.Indicators
 		private VwapEngine vwapEng;
 		private DateTime vwapPrevEt;
 		private bool vwapCongelado, vwapBandasVistas;
+		// Confirmación: perfil de volumen de la sesión RTH en curso, área de valor de la anterior, ATR medio, 20mm de 15 y 60 min y
+		// niveles de liquidez de la sesión (overnight, Asia, Londres, Initial Balance)
+		private SMA atrLargo, sma15, sma60;
+		private readonly Dictionary<int, double> perfil = new Dictionary<int, double>();
+		private double vah = double.NaN, val = double.NaN;
+		private Series<double> vahSerie, valSerie;
+		private DateTime etSes = DateTime.MinValue;
+		private double onH = double.NaN, onL = double.NaN, onHf = double.NaN, onLf = double.NaN, asH = double.NaN, asL = double.NaN, asHf = double.NaN,
+			asLf = double.NaN, lnH = double.NaN, lnL = double.NaN, lnHf = double.NaN, lnLf = double.NaN, ibH = double.NaN, ibL = double.NaN;
 
 		protected override void OnStateChange()
 		{
 			if (State == State.SetDefaults)
 			{
-				Description              = "Medias móviles 8 / 20 / 200 y patrones de vela de Oliver Velez (Elephant, 180, BT/TT, GBR/RBR, NRB, NB, RBI/GBI) marcados al cierre de la vela con su color y su sigla.";
+				Description              = "Medias móviles 8 / 20 / 200, VWAP y patrones de vela de Oliver Velez (Elephant, 180, BT/TT, GBR/RBR, NRB, NB, RBI/GBI, BMG, Setup 1, Regalo) marcados al cierre de la vela. Solo se dibujan las señales confirmadas por otra metodología (Brooks, VSA, ICT, Market Profile) o por 3 temporalidades (2, 15 y 60 min).";
 				Name                     = "Oliver Velez Patrones";
 				Calculate                = Calculate.OnBarClose;   // los patrones se confirman al cierre: nunca cambian después
 				IsOverlay                = true;
@@ -136,13 +162,9 @@ namespace NinjaTrader.NinjaScript.Indicators
 				IgnTercio         = true;
 				IgnZona           = 1.0 / 3.0;
 				IgnTendencia      = true;
-				P180Serie         = true;
-				P180Ubicacion     = true;
-				VelasTendencia    = 3;
 				ColaMin           = 0.6;
 				ReversaMin        = 0.75;
 				// 5. Ubicación
-				UsarUbicacion     = true;
 				DistUbicAtr       = 0.5;
 				UbicMedias        = true;
 				Pendiente20mm     = 3;
@@ -217,6 +239,14 @@ namespace NinjaTrader.NinjaScript.Indicators
 				EscalaSoloVelas    = true;
 				UbicVwap           = true;
 
+				// 8. Confirmación
+				PremiumAtrMin      = 1.2;
+				PremiumAtrVelas    = 390;
+				ReversaEnBandaVwap = true;
+				PerfilTicks        = 4;
+				VerAreaValor       = true;
+				ColorAreaValor     = MakeBrush(0x5C, 0x6B, 0xC0);   // azul pizarra
+
 				AddPlot(new Stroke(MakeBrush(0xFF, 0xA7, 0x26), 2), PlotStyle.Line, "Media 1");
 				AddPlot(new Stroke(MakeBrush(0x29, 0x79, 0xFF), 2), PlotStyle.Line, "Media 2");
 				AddPlot(new Stroke(MakeBrush(0xC6, 0x28, 0x28), 3), PlotStyle.Line, "Media 3");
@@ -228,9 +258,18 @@ namespace NinjaTrader.NinjaScript.Indicators
 				AddPlot(new Stroke(MakeBrush(0xD3, 0x2F, 0x2F), DashStyleHelper.Dash, 1), PlotStyle.Line, "VWAP +3");
 				AddPlot(new Stroke(MakeBrush(0xD3, 0x2F, 0x2F), DashStyleHelper.Dash, 1), PlotStyle.Line, "VWAP -3");
 			}
+			else if (State == State.Configure)
+			{
+				// 3 temporalidades: la 20mm de 15 y 60 min (una estrategia que aloje el indicador debe añadir estas mismas series)
+				AddDataSeries(BarsPeriodType.Minute, 15);
+				AddDataSeries(BarsPeriodType.Minute, 60);
+			}
 			else if (State == State.DataLoaded)
 			{
 				patrones = new Series<int>(this, MaximumBarsLookBack.Infinite);
+				confirmados = new Series<int>(this, MaximumBarsLookBack.Infinite);
+				sma15    = SMA(BarsArray[1], 20);
+				sma60    = SMA(BarsArray[2], 20);
 				atr      = ATR(14);
 				volSma   = SMA(Volume, 20);
 				pdcSerie = new Series<double>(this, MaximumBarsLookBack.Infinite);
@@ -240,6 +279,13 @@ namespace NinjaTrader.NinjaScript.Indicators
 				vwapEng = new VwapEngine();
 				vwapPrevEt = DateTime.MinValue;
 				vwapCongelado = vwapBandasVistas = false;
+				atrLargo = SMA(atr, PremiumAtrVelas);
+				vahSerie = new Series<double>(this, MaximumBarsLookBack.Infinite);
+				valSerie = new Series<double>(this, MaximumBarsLookBack.Infinite);
+				perfil.Clear();
+				vah = val = double.NaN;
+				etSes = DateTime.MinValue;
+				onH = onL = onHf = onLf = asH = asL = asHf = asLf = lnH = lnL = lnHf = lnLf = ibH = ibL = double.NaN;
 				pivotes.Clear();
 				etPrev = DateTime.MinValue;
 				pdc = double.NaN;
@@ -277,6 +323,9 @@ namespace NinjaTrader.NinjaScript.Indicators
 
 		protected override void OnBarUpdate()
 		{
+			// Las series de 15 y 60 min solo alimentan su 20mm; todo se calcula al cierre de la vela del gráfico
+			if (BarsInProgress != 0)
+				return;
 			// --- Medias móviles ---
 			int[] periodos = { Ma1Periodo, Ma2Periodo, Ma3Periodo };
 			for (int i = 0; i < 3; i++)
@@ -299,12 +348,14 @@ namespace NinjaTrader.NinjaScript.Indicators
 			}
 
 			ActualizarVwap();
+			ActualizarSesiones();
 			ActualizarUbicaciones();
 
 			// --- Patrones, al cierre de la vela ---
 			patrones[0] = 0;
+			confirmados[0] = 0;
 			int n = Promedio;
-			if (CurrentBar < n + Math.Max(VelasTendencia, 3) + 2)
+			if (CurrentBar < Math.Max(n + 5, 25))
 				return;
 
 			double rango = High[0] - Low[0], cuerpo = Math.Abs(Close[0] - Open[0]);
@@ -326,7 +377,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 				else if (roja && Close[0] <= Low[0] + EbZonaCierre * rango) f |= EbBaj;
 			}
 
-			// 180 clásico de 2 velas
+			// 180 clásico de 2 velas (sin exigir serie previa ni ubicación: la confirmación decide)
 			if (VerP180 && rango > 0)
 			{
 				double r1 = High[1] - Low[1], b1 = Math.Abs(Close[1] - Open[1]);
@@ -337,37 +388,12 @@ namespace NinjaTrader.NinjaScript.Indicators
 					&& verde && Close[0] >= High[0] - P180ZonaCierre * rango && Close[0] >= Low[1] + P180Retroceso * r1;
 				bool oso = amplias && Close[1] > Open[1] && Close[1] >= High[1] - P180ZonaCierre * r1
 					&& roja && Close[0] <= Low[0] + P180ZonaCierre * rango && Close[0] <= High[1] - P180Retroceso * r1;
-				// Serie previa: antes de la 1ª vela, una caída (rally) escalonada contada como en las señales de reversa
-				if (P180Serie && (toro || oso))
-					for (int j = 2; j <= VelasTendencia; j++)
-					{
-						if (!(High[j] < High[j + 1] && Low[j] < Low[j + 1])) toro = false;
-						if (!(High[j] > High[j + 1] && Low[j] > Low[j + 1])) oso = false;
-					}
-				// Ubicación del cap. 12, con el extremo de las dos velas
-				if (P180Ubicacion && UsarUbicacion)
-				{
-					if (toro && !EnUbicacion(1, 2)) toro = false;
-					if (oso && !EnUbicacion(-1, 2)) oso = false;
-				}
 				if (toro) f |= Toro180;
 				else if (oso) f |= Oso180;
 			}
 
-			// Señales de reversa, solo tras una caída (rally) de N velas: la primera es el techo (piso), las N - 1 siguientes
-			// hacen máximos y mínimos más bajos (más altos)
-			bool caida = true, rally = true;
-			for (int j = 1; j < VelasTendencia; j++)
-			{
-				if (!(High[j] < High[j + 1] && Low[j] < Low[j + 1])) caida = false;
-				if (!(High[j] > High[j + 1] && Low[j] > Low[j + 1])) rally = false;
-			}
-			// Ubicación (cap. 12): la señal solo cuenta en o cerca de un ítem de soporte (piso) o de resistencia (techo)
-			if (UsarUbicacion)
-			{
-				if (caida && !EnUbicacion(1, 1)) caida = false;
-				if (rally && !EnUbicacion(-1, 1)) rally = false;
-			}
+			// Señales de reversa tras una vela que hace máximo y mínimo más bajos (piso) o más altos (techo) que la anterior
+			bool caida = High[1] < High[2] && Low[1] < Low[2], rally = High[1] > High[2] && Low[1] > Low[2];
 			if (caida || rally)
 			{
 				double colaInf = Math.Min(Open[0], Close[0]) - Low[0], colaSup = High[0] - Math.Max(Open[0], Close[0]);
@@ -388,14 +414,31 @@ namespace NinjaTrader.NinjaScript.Indicators
 			}
 			if (VerMonstruo && bmgBar != 0)
 				f |= bmgBar == 1 ? BmgToro : BmgOso;
+
+			// --- Confirmación de cada patrón de esta vela ---
+			int c = 0;
+			int[] bits = { EbAlc, EbBaj, Toro180, Oso180, Bt, Tt, Gbr, Rbr, NrbPiso, NrbTecho, NbPiso, NbTecho, BmgToro, BmgOso };
+			foreach (int b in bits)
+				if ((f & b) != 0 && Confirma(b, Direccion(b)))
+					c |= b;
+			// EB que pasa el filtro (subasta fallida + ATR alto) en PatronesVela, para la estrategia "OV EB Premium"; en el gráfico se
+			// dibujan todas las Elephant, sin filtro (elección del usuario)
+			if ((c & EbAlc) != 0) f |= EbAlcPrem;
+			if ((c & EbBaj) != 0) f |= EbBajPrem;
+			c |= f & (EbAlc | EbBaj);
 			patrones[0] = f;
 			setups[0] = 0;
 			if (VerVbs)
 			{
 				if (!Setup1(1, f)) Setup1(-1, f);
+				int st = setups[0];
+				// VBS / VSS: 3 temporalidades (cierre del lado de la 20mm y 20mm a favor en 15 y 60 min) y cierre en el 30 % a favor
+				if (st != 0 && TresTemporalidades(Math.Sign(st)) && Clv(Math.Sign(st)) >= 0.7)
+					c |= SetupConf;
 			}
-			if (VerRegalo)
-				Regalo(f);
+			if (VerRegalo && Regalo(f))
+				c |= SetupConf;
+			confirmados[0] = c;
 			Pintar(0);
 
 			// RBI / GBI: se marca la vela ignorada (1 o 2 velas atrás) cuando esta vela confirma la ruptura
@@ -405,6 +448,170 @@ namespace NinjaTrader.NinjaScript.Indicators
 					if (MarcarIgnorada(k))
 						break;
 				}
+		}
+
+		// Dirección de un bit de patrón: 1 alcista (piso), -1 bajista (techo)
+		private static int Direccion(int b)
+		{
+			return (b & (EbAlc | Toro180 | Bt | Gbr | Rbi | NrbPiso | NbPiso | BmgToro)) != 0 ? 1 : -1;
+		}
+
+		// Filtro de confirmación de cada patrón (el de mayor mejora del % a 1R en el estudio), evaluado en la vela que se cierra. Las
+		// señales de reversa (180, BT / TT, GBR / RBR, NRB, NB) también se muestran si tocan el VWAP o una banda (ReversaEnBandaVwap).
+		private bool Confirma(int b, int dir)
+		{
+			bool reversa = (b & (Toro180 | Oso180 | Bt | Tt | Gbr | Rbr | NrbPiso | NrbTecho | NbPiso | NbTecho)) != 0;
+			if (reversa && ReversaEnBandaVwap && TocaVwap(dir))
+				return true;
+			if (b == EbAlc || b == EbBaj)                  // subasta fallida en el área de valor de ayer y ATR alto
+				return (Barrido(dir) & 32) != 0 && AtrAlto();
+			if (b == Toro180 || b == Oso180)               // volumen menor que el de las 2 velas anteriores y ATR alto
+				return VolumenBajo() && AtrAlto();
+			if (b == Bt || b == Tt)                        // tras un movimiento fuerte en contra y barrido de liquidez
+				return Eficiencia(dir) <= -0.3 && Barrido(dir) != 0;
+			if (b == Gbr || b == Rbr)                      // 20mm de 15 y 60 min a favor y barrido de liquidez
+				return PendienteMayor(dir) && Barrido(dir) != 0;
+			if (b == NrbPiso || b == NrbTecho)             // cierre en el 30 % a favor y barrido de liquidez
+				return Clv(dir) >= 0.7 && Barrido(dir) != 0;
+			if (b == NbPiso || b == NbTecho)               // cierre en el 30 % a favor y kill zone de NY 09:30-11:30
+			{
+				int hh = Hhmm(ToNy(Time[0]));
+				return Clv(dir) >= 0.7 && hh > 930 && hh <= 1130;
+			}
+			return TresTemporalidades(dir);                // RBI / GBI y BMG
+		}
+
+		private static int Hhmm(DateTime et) { return et.Hour * 100 + et.Minute; }
+
+		// La mecha toca el VWAP o una de sus bandas visibles y la vela cierra del lado de la reversa (compra: mínimo <= línea < cierre)
+		private bool TocaVwap(int dir)
+		{
+			if (!VerVwap)
+				return false;
+			for (int p = 3; p <= 9; p++)
+			{
+				if (!LineaVisible(p) || !Values[p].IsValidDataPoint(0))
+					continue;
+				double l = Values[p][0];
+				if (dir == 1 ? Low[0] <= l && Close[0] > l : High[0] >= l && Close[0] < l)
+					return true;
+			}
+			return false;
+		}
+
+		// Posición del cierre en el rango de la vela, medida desde el extremo contrario a la señal (1 = cierra en su extremo a favor)
+		private double Clv(int dir)
+		{
+			double r = High[0] - Low[0];
+			return r > 0 ? (dir == 1 ? Close[0] - Low[0] : High[0] - Close[0]) / r : 0.5;
+		}
+
+		private bool VolumenBajo() { return Volume[0] < Volume[1] && Volume[0] < Volume[2]; }
+
+		private bool AtrAlto() { return atrLargo[0] > 0 && atr[0] >= PremiumAtrMin * atrLargo[0]; }
+
+		// Eficiencia de las 20 últimas velas en la dirección de la señal (Kaufman): -1 = caída limpia contra una señal de compra
+		private double Eficiencia(int dir)
+		{
+			double s = 0;
+			for (int k = 0; k < 20; k++)
+				s += Math.Abs(Close[k] - Close[k + 1]);
+			return s > 0 ? dir * (Close[0] - Close[20]) / s : 0;
+		}
+
+		// Velas escalonadas antes de esta (máximos y mínimos más bajos para una señal de compra)
+		private int Escalones(int dir)
+		{
+			int e = 0;
+			for (int j = 1; j <= 30 && j + 1 <= CurrentBar; j++)
+			{
+				if (dir == 1 ? High[j] < High[j + 1] && Low[j] < Low[j + 1] : High[j] > High[j + 1] && Low[j] > Low[j + 1]) e++;
+				else break;
+			}
+			return e;
+		}
+
+		// 3 temporalidades: en la última vela cerrada de 15 y de 60 min el cierre está del lado de la señal respecto a su 20mm y la
+		// 20mm apunta en esa dirección
+		private bool TresTemporalidades(int dir)
+		{
+			if (CurrentBars[1] < 21 || CurrentBars[2] < 21)
+				return false;
+			return (Closes[1][0] - sma15[0]) * dir > 0 && (sma15[0] - sma15[1]) * dir > 0
+				&& (Closes[2][0] - sma60[0]) * dir > 0 && (sma60[0] - sma60[1]) * dir > 0;
+		}
+
+		private bool PendienteMayor(int dir)
+		{
+			if (CurrentBars[1] < 21 || CurrentBars[2] < 21)
+				return false;
+			return (sma15[0] - sma15[1]) * dir > 0 && (sma60[0] - sma60[1]) * dir > 0;
+		}
+
+		// Barrido de liquidez: la vela o la anterior pasa un nivel (mínimo para una señal de compra) y la vela cierra de vuelta.
+		// Bits: 1 RTH de ayer, 2 overnight (en RTH), 4 Asia (02:00-16:00), 8 Londres (05:00-16:00), 16 Initial Balance (10:30-16:00),
+		// 32 área de valor de ayer, 64 último pivote de 60 velas
+		private int Barrido(int dir)
+		{
+			int hh = Hhmm(ToNy(Time[0]));
+			bool rth = hh > 930 && hh <= 1600;
+			double ext = dir == 1 ? Math.Min(Low[0], Low[1]) : Math.Max(High[0], High[1]);
+			double[] niv = {
+				sesAntValida ? (dir == 1 ? sesAntL : sesAntH) : double.NaN,
+				rth ? (dir == 1 ? onLf : onHf) : double.NaN,
+				hh > 200 && hh <= 1600 ? (dir == 1 ? asLf : asHf) : double.NaN,
+				hh > 500 && hh <= 1600 ? (dir == 1 ? lnLf : lnHf) : double.NaN,
+				hh > 1030 && hh <= 1600 ? (dir == 1 ? ibL : ibH) : double.NaN,
+				dir == 1 ? val : vah,
+				PivoteReciente(dir) };
+			int m = 0;
+			for (int i = 0; i < niv.Length; i++)
+				if (!double.IsNaN(niv[i]) && (dir == 1 ? ext < niv[i] && Close[0] > niv[i] : ext > niv[i] && Close[0] < niv[i]))
+					m |= 1 << i;
+			return m;
+		}
+
+		// Último pivote del lado del barrido (mínimo para una compra) de las últimas 60 velas
+		private double PivoteReciente(int dir)
+		{
+			for (int i = pivotes.Count - 1; i >= 0; i--)
+			{
+				OvPivote pv = pivotes[i];
+				if (CurrentBar - pv.Idx > 60)
+					break;
+				if (pv.Alto == (dir == -1))
+					return pv.Precio;
+			}
+			return double.NaN;
+		}
+
+		// Niveles de liquidez de la sesión (hora de NY): overnight 18:00-09:30, Asia 18:00-02:00, Londres 02:00-05:00, cada uno fijo
+		// al terminar; Initial Balance 09:30-10:30. La sesión empieza con la primera vela que cierra después de las 18:00.
+		private void ActualizarSesiones()
+		{
+			DateTime et = ToNy(Time[0]);
+			int hh = Hhmm(et), hp = Hhmm(etSes);
+			bool nuevo = CurrentBar == 0 || (hh > 1800 && (hp <= 1800 || etSes.Date != et.Date)) || (et - etSes).TotalHours > 6;
+			if (nuevo)
+			{
+				onH = asH = High[0]; onL = asL = Low[0];
+				lnH = lnL = onHf = onLf = asHf = asLf = lnHf = lnLf = ibH = ibL = double.NaN;
+			}
+			if (!nuevo && (hh > 1800 || hh <= 930) && double.IsNaN(onHf)) { onH = Math.Max(onH, High[0]); onL = Math.Min(onL, Low[0]); }
+			if (hh > 930 && hh <= 1800 && double.IsNaN(onHf)) { onHf = onH; onLf = onL; }
+			if (!nuevo && (hh > 1800 || hh <= 200) && double.IsNaN(asHf)) { asH = Math.Max(asH, High[0]); asL = Math.Min(asL, Low[0]); }
+			if (hh > 200 && hh <= 1800 && double.IsNaN(asHf)) { asHf = asH; asLf = asL; }
+			if (hh > 200 && hh <= 500)
+			{
+				lnH = double.IsNaN(lnH) ? High[0] : Math.Max(lnH, High[0]);
+				lnL = double.IsNaN(lnL) ? Low[0] : Math.Min(lnL, Low[0]);
+			}
+			if (hh > 500 && hh <= 1800 && double.IsNaN(lnHf) && !double.IsNaN(lnH)) { lnHf = lnH; lnLf = lnL; }
+			bool rth = hh > 930 && hh <= 1600 && et.DayOfWeek != DayOfWeek.Saturday && et.DayOfWeek != DayOfWeek.Sunday;
+			bool primera = rth && (hp <= 930 || hp > 1600 || etSes.Date != et.Date);
+			if (primera) { ibH = High[0]; ibL = Low[0]; }
+			else if (rth && hh <= 1030 && !double.IsNaN(ibH)) { ibH = Math.Max(ibH, High[0]); ibL = Math.Min(ibL, Low[0]); }
+			etSes = et;
 		}
 
 		// Pivotes (máximo / mínimo con N velas a cada lado, confirmado N velas después), su ruptura al cierre y el cierre del
@@ -448,16 +655,32 @@ namespace NinjaTrader.NinjaScript.Indicators
 				else if (solida && sesAntC > sesAntO && Open[0] < sesAntL) bmgBar = -1;
 				sesO = Open[0]; sesH = High[0]; sesL = Low[0];
 				sesActiva = true;
+				perfil.Clear();
 			}
 			else if (rth && sesActiva)
 			{
 				sesH = Math.Max(sesH, High[0]);
 				sesL = Math.Min(sesL, Low[0]);
 			}
+			// Perfil de volumen de la sesión RTH: el volumen de cada vela repartido por igual entre sus niveles de PerfilTicks
+			if (rth && sesActiva)
+			{
+				double paso = PerfilTicks * TickSize;
+				int a = (int)Math.Floor(Low[0] / paso), b = (int)Math.Floor(High[0] / paso);
+				double v = Volume[0] / (b - a + 1);
+				for (int k = a; k <= b; k++)
+				{
+					double x;
+					perfil.TryGetValue(k, out x);
+					perfil[k] = x + v;
+				}
+			}
 
 			if (CurrentBar > 0 && hhmm >= 1600 && (hhPrev < 1600 || etPrev.Date != et.Date) && habil)
 			{
 				pdc = hhmm == 1600 ? Close[0] : Close[1];
+				if (sesActiva)
+					AreaValor();
 				if (sesActiva)
 				{
 					sesAntO = sesO; sesAntH = sesH; sesAntL = sesL; sesAntC = pdc;
@@ -468,6 +691,36 @@ namespace NinjaTrader.NinjaScript.Indicators
 			etPrev = et;
 			// Guardado por vela para dibujarlo en OnRender: un plot estiraría la escala del gráfico hasta el PDC
 			pdcSerie[0] = pdc;
+			vahSerie[0] = vah;
+			valSerie[0] = val;
+		}
+
+		// Área de valor (70 % del volumen) de la sesión RTH que termina: desde el nivel de más volumen (POC) se añade cada vez el
+		// nivel vecino de más volumen, arriba o abajo
+		private void AreaValor()
+		{
+			if (perfil.Count == 0)
+				return;
+			List<int> ks = new List<int>(perfil.Keys);
+			ks.Sort();
+			double tot = 0, mx = -1;
+			int ip = 0;
+			for (int i = 0; i < ks.Count; i++)
+			{
+				double v = perfil[ks[i]];
+				tot += v;
+				if (v > mx) { mx = v; ip = i; }
+			}
+			int lo = ip, hi = ip;
+			double acc = perfil[ks[ip]];
+			while (acc < 0.7 * tot && (lo > 0 || hi < ks.Count - 1))
+			{
+				double up = hi < ks.Count - 1 ? perfil[ks[hi + 1]] : -1, dn = lo > 0 ? perfil[ks[lo - 1]] : -1;
+				if (up >= dn) { hi++; acc += up; } else { lo--; acc += dn; }
+			}
+			double paso = PerfilTicks * TickSize;
+			vah = (ks[hi] + 1) * paso;
+			val = ks[lo] * paso;
 		}
 
 		// dir = 1: señal de piso (soporte); dir = -1: señal de techo (resistencia)
@@ -536,8 +789,10 @@ namespace NinjaTrader.NinjaScript.Indicators
 		// Compra (venta) de Regalo (cap. 10.2, págs. 146-154): tras una Elephant alcista (bajista) su rango es la zona; una vela
 		// verde (roja) que borra el 100 % del cuerpo de la vela roja (verde) anterior, con esa vela dentro de la zona, es la entrada.
 		// La zona se cierra con la entrada, con un cierre fuera de su rango o con una nueva Elephant en la misma dirección.
-		private void Regalo(int f)
+		// Devuelve true si esta vela es una entrada REG confirmada (3 velas de caída / rally y volumen menor que las 2 anteriores).
+		private bool Regalo(int f)
 		{
+			bool confirmada = false;
 			for (int i = zonas.Count - 1; i >= 0; i--)
 			{
 				OvZona z = zonas[i];
@@ -562,6 +817,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 						bool calidad = (CalidadUbicacion && EnUbicacion(d, 2)) || (CalidadHora && HoraReversa())
 							|| (CalidadVolumen && CurrentBar > 21 && volSma[1] > 0 && Volume[0] >= VolumenSurge * volSma[1]);
 						setups[0] = d * (calidad ? 4 : 3);
+						z.Confirmada = confirmada = Escalones(d) >= 2 && VolumenBajo();
 					}
 				}
 			}
@@ -575,6 +831,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 				if (zonas.Count > 300)
 					zonas.RemoveAt(0);
 			}
+			return confirmada;
 		}
 
 		// VWAP con bandas σ ponderadas por volumen (simula el Order Flow VWAP con las velas del gráfico): ancla en hora de Nueva
@@ -747,6 +1004,9 @@ namespace NinjaTrader.NinjaScript.Indicators
 				if (ok)
 				{
 					patrones[k] = patrones[k] | (dir == 1 ? Rbi : Gbi);
+					// Confirmación: 3 temporalidades en la vela que dispara (demasiado raros para medir otro filtro)
+					if (TresTemporalidades(dir))
+						confirmados[k] = confirmados[k] | (dir == 1 ? Rbi : Gbi);
 					Pintar(k);
 					return true;
 				}
@@ -754,12 +1014,12 @@ namespace NinjaTrader.NinjaScript.Indicators
 			return false;
 		}
 
-		// Color de la vela: el del patrón más fuerte
+		// Color de la vela: el del patrón confirmado más fuerte (las velas sin patrón confirmado quedan con su color normal)
 		private void Pintar(int barsAgo)
 		{
 			if (!PintarVelas)
 				return;
-			Brush b = ColorPrincipal(patrones[barsAgo]);
+			Brush b = ColorPrincipal(confirmados[barsAgo]);
 			if (b == null)
 				return;
 			BarBrushes[barsAgo]           = b;
@@ -787,7 +1047,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 			return null;
 		}
 
-		// Siglas en orden de prioridad: alcistas (debajo de la vela) y bajistas (encima)
+		// Siglas de los patrones confirmados en orden de prioridad: alcistas (debajo de la vela) y bajistas (encima)
 		private void Siglas(int f, List<KeyValuePair<string, Brush>> abajo, List<KeyValuePair<string, Brush>> arriba)
 		{
 			if ((f & BmgToro) != 0) abajo.Add(Par("+BMG", ColorBmgToro));
@@ -835,10 +1095,10 @@ namespace NinjaTrader.NinjaScript.Indicators
 				return;
 			}
 			double mn = double.MaxValue, mx = double.MinValue;
-			for (int idx = Math.Max(ChartBars.FromIndex, 0); idx <= ChartBars.ToIndex && idx < Bars.Count; idx++)
+			for (int idx = Math.Max(ChartBars.FromIndex, 0); idx <= ChartBars.ToIndex && idx < ChartBars.Bars.Count; idx++)
 			{
-				mn = Math.Min(mn, Bars.GetLow(idx));
-				mx = Math.Max(mx, Bars.GetHigh(idx));
+				mn = Math.Min(mn, ChartBars.Bars.GetLow(idx));
+				mx = Math.Max(mx, ChartBars.Bars.GetHigh(idx));
 			}
 			if (mn <= mx)
 			{
@@ -873,7 +1133,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 								OvPivote pv = pivotes[i];
 								if (pv.Fin < 0 && (pv.Alto ? altos++ : bajos++) >= PivotesVigentes)
 									continue;
-								int fin = pv.Fin < 0 ? CurrentBar : pv.Fin;
+								int fin = pv.Fin < 0 ? CurrentBars[0] : pv.Fin;
 								if (fin < ChartBars.FromIndex || pv.Idx > ChartBars.ToIndex)
 									continue;
 								float y = chartScale.GetYByValue(pv.Precio);
@@ -881,32 +1141,23 @@ namespace NinjaTrader.NinjaScript.Indicators
 									new SharpDX.Vector2(chartControl.GetXByBarIndex(ChartBars, fin), y), DxBrush(pv.Alto ? ColorPivoteAlto : ColorPivoteBajo, dx), 1f, guion);
 							}
 						}
-						// Cierre del día anterior: un tramo por día, sin unir un día con el siguiente
+						// Cierre y área de valor del día anterior: un tramo por día, sin unir un día con el siguiente
 						if (VerPdc)
+							Tramos(pdcSerie, ColorPdc, 2f, guion, chartControl, chartScale, dx);
+						if (VerAreaValor)
 						{
-							int ini = -1;
-							for (int idx = Math.Max(ChartBars.FromIndex, 0); idx <= ChartBars.ToIndex + 1; idx++)
-							{
-								double v = idx <= Math.Min(ChartBars.ToIndex, CurrentBar) ? pdcSerie.GetValueAt(idx) : double.NaN;
-								double vIni = ini >= 0 ? pdcSerie.GetValueAt(ini) : double.NaN;
-								if (ini >= 0 && (double.IsNaN(v) || v != vIni))
-								{
-									float y = chartScale.GetYByValue(vIni);
-									RenderTarget.DrawLine(new SharpDX.Vector2(chartControl.GetXByBarIndex(ChartBars, ini), y),
-										new SharpDX.Vector2(chartControl.GetXByBarIndex(ChartBars, idx - 1), y), DxBrush(ColorPdc, dx), 2f, guion);
-									ini = -1;
-								}
-								if (ini < 0 && !double.IsNaN(v))
-									ini = idx;
-							}
+							Tramos(vahSerie, ColorAreaValor, 1f, guion, chartControl, chartScale, dx);
+							Tramos(valSerie, ColorAreaValor, 1f, guion, chartControl, chartScale, dx);
 						}
 					}
 
-					// Zonas de Regalo: el rango de la Elephant desde su vela hasta la entrada, la invalidación o la vela actual
+					// Zonas de Regalo que terminaron en una entrada REG confirmada: el rango de la Elephant desde su vela hasta la entrada
 					if (VerRegalo)
 						foreach (OvZona z in zonas)
 						{
-							int fin = z.Fin < 0 ? CurrentBar : z.Fin;
+							if (!z.Confirmada)
+								continue;
+							int fin = z.Fin < 0 ? CurrentBars[0] : z.Fin;
 							if (fin < ChartBars.FromIndex || z.Idx > ChartBars.ToIndex)
 								continue;
 							float x0 = chartControl.GetXByBarIndex(ChartBars, z.Idx), x1 = chartControl.GetXByBarIndex(ChartBars, fin);
@@ -919,17 +1170,18 @@ namespace NinjaTrader.NinjaScript.Indicators
 						}
 
 					List<KeyValuePair<string, Brush>> abajo = new List<KeyValuePair<string, Brush>>(), arriba = new List<KeyValuePair<string, Brush>>();
-					for (int idx = Math.Max(ChartBars.FromIndex, 0); idx <= ChartBars.ToIndex && idx <= CurrentBar; idx++)
+					for (int idx = Math.Max(ChartBars.FromIndex, 0); idx <= ChartBars.ToIndex && idx <= CurrentBars[0]; idx++)
 					{
-						int f = VerSiglas ? patrones.GetValueAt(idx) : 0;
-						int st = setups.GetValueAt(idx);
+						int cf = confirmados.GetValueAt(idx);
+						int f = VerSiglas ? cf : 0;
+						int st = (cf & SetupConf) != 0 ? setups.GetValueAt(idx) : 0;   // solo el setup confirmado
 						if (f == 0 && st == 0)
 							continue;
 						abajo.Clear(); arriba.Clear();
 						if (f != 0)
 							Siglas(f, abajo, arriba);
 						float x = chartControl.GetXByBarIndex(ChartBars, idx);
-						float yLow = chartScale.GetYByValue(Bars.GetLow(idx)), yHigh = chartScale.GetYByValue(Bars.GetHigh(idx));
+						float yLow = chartScale.GetYByValue(ChartBars.Bars.GetLow(idx)), yHigh = chartScale.GetYByValue(ChartBars.Bars.GetHigh(idx));
 						for (int i = 0; i < abajo.Count; i++)
 							Texto(abajo[i], x - w / 2, yLow + gap + i * lineH, w, lineH, fmt, dx);
 						for (int i = 0; i < arriba.Count; i++)
@@ -958,7 +1210,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 					// Etiquetas del VWAP y sus bandas a la derecha de la última vela visible con valor
 					if (VerVwap && VwapEtiquetas)
 					{
-						int ult = Math.Min(ChartBars.ToIndex, CurrentBar);
+						int ult = Math.Min(ChartBars.ToIndex, CurrentBars[0]);
 						string[] nombres = { "VWAP", "+1", "−1", "+2", "−2", "+3", "−3" };
 						// A la derecha de la última vela, sin salir del panel (si no hay margen derecho, pegadas al borde)
 						using (SharpDX.DirectWrite.TextFormat fmtV = new SharpDX.DirectWrite.TextFormat(NinjaTrader.Core.Globals.DirectWriteFactory, "Arial", SharpDX.DirectWrite.FontWeight.Bold, SharpDX.DirectWrite.FontStyle.Normal, VwapTamanoEtiqueta))
@@ -980,20 +1232,22 @@ namespace NinjaTrader.NinjaScript.Indicators
 						fmt.TextAlignment = SharpDX.DirectWrite.TextAlignment.Leading;
 						KeyValuePair<string, Brush>[] ley =
 						{
-							Par("+BMG Gap Toro Monstruo", ColorBmgToro), Par("-BMG Gap Oso Monstruo", ColorBmgOso),
-							Par("+180 Toro 180", ColorToro180), Par("-180 Oso 180", ColorOso180),
-							Par("EB Elephant alcista", ColorEbAlc), Par("EB Elephant bajista", ColorEbBaj),
-							Par("BT Cola de piso", ColorBt), Par("TT Cola de techo", ColorTt),
-							Par("GBR Verde de reversa", ColorGbr), Par("RBR Roja de reversa", ColorRbr),
-							Par("RBI Roja ignorada", ColorRbi), Par("GBI Verde ignorada", ColorGbi),
-							Par("NRB Rango estrecho piso", ColorNrbPiso), Par("NRB Rango estrecho techo", ColorNrbTecho),
-							Par("NB Cuerpo estrecho piso", ColorNbPiso), Par("NB Cuerpo estrecho techo", ColorNbTecho),
-							Par("▲VBS Setup 1 de compra (★ calidad)", ColorVbs), Par("▼VSS Setup 1 de venta (★ calidad)", ColorVss),
-							Par("REG Compra de regalo", ColorRegaloAlc), Par("REG Venta de regalo", ColorRegaloBaj)
+							Par("Señales confirmadas (EB sin filtro):", chartControl.Properties.ChartText),
+							Par("EB Elephant: todas, sin filtro", ColorEbAlc),
+							Par("±180: volumen bajo (VSA) + ATR alto | banda VWAP", ColorToro180),
+							Par("BT / TT colas: tras caída/rally fuerte + barrido | banda VWAP", ColorBt),
+							Par("GBR / RBR reversa: 20mm 15 y 60 min + barrido | banda VWAP", ColorGbr),
+							Par("NRB rango estrecho: cierre a favor + barrido | banda VWAP", ColorNrbPiso),
+							Par("NB cuerpo estrecho: cierre a favor + NY 09:30-11:30 | banda VWAP", ColorNbPiso),
+							Par("RBI / GBI ignorada: 3 temporalidades", ColorRbi),
+							Par("±BMG gap monstruo: 3 temporalidades", ColorBmgToro),
+							Par("▲VBS ▼VSS Setup 1: 3 temporalidades + cierre a favor", ColorVbs),
+							Par("REG regalo: 3 velas de caída/rally + volumen bajo", ColorRegaloAlc),
+							Par("| banda VWAP: la mecha toca el VWAP o una banda y cierra dentro", chartControl.Properties.ChartText)
 						};
-						// Esquina inferior izquierda, por encima del copyright, sobre el fondo del gráfico para que se lea siempre
+						float anchoLey = 360;
 						float x0 = ChartPanel.X + 8, y0 = ChartPanel.Y + ChartPanel.H - 30 - ley.Length * lineH;
-						SharpDX.RectangleF caja = new SharpDX.RectangleF(x0 - 4, y0 - 4, 230, ley.Length * lineH + 8);
+						SharpDX.RectangleF caja = new SharpDX.RectangleF(x0 - 4, y0 - 4, anchoLey, ley.Length * lineH + 8);
 						using (SharpDX.Direct2D1.Brush fondo = chartControl.Properties.ChartBackground.ToDxBrush(RenderTarget))
 						using (SharpDX.Direct2D1.Brush borde = chartControl.Properties.ChartText.ToDxBrush(RenderTarget))
 						{
@@ -1003,7 +1257,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 							RenderTarget.DrawRectangle(caja, borde, 1f);
 						}
 						for (int i = 0; i < ley.Length; i++)
-							Texto(ley[i], x0, y0 + i * lineH, 230, lineH, fmt, dx);
+							Texto(ley[i], x0, y0 + i * lineH, anchoLey, lineH, fmt, dx);
 					}
 				}
 				finally
@@ -1011,6 +1265,26 @@ namespace NinjaTrader.NinjaScript.Indicators
 					foreach (SharpDX.Direct2D1.Brush b in dx.Values)
 						b.Dispose();
 				}
+			}
+		}
+
+		// Línea horizontal por cada tramo de velas visibles con el mismo valor de la serie (PDC, VAH, VAL)
+		private void Tramos(Series<double> s, Brush c, float ancho, SharpDX.Direct2D1.StrokeStyle estilo, ChartControl cc, ChartScale cs, Dictionary<Brush, SharpDX.Direct2D1.Brush> dx)
+		{
+			int ini = -1;
+			for (int idx = Math.Max(ChartBars.FromIndex, 0); idx <= ChartBars.ToIndex + 1; idx++)
+			{
+				double v = idx <= Math.Min(ChartBars.ToIndex, CurrentBars[0]) ? s.GetValueAt(idx) : double.NaN;
+				double vIni = ini >= 0 ? s.GetValueAt(ini) : double.NaN;
+				if (ini >= 0 && (double.IsNaN(v) || v != vIni))
+				{
+					float y = cs.GetYByValue(vIni);
+					RenderTarget.DrawLine(new SharpDX.Vector2(cc.GetXByBarIndex(ChartBars, ini), y),
+						new SharpDX.Vector2(cc.GetXByBarIndex(ChartBars, idx - 1), y), DxBrush(c, dx), ancho, estilo);
+					ini = -1;
+				}
+				if (ini < 0 && !double.IsNaN(v))
+					ini = idx;
 			}
 		}
 
@@ -1124,6 +1398,35 @@ namespace NinjaTrader.NinjaScript.Indicators
 			return setups[barsAgo];
 		}
 
+		// Patrones confirmados de una vela (mismos bits que PatronesVela, más SetupConf si su setup VBS / VSS / REG está confirmado)
+		public int ConfirmadosVela(int barsAgo)
+		{
+			Update();
+			return confirmados[barsAgo];
+		}
+
+		// --- 8. Confirmación ---
+		[Display(Name = "Reversas en el VWAP y sus bandas", Description = "Además de su filtro, 180, BT / TT, GBR / RBR, NRB y NB se muestran si la mecha toca el VWAP o una banda visible y la vela cierra del lado de la reversa. En el estudio (VWAP semanal, MNQ y MES) acertaron como sin filtro: ~48 % a 1R.", Order = 0, GroupName = "8. Confirmación")]
+		public bool ReversaEnBandaVwap { get; set; }
+
+		[Range(0.5, 5.0)]
+		[Display(Name = "EB y 180: ATR alto (x su media)", Description = "Confirmación de EB y 180: ATR(14) >= este múltiplo de su media de las velas de abajo (1,2 en el estudio).", Order = 1, GroupName = "8. Confirmación")]
+		public double PremiumAtrMin { get; set; }
+
+		[Range(20, 5000)]
+		[Display(Name = "Velas de la media del ATR", Order = 2, GroupName = "8. Confirmación")]
+		public int PremiumAtrVelas { get; set; }
+
+		[Range(1, 1000)]
+		[Display(Name = "Área de valor: ticks por nivel del perfil", Description = "Perfil de volumen de la sesión RTH (09:30-16:00 NY) con el volumen de cada vela repartido entre sus niveles; área de valor = 70 % del volumen alrededor del POC. 4 ticks = 1 punto en MNQ / MES.", Order = 3, GroupName = "8. Confirmación")]
+		public int PerfilTicks { get; set; }
+
+		[Display(Name = "Dibujar VAH / VAL del día anterior", Description = "Área de valor de la sesión RTH anterior: la subasta fallida que confirma las EB.", Order = 4, GroupName = "8. Confirmación")]
+		public bool VerAreaValor { get; set; }
+
+		[XmlIgnore] [Display(Name = "Color de VAH / VAL", Order = 5, GroupName = "8. Confirmación")] public Brush ColorAreaValor { get; set; }
+		[Browsable(false)] public string ColorAreaValorS { get { return Serialize.BrushToString(ColorAreaValor); } set { ColorAreaValor = Serialize.StringToBrush(value); } }
+
 		// --- 7. VWAP Order Flow (simulado) ---
 		[Display(Name = "Mostrar VWAP", Description = "VWAP y bandas σ ponderadas por volumen calculados con las velas del gráfico (motor AddOns\\VwapEngine.cs), sin licencia Order Flow+. Colores, grosor y estilo en los plots \"VWAP\" y \"VWAP ±1/±2/±3\".", Order = 1, GroupName = "7. VWAP")]
 		public bool VerVwap { get; set; }
@@ -1181,7 +1484,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 		[Display(Name = "Tamaño de las etiquetas", Order = 15, GroupName = "7. VWAP")]
 		public int VwapTamanoEtiqueta { get; set; }
 
-		[Display(Name = "Ubicación: VWAP y bandas", Description = "El VWAP y sus bandas visibles cuentan como ítem de ubicación (sección 5) para las señales de reversa, el 180 y la calidad ★.", Order = 16, GroupName = "7. VWAP")]
+		[Display(Name = "Ubicación: VWAP y bandas", Description = "El VWAP y sus bandas visibles cuentan como ítem de ubicación (sección 5) para la calidad ★ de los setups.", Order = 16, GroupName = "7. VWAP")]
 		public bool UbicVwap { get; set; }
 
 		[Display(Name = "Escala solo con las velas", Description = "La escala automática del gráfico se ajusta a las velas visibles: las bandas lejanas y las medias no encogen las velas (las líneas fuera de la escala se salen del panel).", Order = 17, GroupName = "7. VWAP")]
@@ -1283,9 +1586,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 		[Display(Name = "180: retroceso de la 2ª vela (fracción)", Description = "La 2ª vela cierra recuperando al menos esta fracción del rango de la 1ª. 2/3 = entrada 2/3 del manual; 1 = entrada 100 %.", Order = 16, GroupName = "3. Definiciones")]
 		public double P180Retroceso { get; set; }
 
-		[Display(Name = "180: exigir serie previa", Description = "Antes de la 1ª vela, una caída (Toro) o un rally (Oso) escalonado de las velas de \"Reversa: velas de caída / rally previas\".", Order = 17, GroupName = "3. Definiciones")]
-		public bool P180Serie { get; set; }
-
 		[Display(Name = "RBI / GBI: confirmar por cierre", Description = "Activado: la vela 3 o 4 debe cerrar más allá del extremo de la vela ignorada. Desactivado (manual): basta con que opere más allá.", Order = 19, GroupName = "3. Definiciones")]
 		public bool IgnPorCierre { get; set; }
 
@@ -1303,13 +1603,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 		[Display(Name = "RBI / GBI: exigir tendencia (20mm)", Description = "La Media 2 sube (RBI) o baja (GBI) y la vela ignorada queda sobre (bajo) ella.", Order = 23, GroupName = "3. Definiciones")]
 		public bool IgnTendencia { get; set; }
 
-		[Display(Name = "180: exigir ubicación", Description = "El extremo de las dos velas en o cerca de un ítem de ubicación (sección 5), si \"Reversa: exigir ubicación\" está activo.", Order = 18, GroupName = "3. Definiciones")]
-		public bool P180Ubicacion { get; set; }
-
-		[Range(2, 20)]
-		[Display(Name = "Reversa: velas de caída / rally previas", Description = "Velas de la caída (rally) antes de BT, TT, GBR, RBR, NRB y NB, como en el manual: la primera es el techo (piso) y cada una de las siguientes hace máximo y mínimo más bajos (más altos). 3 = techo + 2 escalones.", Order = 8, GroupName = "3. Definiciones")]
-		public int VelasTendencia { get; set; }
-
 		[Range(0.3, 1.0)]
 		[Display(Name = "BT / TT: cola mínima (fracción del rango)", Order = 9, GroupName = "3. Definiciones")]
 		public double ColaMin { get; set; }
@@ -1319,9 +1612,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 		public double ReversaMin { get; set; }
 
 		// --- 5. Ubicación (cap. 12) ---
-		[Display(Name = "Reversa: exigir ubicación", Description = "BT, TT, GBR, RBR, NRB y NB solo en o cerca de alguno de los ítems de ubicación activados abajo (reglas #1-#4 del cap. 12).", Order = 1, GroupName = "5. Ubicación")]
-		public bool UsarUbicacion { get; set; }
-
 		[Range(0.0, 5.0)]
 		[Display(Name = "Distancia al nivel (ATR 14)", Description = "Piso: el mínimo llega a esta distancia del nivel o lo cruza, y el cierre no queda más lejos que esto por debajo. Techo: el espejo.", Order = 2, GroupName = "5. Ubicación")]
 		public double DistUbicAtr { get; set; }
