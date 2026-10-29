@@ -77,6 +77,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 		// Confirmed swing structure
 		private double lastSwingHigh = double.NaN, previousSwingHigh = double.NaN, lastSwingLow = double.NaN, previousSwingLow = double.NaN;
 		private int lastSwingHighBar = -1, lastSwingLowBar = -1, structureTrend;
+		private int chochDir, chochBar = -1;
 
 		private ATR hpAtrInd, rangeAtrInd;
 		private EMA emaFast, emaSlow;
@@ -290,6 +291,11 @@ namespace NinjaTrader.NinjaScript.Indicators
 				structureTrend = 1;
 			else if (bearishChoch)
 				structureTrend = -1;
+			if (bullishChoch || bearishChoch)
+			{
+				chochDir = structureTrend;
+				chochBar = CurrentBar;
+			}
 
 			bool bullishStructureAllowed = !FilterSignalsByTrend || structureTrend == 1;
 			bool bearishStructureAllowed = !FilterSignalsByTrend || structureTrend == -1;
@@ -1591,6 +1597,93 @@ namespace NinjaTrader.NinjaScript.Indicators
 		{
 			get { Update(); return tradeSignal; }
 		}
+
+		// Active order blocks for strategies: the unmitigated blocks still tracked, per direction (1 bullish / -1 bearish), index 0 = oldest
+		public int ActiveBlockCount(int dir)
+		{
+			Update();
+			return (dir == 1 ? bullBlocks : bearBlocks).Count;
+		}
+
+		public void ActiveBlock(int dir, int index, out double top, out double bottom, out int bornBar)
+		{
+			Update();
+			OrderBlock ob = (dir == 1 ? bullBlocks : bearBlocks)[index];
+			top = ob.Top;
+			bottom = ob.Bottom;
+			bornBar = ob.BornBar;
+		}
+
+		// False once the drawing cap (Max boxes / lines / labels) deleted the block's box
+		public bool ActiveBlockDrawn(int dir, int index)
+		{
+			Update();
+			return boxes.Contains((dir == 1 ? bullBlocks : bearBlocks)[index].Bx);
+		}
+
+		// CHoCH confirmed on the current bar, with or without an order block: 1 bullish, -1 bearish, 0 none
+		public int ChochThisBar()
+		{
+			Update();
+			return chochBar == CurrentBar ? chochDir : 0;
+		}
 		#endregion
 	}
 }
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private ShortTermOrderBlockRejections[] cacheShortTermOrderBlockRejections;
+		public ShortTermOrderBlockRejections ShortTermOrderBlockRejections()
+		{
+			return ShortTermOrderBlockRejections(Input);
+		}
+
+		public ShortTermOrderBlockRejections ShortTermOrderBlockRejections(ISeries<double> input)
+		{
+			if (cacheShortTermOrderBlockRejections != null)
+				for (int idx = 0; idx < cacheShortTermOrderBlockRejections.Length; idx++)
+					if (cacheShortTermOrderBlockRejections[idx] != null &&  cacheShortTermOrderBlockRejections[idx].EqualsInput(input))
+						return cacheShortTermOrderBlockRejections[idx];
+			return CacheIndicator<ShortTermOrderBlockRejections>(new ShortTermOrderBlockRejections(), input, ref cacheShortTermOrderBlockRejections);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.ShortTermOrderBlockRejections ShortTermOrderBlockRejections()
+		{
+			return indicator.ShortTermOrderBlockRejections(Input);
+		}
+
+		public Indicators.ShortTermOrderBlockRejections ShortTermOrderBlockRejections(ISeries<double> input )
+		{
+			return indicator.ShortTermOrderBlockRejections(input);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.ShortTermOrderBlockRejections ShortTermOrderBlockRejections()
+		{
+			return indicator.ShortTermOrderBlockRejections(Input);
+		}
+
+		public Indicators.ShortTermOrderBlockRejections ShortTermOrderBlockRejections(ISeries<double> input )
+		{
+			return indicator.ShortTermOrderBlockRejections(input);
+		}
+	}
+}
+
+#endregion
